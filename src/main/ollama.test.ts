@@ -28,8 +28,28 @@ describe('getOllamaStatus', () => {
 
     await expect(getOllamaStatus(fetcher)).resolves.toEqual({
       available: false,
-      reason: "Ollama n'est pas accessible sur cette machine."
+      reason: "Le service local d'Ollama ne répond pas. Démarrez Ollama puis réessayez."
     })
+  })
+
+  it('falls back to localhost and accepts a missing version route', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(new Error('IPv4 unavailable'))
+      .mockResolvedValueOnce(response({
+        models: [{ name: 'coder:latest', size: 4_200_000_000, modified_at: '2026-01-01' }]
+      }))
+      .mockRejectedValueOnce(new Error('version unavailable'))
+
+    await expect(getOllamaStatus(fetcher)).resolves.toEqual({
+      available: true,
+      version: null,
+      models: [{ name: 'coder:latest', size: 4_200_000_000, modifiedAt: '2026-01-01' }]
+    })
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      'http://localhost:11434/api/tags',
+      expect.any(Object)
+    )
   })
 })
 

@@ -70,10 +70,16 @@ export function App(): React.JSX.Element {
   const [pullProgress, setPullProgress] = useState<ModelPullProgress | null>(null)
   const [pullError, setPullError] = useState<string | null>(null)
   const [downloadingModel, setDownloadingModel] = useState<string | null>(null)
+  const [checkingOllama, setCheckingOllama] = useState(false)
 
   const refreshStatus = useCallback(async () => {
-    setStatus('loading')
-    setStatus(await window.localAgent.getOllamaStatus())
+    setCheckingOllama(true)
+    setStatus((current) => current === null ? 'loading' : current)
+    try {
+      setStatus(await window.localAgent.getOllamaStatus())
+    } finally {
+      setCheckingOllama(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -155,19 +161,21 @@ export function App(): React.JSX.Element {
                     {downloadingModel === starterModel.id ? 'Téléchargement…' : 'Installer le modèle de démarrage'}
                   </button>
                 )}
-                <button className="secondary-button" type="button" onClick={() => void refreshStatus()}>
-                  Actualiser
+                <button className="secondary-button" type="button" disabled={checkingOllama} onClick={() => void refreshStatus()}>
+                  {checkingOllama ? 'Vérification…' : 'Actualiser'}
                 </button>
               </>
             ) : (
               <>
                 <p className="error">{status.reason}</p>
-                <p className="muted">L’installation s’ouvre sur le site officiel et reste sous votre contrôle.</p>
+                <p className="muted">
+                  S’il est déjà installé, ouvrez Ollama depuis le menu Démarrer puis vérifiez à nouveau.
+                </p>
                 <button type="button" onClick={() => void window.localAgent.openOllamaDownload()}>
                   Installer Ollama
                 </button>
-                <button className="secondary-button" type="button" onClick={() => void refreshStatus()}>
-                  J’ai terminé, vérifier
+                <button className="secondary-button" type="button" disabled={checkingOllama} onClick={() => void refreshStatus()}>
+                  {checkingOllama ? 'Vérification…' : 'J’ai terminé, vérifier'}
                 </button>
               </>
             )}

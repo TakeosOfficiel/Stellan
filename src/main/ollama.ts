@@ -45,7 +45,8 @@ const showResponseSchema = z.object({
   capabilities: z.array(z.string()).default([])
 })
 
-const OLLAMA_URL = 'http://127.0.0.1:11434'
+const OLLAMA_URLS = ['http://127.0.0.1:11434', 'http://localhost:11434'] as const
+let activeOllamaUrl: string = OLLAMA_URLS[0]
 
 export type OllamaToolCall = {
   function: {
@@ -68,7 +69,7 @@ export async function modelSupportsTools(
   model: string,
   fetcher: typeof fetch = fetch
 ): Promise<boolean> {
-  const response = await fetcher(`${OLLAMA_URL}/api/show`, {
+  const response = await fetcher(`${activeOllamaUrl}/api/show`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model }),
@@ -83,41 +84,54 @@ export async function modelSupportsTools(
 export async function getOllamaStatus(
   fetcher: typeof fetch = fetch
 ): Promise<OllamaStatus> {
-  try {
-    const options = { signal: AbortSignal.timeout(2_000) }
-    const [tagsResponse, versionResponse] = await Promise.all([
-      fetcher(`${OLLAMA_URL}/api/tags`, options),
-      fetcher(`${OLLAMA_URL}/api/version`, options)
-    ])
+  let lastStatus: number | null = null
+  let timedOut = false
 
-    if (!tagsResponse.ok) {
-      return {
-        available: false,
-        reason: `Ollama a répondu avec le statut ${tagsResponse.status}.`
+  for (const url of OLLAMA_URLS) {
+    try {
+      const options = { signal: AbortSignal.timeout(5_000) }
+      const tagsResponse = await fetcher(`${url}/api/tags`, options)
+      if (!tagsResponse.ok) {
+        lastStatus = tagsResponse.status
+        continue
       }
+
+      const tags = tagsResponseSchema.parse(await tagsResponse.json())
+      let version: string | null = null
+      try {
+        const versionResponse = await fetcher(`${url}/api/version`, options)
+        if (versionResponse.ok) {
+          const parsedVersion = versionResponseSchema.safeParse(await versionResponse.json())
+          if (parsedVersion.success) version = parsedVersion.data.version
+        }
+      } catch {
+        // Older or starting Ollama versions may expose the model list before their version route.
+      }
+
+      if (fetcher === fetch) activeOllamaUrl = url
+
+      return {
+        available: true,
+        version,
+        models: tags.models.map((model) => ({
+          name: model.name,
+          size: model.size,
+          modifiedAt: model.modified_at
+        }))
+      }
+    } catch (error) {
+      timedOut ||= error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
     }
+  }
 
-    const tags = tagsResponseSchema.parse(await tagsResponse.json())
-    const version = versionResponse.ok
-      ? versionResponseSchema.safeParse(await versionResponse.json())
-      : null
-
-    return {
-      available: true,
-      version: version?.success ? version.data.version : null,
-      models: tags.models.map((model) => ({
-        name: model.name,
-        size: model.size,
-        modifiedAt: model.modified_at
-      }))
-    }
-  } catch (error) {
-    const reason =
-      error instanceof Error && error.name === 'TimeoutError'
-        ? "Ollama n'a pas répondu dans le délai prévu."
-        : "Ollama n'est pas accessible sur cette machine."
-
-    return { available: false, reason }
+  if (lastStatus !== null) {
+    return { available: false, reason: `Ollama a répondu avec le statut ${lastStatus}.` }
+  }
+  return {
+    available: false,
+    reason: timedOut
+      ? "Ollama n'a pas répondu dans le délai prévu. Vérifiez que l'application Ollama est démarrée."
+      : "Le service local d'Ollama ne répond pas. Démarrez Ollama puis réessayez."
   }
 }
 
@@ -127,7 +141,7 @@ export async function pullOllamaModel(
   fetcher: typeof fetch = fetch
 ): Promise<ModelPullResult> {
   try {
-    const response = await fetcher(`${OLLAMA_URL}/api/pull`, {
+    const response = await fetcher(`${activeOllamaUrl}/api/pull`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model, stream: true })
@@ -188,7 +202,7 @@ export async function streamOllamaChat(
   fetcher: typeof fetch = fetch,
   tools?: readonly unknown[]
 ): Promise<OllamaChatResult> {
-  const response = await fetcher(`${OLLAMA_URL}/api/chat`, {
+  const response = await fetcher(`${activeOllamaUrl}/api/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model, messages, stream: true, ...(tools ? { tools } : {}) }),
