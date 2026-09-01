@@ -37,8 +37,33 @@ function compatibilityLabel(model: CatalogModel): string {
   return 'Non disponible'
 }
 
+type AppView = 'agent' | 'setup'
+
+function TitleBar({ view, onViewChange }: {
+  view: AppView
+  onViewChange: (view: AppView) => void
+}): React.JSX.Element {
+  return (
+    <header className="titlebar" onDoubleClick={() => void window.localAgent.toggleMaximizeWindow()}>
+      <div className="titlebar-brand">
+        <span aria-hidden="true">◒</span>
+        <strong>Local Agent</strong>
+      </div>
+      <nav className="titlebar-nav" aria-label="Navigation principale" onDoubleClick={(event) => event.stopPropagation()}>
+        <button className={view === 'agent' ? 'active' : ''} type="button" onClick={() => onViewChange('agent')}>Agent</button>
+        <button className={view === 'setup' ? 'active' : ''} type="button" onClick={() => onViewChange('setup')}>Modèles</button>
+      </nav>
+      <div className="window-controls" onDoubleClick={(event) => event.stopPropagation()}>
+        <button type="button" aria-label="Réduire" onClick={() => void window.localAgent.minimizeWindow()}>—</button>
+        <button type="button" aria-label="Agrandir" onClick={() => void window.localAgent.toggleMaximizeWindow()}>□</button>
+        <button className="close" type="button" aria-label="Fermer" onClick={() => void window.localAgent.closeWindow()}>×</button>
+      </div>
+    </header>
+  )
+}
+
 export function App(): React.JSX.Element {
-  const [view, setView] = useState<'agent' | 'setup'>('agent')
+  const [view, setView] = useState<AppView>('agent')
   const [status, setStatus] = useState<LoadState>(null)
   const [setup, setSetup] = useState<SetupInfo | null>(null)
   const [category, setCategory] = useState<ModelCategory>('code')
@@ -93,23 +118,12 @@ export function App(): React.JSX.Element {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div className="brand-mark" aria-hidden="true">L</div>
-        <div>
-          <p className="eyebrow">LOCAL DEVELOPMENT AGENT</p>
-          <h1>Local Agent</h1>
-        </div>
-        <nav className="topnav" aria-label="Navigation principale">
-          <button className={view === 'agent' ? 'active' : ''} type="button" onClick={() => setView('agent')}>Agent</button>
-          <button className={view === 'setup' ? 'active' : ''} type="button" onClick={() => setView('setup')}>Modèles</button>
-        </nav>
-        <span className="platform-pill">Windows + Linux</span>
-      </header>
+      <TitleBar view={view} onViewChange={setView} />
 
       {view === 'agent' ? (
         <WorkspaceView status={status} onOpenSetup={() => setView('setup')} />
       ) : (
-      <>
+      <div className="setup-view">
       <section className="intro">
         <div>
           <p className="eyebrow">CONFIGURATION LOCALE</p>
@@ -253,7 +267,7 @@ export function App(): React.JSX.Element {
           </p>
         )}
       </section>
-      </>
+      </div>
       )}
     </main>
   )

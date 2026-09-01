@@ -119,6 +119,9 @@ export type OllamaStatus =
     }
 
 export type LocalAgentApi = {
+  minimizeWindow: () => Promise<void>
+  toggleMaximizeWindow: () => Promise<void>
+  closeWindow: () => Promise<void>
   getOllamaStatus: () => Promise<OllamaStatus>
   getSetupInfo: () => Promise<SetupInfo>
   openOllamaDownload: () => Promise<void>

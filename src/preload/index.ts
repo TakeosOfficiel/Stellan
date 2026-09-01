@@ -6,6 +6,9 @@ import type {
 } from '../shared/contracts'
 
 const api: LocalAgentApi = {
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
   getOllamaStatus: () => ipcRenderer.invoke('ollama:get-status'),
   getSetupInfo: () => ipcRenderer.invoke('setup:get-info'),
   openOllamaDownload: () => ipcRenderer.invoke('ollama:open-download'),

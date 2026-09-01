@@ -1,5 +1,5 @@
 import { basename, join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
 import { runCodingAgent } from './agent'
 import { getHardwareInfo } from './hardware'
@@ -23,6 +23,9 @@ const THREADS_CREATE_CHANNEL = 'threads:create'
 const THREADS_MESSAGES_CHANNEL = 'threads:messages'
 const THREADS_DELETE_CHANNEL = 'threads:delete'
 const THREADS_REVIEW_PROJECT_CHANNEL = 'threads:review-project'
+const WINDOW_MINIMIZE_CHANNEL = 'window:minimize'
+const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'window:toggle-maximize'
+const WINDOW_CLOSE_CHANNEL = 'window:close'
 const OLLAMA_DOWNLOAD_URL = 'https://ollama.com/download'
 
 const modelIdSchema = z.string().min(1).max(100).refine(isCatalogModel)
@@ -77,6 +80,8 @@ function createWindow(): void {
     minWidth: 880,
     minHeight: 600,
     backgroundColor: '#0c0d10',
+    frame: false,
+    autoHideMenuBar: true,
     show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -108,7 +113,15 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null)
   threadStore = new ThreadStore(join(app.getPath('userData'), 'local-agent.sqlite'))
+  handle(WINDOW_MINIMIZE_CHANNEL, () => mainWindow?.minimize())
+  handle(WINDOW_TOGGLE_MAXIMIZE_CHANNEL, () => {
+    if (!mainWindow) return
+    if (mainWindow.isMaximized()) mainWindow.unmaximize()
+    else mainWindow.maximize()
+  })
+  handle(WINDOW_CLOSE_CHANNEL, () => mainWindow?.close())
   handle(OLLAMA_STATUS_CHANNEL, () => getOllamaStatus())
   handle(SETUP_INFO_CHANNEL, async () => {
     const hardware = await getHardwareInfo()
@@ -379,6 +392,9 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', () => {
+  ipcMain.removeHandler(WINDOW_MINIMIZE_CHANNEL)
+  ipcMain.removeHandler(WINDOW_TOGGLE_MAXIMIZE_CHANNEL)
+  ipcMain.removeHandler(WINDOW_CLOSE_CHANNEL)
   ipcMain.removeHandler(OLLAMA_STATUS_CHANNEL)
   ipcMain.removeHandler(SETUP_INFO_CHANNEL)
   ipcMain.removeHandler(OLLAMA_DOWNLOAD_CHANNEL)

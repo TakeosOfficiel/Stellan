@@ -2,6 +2,15 @@ import os from 'node:os'
 import systeminformation from 'systeminformation'
 import type { HardwareInfo } from '../shared/contracts'
 
+type GraphicsController = {
+  model?: string | null
+  vendor?: string | null
+  vram?: number | null
+}
+
+const VIRTUAL_ADAPTER_PATTERN = /parsec|virtual|remote display|indirect display|microsoft basic|vmware|virtualbox|citrix|hyper-v/i
+const DISCRETE_GPU_PATTERN = /nvidia|geforce|quadro|rtx|gtx|amd|radeon|arc\b/i
+
 function getPlatform(): HardwareInfo['platform'] {
   if (process.platform === 'win32') return 'windows'
   if (process.platform === 'linux') return 'linux'
@@ -9,18 +18,30 @@ function getPlatform(): HardwareInfo['platform'] {
   return 'other'
 }
 
+export function selectGpus(controllers: GraphicsController[]): HardwareInfo['gpus'] {
+  return controllers
+    .map((controller) => {
+      const model = controller.model || controller.vendor || 'GPU inconnu'
+      const vramBytes = typeof controller.vram === 'number' && controller.vram > 0
+        ? controller.vram * 1_000_000
+        : null
+      return { model, vramBytes }
+    })
+    .filter((gpu) => !VIRTUAL_ADAPTER_PATTERN.test(gpu.model))
+    .sort((left, right) => {
+      const leftDiscrete = DISCRETE_GPU_PATTERN.test(left.model) ? 1 : 0
+      const rightDiscrete = DISCRETE_GPU_PATTERN.test(right.model) ? 1 : 0
+      if (leftDiscrete !== rightDiscrete) return rightDiscrete - leftDiscrete
+      return (right.vramBytes ?? 0) - (left.vramBytes ?? 0)
+    })
+}
+
 export async function getHardwareInfo(): Promise<HardwareInfo> {
   let gpus: HardwareInfo['gpus'] = []
 
   try {
     const graphics = await systeminformation.graphics()
-    gpus = graphics.controllers.map((controller) => ({
-      model: controller.model || controller.vendor || 'GPU inconnu',
-      vramBytes:
-        typeof controller.vram === 'number' && controller.vram > 0
-          ? controller.vram * 1_000_000
-          : null
-    }))
+    gpus = selectGpus(graphics.controllers)
   } catch {
     // GPU detection is best-effort; RAM recommendations remain available.
   }
