@@ -10,6 +10,13 @@
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button { font: inherit; }
 
+.startup-error {
+  display: grid; place-content: center; min-height: 100vh; padding: 30px;
+  background: #0c0d10; text-align: center;
+}
+.startup-error h1 { margin: 0 0 10px; font-size: 26px; }
+.startup-error p { margin: 0; color: #a7abb5; }
+
 .app-shell {
   min-height: 100vh;
   padding: 28px clamp(22px, 5vw, 76px) 70px;
