@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+echo "[setup] Checking the Node.js toolchain"
+if ! command -v node >/dev/null 2>&1; then
+  echo "[setup] Node.js is required but was not found in the orb image." >&2
+  exit 1
+fi
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  if ! command -v corepack >/dev/null 2>&1; then
+    echo "[setup] Neither pnpm nor corepack is available." >&2
+    exit 1
+  fi
+
+  corepack enable
+  corepack prepare pnpm@12.0.0 --activate
+fi
+
+if [[ "$(pnpm --version)" != 12.* ]]; then
+  echo "[setup] pnpm 12 is required by package.json." >&2
+  exit 1
+fi
+
+if ! command -v unzip >/dev/null 2>&1; then
+  echo "[setup] Installing unzip for Electron"
+  sudo apt-get update
+  sudo apt-get install -y unzip
+fi
+
+echo "[setup] Installing locked dependencies"
+pnpm install --frozen-lockfile
+
+echo "[setup] Verifying the Electron installation"
+node scripts/ensure-electron.cjs
+node -e "require('electron')" >/dev/null
+
+echo "[setup] Local Agent is ready"

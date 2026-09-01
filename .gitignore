@@ -4,3 +4,4 @@ out/
 coverage/
 *.log
 .DS_Store
+.amp/portals/*
