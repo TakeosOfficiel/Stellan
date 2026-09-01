@@ -1,0 +1,218 @@
+import { z } from 'zod'
+import type { ChatMessage } from '../shared/contracts'
+import {
+  streamOllamaChat,
+  type OllamaMessage,
+  type OllamaToolCall
+} from './ollama'
+import { ProjectTools } from './project-tools'
+
+const TOOL_DEFINITIONS = [
+  {
+    type: 'function',
+    function: {
+      name: 'list_files',
+      description: 'Liste les fichiers du projet ou d’un sous-dossier.',
+      parameters: { type: 'object', properties: { path: { type: 'string' } } }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Lit un fichier texte du projet.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_files',
+      description: 'Recherche du texte dans le projet.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          path: { type: 'string' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Écrit le contenu complet d’un fichier du projet. Demande une autorisation.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string' }
+        },
+        required: ['path', 'content']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: 'Exécute un programme sans shell dans le projet. Demande une autorisation.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          args: { type: 'array', items: { type: 'string' } }
+        },
+        required: ['command']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git_status',
+      description: 'Retourne le statut Git court du projet.',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git_diff',
+      description: 'Retourne le diff Git actuel.',
+      parameters: { type: 'object', properties: {} }
+    }
+  }
+] as const
+
+const pathSchema = z.object({ path: z.string().min(1).max(2_000) })
+const optionalPathSchema = z.object({ path: z.string().min(1).max(2_000).optional() })
+const searchSchema = z.object({
+  query: z.string().min(1).max(1_000),
+  path: z.string().min(1).max(2_000).optional()
+})
+const writeSchema = z.object({
+  path: z.string().min(1).max(2_000),
+  content: z.string().max(2_000_000)
+})
+const commandSchema = z.object({
+  command: z.string().min(1).max(500),
+  args: z.array(z.string().max(10_000)).max(100).default([])
+})
+
+type ToolStatus = 'running' | 'done' | 'denied' | 'error'
+
+export type CodingAgentOptions = {
+  model: string
+  messages: ChatMessage[]
+  project: ProjectTools
+  signal: AbortSignal
+  onContent: (content: string) => void
+  onTool: (tool: string, status: ToolStatus) => void
+  authorize: (tool: string, summary: string) => Promise<boolean>
+}
+
+function compactResult(value: unknown): string {
+  const result = typeof value === 'string' ? value : JSON.stringify(value)
+  return result.length > 30_000 ? `${result.slice(0, 30_000)}\n… résultat tronqué` : result
+}
+
+async function executeTool(
+  call: OllamaToolCall,
+  tools: ProjectTools,
+  authorize: CodingAgentOptions['authorize']
+): Promise<{ content: string; status: ToolStatus }> {
+  const name = call.function.name
+  const input = call.function.arguments
+
+  try {
+    if (name === 'list_files') {
+      const { path } = optionalPathSchema.parse(input)
+      return { content: compactResult(await tools.listFiles(path)), status: 'done' }
+    }
+    if (name === 'read_file') {
+      const { path } = pathSchema.parse(input)
+      return { content: compactResult(await tools.readFile(path)), status: 'done' }
+    }
+    if (name === 'search_files') {
+      const { query, path } = searchSchema.parse(input)
+      return { content: compactResult(await tools.search(query, path)), status: 'done' }
+    }
+    if (name === 'git_status') {
+      return { content: compactResult(await tools.gitStatus()), status: 'done' }
+    }
+    if (name === 'git_diff') {
+      return { content: compactResult(await tools.gitDiff()), status: 'done' }
+    }
+    if (name === 'write_file') {
+      const { path, content } = writeSchema.parse(input)
+      if (!await authorize(name, `Écrire ${path}`)) {
+        return { content: 'L’utilisateur a refusé cette écriture.', status: 'denied' }
+      }
+      await tools.writeFile(path, content)
+      return { content: `Fichier ${path} écrit.`, status: 'done' }
+    }
+    if (name === 'run_command') {
+      const { command, args } = commandSchema.parse(input)
+      if (!await authorize(name, [command, ...args].join(' '))) {
+        return { content: 'L’utilisateur a refusé cette commande.', status: 'denied' }
+      }
+      return { content: compactResult(await tools.runCommand(command, args, { timeoutMs: 120_000 })), status: 'done' }
+    }
+    return { content: `Outil inconnu : ${name}`, status: 'error' }
+  } catch (error) {
+    return {
+      content: error instanceof Error ? error.message : 'L’outil a échoué.',
+      status: 'error'
+    }
+  }
+}
+
+export async function runCodingAgent(options: CodingAgentOptions): Promise<void> {
+  const conversation: OllamaMessage[] = [
+    {
+      role: 'system',
+      content: 'Tu es un agent de développement local. Inspecte le projet avec les outils avant de modifier. Utilise des chemins relatifs. Lance les tests pertinents après une modification et termine par un résumé concis.'
+    },
+    ...options.messages.filter((message) => message.role !== 'system')
+  ]
+
+  for (let step = 0; step < 12; step += 1) {
+    if (options.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    const result = await streamOllamaChat(
+      options.model,
+      conversation,
+      options.onContent,
+      options.signal,
+      fetch,
+      TOOL_DEFINITIONS
+    )
+
+    if (result.toolCalls.length === 0) return
+    conversation.push({
+      role: 'assistant',
+      content: result.content,
+      tool_calls: result.toolCalls
+    })
+
+    for (const call of result.toolCalls) {
+      const tool = call.function.name
+      options.onTool(tool, 'running')
+      const toolResult = await executeTool(call, options.project, options.authorize)
+      options.onTool(tool, toolResult.status)
+      conversation.push({
+        role: 'tool',
+        tool_name: tool,
+        content: toolResult.content
+      })
+    }
+  }
+
+  throw new Error('L’agent a atteint sa limite de 12 étapes.')
+}

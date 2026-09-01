@@ -6,6 +6,7 @@ import type {
   OllamaStatus,
   SetupInfo
 } from '../../shared/contracts'
+import { WorkspaceView } from './WorkspaceView'
 
 type LoadState = OllamaStatus | null | 'loading'
 
@@ -37,6 +38,7 @@ function compatibilityLabel(model: CatalogModel): string {
 }
 
 export function App(): React.JSX.Element {
+  const [view, setView] = useState<'agent' | 'setup'>('agent')
   const [status, setStatus] = useState<LoadState>(null)
   const [setup, setSetup] = useState<SetupInfo | null>(null)
   const [category, setCategory] = useState<ModelCategory>('code')
@@ -96,9 +98,17 @@ export function App(): React.JSX.Element {
           <p className="eyebrow">LOCAL DEVELOPMENT AGENT</p>
           <h1>Local Agent</h1>
         </div>
+        <nav className="topnav" aria-label="Navigation principale">
+          <button className={view === 'agent' ? 'active' : ''} type="button" onClick={() => setView('agent')}>Agent</button>
+          <button className={view === 'setup' ? 'active' : ''} type="button" onClick={() => setView('setup')}>Modèles</button>
+        </nav>
         <span className="platform-pill">Windows + Linux</span>
       </header>
 
+      {view === 'agent' ? (
+        <WorkspaceView status={status} onOpenSetup={() => setView('setup')} />
+      ) : (
+      <>
       <section className="intro">
         <div>
           <p className="eyebrow">CONFIGURATION LOCALE</p>
@@ -233,6 +243,8 @@ export function App(): React.JSX.Element {
           </p>
         )}
       </section>
+      </>
+      )}
     </main>
   )
 }

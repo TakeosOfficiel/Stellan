@@ -1,0 +1,229 @@
+import { spawn } from 'node:child_process'
+import { mkdir, stat } from 'node:fs/promises'
+import path from 'node:path'
+
+export type ContainerRuntime = 'docker' | 'podman'
+
+export type CommandResult = {
+  exitCode: number | null
+  signal: NodeJS.Signals | null
+  stdout: string
+  stderr: string
+  timedOut: boolean
+}
+
+export type CommandOptions = {
+  cwd?: string
+  timeoutMs?: number
+}
+
+export type CommandRunner = (
+  executable: string,
+  args: readonly string[],
+  options?: CommandOptions
+) => Promise<CommandResult>
+
+export type ContainerExecutionOptions = {
+  runtime: ContainerRuntime
+  threadId: string
+  projectPath: string
+  image: string
+  command: readonly string[]
+  cpuLimit: number
+  memoryLimit: string
+  network?: string
+  timeoutMs?: number
+}
+
+const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
+const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
+const IMAGE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/
+const NETWORK_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
+const MEMORY_PATTERN = /^[1-9][0-9]*(?:[bkmgBKMG])?$/
+
+export const runCommand: CommandRunner = (executable, args, options = {}) =>
+  new Promise((resolve) => {
+    const child = spawn(executable, [...args], {
+      cwd: options.cwd,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+    let settled = false
+
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => { stdout += chunk })
+    child.stderr.on('data', (chunk: string) => { stderr += chunk })
+
+    const timer = options.timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true
+          child.kill('SIGKILL')
+        }, options.timeoutMs)
+
+    const finish = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve({ exitCode, signal, stdout, stderr, timedOut })
+    }
+
+    child.once('error', (error) => {
+      stderr += `${stderr ? '\n' : ''}${error.message}`
+      finish(null, null)
+    })
+    child.once('close', finish)
+  })
+
+function validateIdentifier(value: string, label: string): void {
+  if (!IDENTIFIER_PATTERN.test(value)) {
+    throw new Error(`${label} must contain only letters, numbers, underscores, and hyphens`)
+  }
+}
+
+function validateAbsolutePath(value: string, label: string): string {
+  if (!path.isAbsolute(value) || value.includes('\0') || value.includes(',')) {
+    throw new Error(`${label} must be an absolute path without NUL bytes or commas`)
+  }
+  return path.resolve(value)
+}
+
+async function requireDirectory(value: string, label: string): Promise<void> {
+  let details
+  try {
+    details = await stat(value)
+  } catch {
+    throw new Error(`${label} does not exist`)
+  }
+  if (!details.isDirectory()) throw new Error(`${label} must be a directory`)
+}
+
+function requireSuccess(result: CommandResult, operation: string): void {
+  if (result.exitCode !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || 'unknown error'
+    throw new Error(`${operation} failed: ${detail}`)
+  }
+}
+
+export async function detectContainerRuntime(
+  runner: CommandRunner = runCommand
+): Promise<ContainerRuntime | null> {
+  for (const runtime of ['docker', 'podman'] as const) {
+    const result = await runner(runtime, ['info', '--format', '{{.Version}}'], {
+      timeoutMs: 5_000
+    })
+    if (result.exitCode === 0 && !result.timedOut) return runtime
+  }
+  return null
+}
+
+export async function createThreadWorktree(
+  repositoryPath: string,
+  workspaceRoot: string,
+  threadId: string,
+  ref = 'HEAD',
+  runner: CommandRunner = runCommand
+): Promise<string> {
+  const repository = validateAbsolutePath(repositoryPath, 'repositoryPath')
+  const root = validateAbsolutePath(workspaceRoot, 'workspaceRoot')
+  validateIdentifier(threadId, 'threadId')
+  if (
+    !REF_PATTERN.test(ref) ||
+    ref.includes('..') ||
+    ref.includes('//') ||
+    ref.includes('@{') ||
+    ref.endsWith('/') ||
+    ref.endsWith('.')
+  ) {
+    throw new Error('ref is not a safe Git reference')
+  }
+
+  await requireDirectory(repository, 'repositoryPath')
+  await mkdir(root, { recursive: true })
+  const worktreePath = path.join(root, threadId)
+  const result = await runner('git', [
+    '-C', repository,
+    'worktree', 'add', '--detach', worktreePath, ref
+  ])
+  requireSuccess(result, 'Git worktree creation')
+  return worktreePath
+}
+
+export async function removeThreadWorktree(
+  repositoryPath: string,
+  workspaceRoot: string,
+  threadId: string,
+  runner: CommandRunner = runCommand
+): Promise<void> {
+  const repository = validateAbsolutePath(repositoryPath, 'repositoryPath')
+  const root = validateAbsolutePath(workspaceRoot, 'workspaceRoot')
+  validateIdentifier(threadId, 'threadId')
+  await requireDirectory(repository, 'repositoryPath')
+
+  const worktreePath = path.join(root, threadId)
+  const removeResult = await runner('git', [
+    '-C', repository,
+    'worktree', 'remove', '--force', worktreePath
+  ])
+  requireSuccess(removeResult, 'Git worktree removal')
+
+  const pruneResult = await runner('git', ['-C', repository, 'worktree', 'prune'])
+  requireSuccess(pruneResult, 'Git worktree pruning')
+}
+
+export async function executeInContainer(
+  options: ContainerExecutionOptions,
+  runner: CommandRunner = runCommand
+): Promise<CommandResult> {
+  validateIdentifier(options.threadId, 'threadId')
+  const projectPath = validateAbsolutePath(options.projectPath, 'projectPath')
+  await requireDirectory(projectPath, 'projectPath')
+
+  if (!IMAGE_PATTERN.test(options.image)) throw new Error('image is not a valid container image')
+  if (!Number.isFinite(options.cpuLimit) || options.cpuLimit <= 0) {
+    throw new Error('cpuLimit must be a positive number')
+  }
+  if (!MEMORY_PATTERN.test(options.memoryLimit)) {
+    throw new Error('memoryLimit must be a positive integer with an optional b, k, m, or g suffix')
+  }
+  if (options.command.length === 0 || options.command.some((part) => part.includes('\0'))) {
+    throw new Error('command must contain at least one argument and no NUL bytes')
+  }
+  if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
+    throw new Error('timeoutMs must be a positive number')
+  }
+
+  const network = options.network ?? 'none'
+  if (!NETWORK_PATTERN.test(network)) throw new Error('network is not a valid container network')
+
+  const containerName = `local-agent-${options.threadId}`
+  const args = [
+    'run', '--rm',
+    '--name', containerName,
+    '--cpus', String(options.cpuLimit),
+    '--memory', options.memoryLimit,
+    '--network', network,
+    '--read-only',
+    '--security-opt', 'no-new-privileges',
+    '--cap-drop', 'ALL',
+    '--pids-limit', '256',
+    '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
+    '--mount', `type=bind,source=${projectPath},target=/workspace`,
+    '--workdir', '/workspace',
+    '--', options.image,
+    ...options.command
+  ]
+
+  try {
+    return await runner(options.runtime, args, { timeoutMs: options.timeoutMs })
+  } finally {
+    await runner(
+      options.runtime,
+      ['rm', '--force', containerName],
+      { timeoutMs: 10_000 }
+    )
+  }
+}

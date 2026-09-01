@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { LocalAgentApi, ModelPullProgress } from '../shared/contracts'
+import type {
+  ChatEvent,
+  LocalAgentApi,
+  ModelPullProgress
+} from '../shared/contracts'
 
 const api: LocalAgentApi = {
   getOllamaStatus: () => ipcRenderer.invoke('ollama:get-status'),
@@ -12,7 +16,21 @@ const api: LocalAgentApi = {
     }
     ipcRenderer.on('ollama:pull-progress', handler)
     return () => ipcRenderer.removeListener('ollama:pull-progress', handler)
-  }
+  },
+  selectProject: () => ipcRenderer.invoke('project:select'),
+  startChat: (request) => ipcRenderer.invoke('chat:start', request),
+  cancelChat: (requestId) => ipcRenderer.invoke('chat:cancel', requestId),
+  onChatEvent: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, chatEvent: ChatEvent): void => {
+      listener(chatEvent)
+    }
+    ipcRenderer.on('chat:event', handler)
+    return () => ipcRenderer.removeListener('chat:event', handler)
+  },
+  listThreads: () => ipcRenderer.invoke('threads:list'),
+  createThread: (request) => ipcRenderer.invoke('threads:create', request),
+  loadThreadMessages: (threadId) => ipcRenderer.invoke('threads:messages', threadId),
+  deleteThread: (threadId) => ipcRenderer.invoke('threads:delete', threadId)
 }
 
 contextBridge.exposeInMainWorld('localAgent', api)

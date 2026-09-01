@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { getOllamaStatus, pullOllamaModel } from './ollama'
+import { getOllamaStatus, pullOllamaModel, streamOllamaChat } from './ollama'
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -56,5 +56,41 @@ describe('pullOllamaModel', () => {
       total: 100,
       percent: 50
     })
+  })
+})
+
+describe('streamOllamaChat', () => {
+  it('streams content even when JSON lines span network chunks', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"message":{"content":"Bon'))
+        controller.enqueue(new TextEncoder().encode('jour "}}\n{"message":{"content":"!"},"done":true}\n'))
+        controller.close()
+      }
+    })
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(stream, { status: 200 }))
+    const onContent = vi.fn()
+
+    await streamOllamaChat(
+      'qwen3.5:4b',
+      [{ role: 'user', content: 'Bonjour' }],
+      onContent,
+      undefined,
+      fetcher
+    )
+
+    expect(onContent.mock.calls.flat()).toEqual(['Bonjour ', '!'])
+  })
+
+  it('rejects an unavailable Ollama response', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 503 }))
+
+    await expect(streamOllamaChat(
+      'qwen3.5:4b',
+      [{ role: 'user', content: 'Bonjour' }],
+      vi.fn(),
+      undefined,
+      fetcher
+    )).rejects.toThrow('statut 503')
   })
 })

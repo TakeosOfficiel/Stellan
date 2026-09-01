@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type {
+  ChatMessage,
   ModelPullProgress,
   ModelPullResult,
   OllamaStatus
@@ -26,7 +27,38 @@ const pullProgressSchema = z.object({
   error: z.string().optional()
 })
 
+const chatChunkSchema = z.object({
+  message: z.object({
+    content: z.string().optional(),
+    tool_calls: z.array(z.object({
+      function: z.object({
+        name: z.string(),
+        arguments: z.record(z.string(), z.unknown())
+      })
+    })).optional()
+  }).optional(),
+  done: z.boolean().optional(),
+  error: z.string().optional()
+})
+
 const OLLAMA_URL = 'http://127.0.0.1:11434'
+
+export type OllamaToolCall = {
+  function: {
+    name: string
+    arguments: Record<string, unknown>
+  }
+}
+
+export type OllamaMessage = ChatMessage & {
+  tool_calls?: OllamaToolCall[]
+  tool_name?: string
+}
+
+export type OllamaChatResult = {
+  content: string
+  toolCalls: OllamaToolCall[]
+}
 
 export async function getOllamaStatus(
   fetcher: typeof fetch = fetch
@@ -126,4 +158,52 @@ export async function pullOllamaModel(
       reason: "Le téléchargement a échoué. Vérifiez qu'Ollama fonctionne et que le réseau est disponible."
     }
   }
+}
+
+export async function streamOllamaChat(
+  model: string,
+  messages: OllamaMessage[],
+  onContent: (content: string) => void,
+  signal?: AbortSignal,
+  fetcher: typeof fetch = fetch,
+  tools?: readonly unknown[]
+): Promise<OllamaChatResult> {
+  const response = await fetcher(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, messages, stream: true, ...(tools ? { tools } : {}) }),
+    signal
+  })
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Ollama n'a pas pu démarrer la réponse (statut ${response.status}).`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  const toolCalls: OllamaToolCall[] = []
+
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const lines = buffer.split('\n')
+    buffer = done ? '' : (lines.pop() ?? '')
+
+    for (const line of lines) {
+      if (!line.trim()) continue
+      const chunk = chatChunkSchema.parse(JSON.parse(line))
+      if (chunk.error) throw new Error(chunk.error)
+      if (chunk.message?.content) {
+        content += chunk.message.content
+        onContent(chunk.message.content)
+      }
+      if (chunk.message?.tool_calls) toolCalls.push(...chunk.message.tool_calls)
+    }
+
+    if (done) break
+  }
+
+  return { content, toolCalls }
 }

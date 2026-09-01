@@ -50,6 +50,56 @@ export type ModelPullResult =
   | { success: true }
   | { success: false; reason: string }
 
+export type ChatRole = 'system' | 'user' | 'assistant' | 'tool'
+
+export type ChatMessage = {
+  role: ChatRole
+  content: string
+}
+
+export type ChatRequest = {
+  requestId: string
+  threadId: string | null
+  model: string
+  projectPath: string | null
+  messages: ChatMessage[]
+}
+
+export type ChatEvent =
+  | { requestId: string; type: 'content'; content: string }
+  | { requestId: string; type: 'tool'; tool: string; status: 'running' | 'done' | 'denied' | 'error' }
+  | { requestId: string; type: 'done' }
+  | { requestId: string; type: 'error'; reason: string }
+
+export type ProjectSelection = {
+  path: string
+  name: string
+}
+
+export type StoredThread = {
+  id: string
+  title: string
+  projectPath: string | null
+  workspacePath: string | null
+  model: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type StoredMessage = {
+  id: string
+  threadId: string
+  role: ChatRole
+  content: string
+  createdAt: string
+}
+
+export type CreateThreadRequest = {
+  title: string
+  projectPath: string | null
+  model: string | null
+}
+
 export type OllamaStatus =
   | {
       available: true
@@ -67,4 +117,12 @@ export type LocalAgentApi = {
   openOllamaDownload: () => Promise<void>
   pullModel: (model: string) => Promise<ModelPullResult>
   onModelPullProgress: (listener: (progress: ModelPullProgress) => void) => () => void
+  selectProject: () => Promise<ProjectSelection | null>
+  startChat: (request: ChatRequest) => Promise<void>
+  cancelChat: (requestId: string) => Promise<void>
+  onChatEvent: (listener: (event: ChatEvent) => void) => () => void
+  listThreads: () => Promise<StoredThread[]>
+  createThread: (request: CreateThreadRequest) => Promise<StoredThread>
+  loadThreadMessages: (threadId: string) => Promise<StoredMessage[]>
+  deleteThread: (threadId: string) => Promise<boolean>
 }
