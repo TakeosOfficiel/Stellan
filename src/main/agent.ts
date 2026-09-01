@@ -108,6 +108,8 @@ const commandSchema = z.object({
 
 type ToolStatus = 'running' | 'done' | 'denied' | 'error'
 
+const MAX_CONVERSATION_CHARACTERS = 60_000
+
 export type CodingAgentOptions = {
   model: string
   messages: ChatMessage[]
@@ -120,13 +122,37 @@ export type CodingAgentOptions = {
 
 function compactResult(value: unknown): string {
   const result = typeof value === 'string' ? value : JSON.stringify(value)
-  return result.length > 30_000 ? `${result.slice(0, 30_000)}\n… résultat tronqué` : result
+  return result.length > 20_000 ? `${result.slice(0, 20_000)}\n… résultat tronqué` : result
+}
+
+function compactConversation(messages: OllamaMessage[]): OllamaMessage[] {
+  const system = messages[0]?.role === 'system' ? messages[0] : undefined
+  const groups: OllamaMessage[][] = []
+
+  for (const message of messages.slice(system ? 1 : 0)) {
+    const current = groups.at(-1)
+    if (message.role === 'tool' && current?.[0]?.tool_calls?.length) current.push(message)
+    else groups.push([message])
+  }
+
+  const selected: OllamaMessage[][] = []
+  let characters = system?.content.length ?? 0
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index] ?? []
+    const groupCharacters = group.reduce((total, message) => total + message.content.length, 0)
+    if (selected.length > 0 && characters + groupCharacters > MAX_CONVERSATION_CHARACTERS) break
+    selected.unshift(group)
+    characters += groupCharacters
+  }
+
+  return [...(system ? [system] : []), ...selected.flat()]
 }
 
 async function executeTool(
   call: OllamaToolCall,
   tools: ProjectTools,
-  authorize: CodingAgentOptions['authorize']
+  authorize: CodingAgentOptions['authorize'],
+  signal: AbortSignal
 ): Promise<{ content: string; status: ToolStatus }> {
   const name = call.function.name
   const input = call.function.arguments
@@ -155,6 +181,7 @@ async function executeTool(
       if (!await authorize(name, `Écrire ${path}`)) {
         return { content: 'L’utilisateur a refusé cette écriture.', status: 'denied' }
       }
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       await tools.writeFile(path, content)
       return { content: `Fichier ${path} écrit.`, status: 'done' }
     }
@@ -163,10 +190,17 @@ async function executeTool(
       if (!await authorize(name, [command, ...args].join(' '))) {
         return { content: 'L’utilisateur a refusé cette commande.', status: 'denied' }
       }
-      return { content: compactResult(await tools.runCommand(command, args, { timeoutMs: 120_000 })), status: 'done' }
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+      const result = await tools.runCommand(command, args, {
+        timeoutMs: 120_000,
+        signal
+      })
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+      return { content: compactResult(result), status: 'done' }
     }
     return { content: `Outil inconnu : ${name}`, status: 'error' }
   } catch (error) {
+    if (signal.aborted) throw error
     return {
       content: error instanceof Error ? error.message : 'L’outil a échoué.',
       status: 'error'
@@ -187,7 +221,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     if (options.signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const result = await streamOllamaChat(
       options.model,
-      conversation,
+      compactConversation(conversation),
       options.onContent,
       options.signal,
       fetch,
@@ -204,7 +238,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     for (const call of result.toolCalls) {
       const tool = call.function.name
       options.onTool(tool, 'running')
-      const toolResult = await executeTool(call, options.project, options.authorize)
+      const toolResult = await executeTool(call, options.project, options.authorize, options.signal)
       options.onTool(tool, toolResult.status)
       conversation.push({
         role: 'tool',

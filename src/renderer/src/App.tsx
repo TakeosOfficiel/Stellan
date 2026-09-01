@@ -72,6 +72,7 @@ export function App(): React.JSX.Element {
 
   const isLoading = status === null || status === 'loading'
   const canDownload = status !== null && status !== 'loading' && status.available
+  const starterModel = setup?.models.find((model) => model.id === 'qwen3.5:4b')
 
   async function downloadModel(model: CatalogModel): Promise<void> {
     setPullError(null)
@@ -131,6 +132,15 @@ export function App(): React.JSX.Element {
               <>
                 <p className="success">Ollama {status.version ? `v${status.version}` : ''} est prêt.</p>
                 <p className="muted">{status.models.length} modèle{status.models.length > 1 ? 's' : ''} installé{status.models.length > 1 ? 's' : ''}</p>
+                {status.models.length === 0 && starterModel && (
+                  <button
+                    type="button"
+                    disabled={Boolean(downloadingModel)}
+                    onClick={() => { setCategory('fast'); void downloadModel(starterModel) }}
+                  >
+                    {downloadingModel === starterModel.id ? 'Téléchargement…' : 'Installer le modèle de démarrage'}
+                  </button>
+                )}
                 <button className="secondary-button" type="button" onClick={() => void refreshStatus()}>
                   Actualiser
                 </button>

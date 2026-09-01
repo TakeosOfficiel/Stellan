@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { runCodingAgent } from './agent'
 import { getHardwareInfo } from './hardware'
 import { getModelCatalog, isCatalogModel } from './model-catalog'
-import { getOllamaStatus, pullOllamaModel, streamOllamaChat } from './ollama'
+import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat } from './ollama'
 import { ProjectTools } from './project-tools'
 import { createThreadWorktree, removeThreadWorktree } from './runtime'
 import { ThreadStore } from './storage'
@@ -22,6 +22,7 @@ const THREADS_LIST_CHANNEL = 'threads:list'
 const THREADS_CREATE_CHANNEL = 'threads:create'
 const THREADS_MESSAGES_CHANNEL = 'threads:messages'
 const THREADS_DELETE_CHANNEL = 'threads:delete'
+const THREADS_REVIEW_PROJECT_CHANNEL = 'threads:review-project'
 const OLLAMA_DOWNLOAD_URL = 'https://ollama.com/download'
 
 const modelIdSchema = z.string().min(1).max(100).refine(isCatalogModel)
@@ -43,11 +44,30 @@ const createThreadSchema = z.object({
 })
 let activeDownload: string | null = null
 const activeChats = new Map<string, AbortController>()
+const activeThreadChats = new Map<string, string>()
+const approvedProjectPaths = new Set<string>()
 let threadStore: ThreadStore | null = null
+let mainWindow: BrowserWindow | null = null
 
 function getThreadStore(): ThreadStore {
   if (!threadStore) throw new Error('Le stockage local n’est pas prêt.')
   return threadStore
+}
+
+function handle<T extends unknown[], R>(
+  channel: string,
+  listener: (event: Electron.IpcMainInvokeEvent, ...args: T) => R
+): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (
+      !mainWindow ||
+      event.sender !== mainWindow.webContents ||
+      event.senderFrame !== event.sender.mainFrame
+    ) {
+      throw new Error('Appel IPC refusé.')
+    }
+    return listener(event, ...(args as T))
+  })
 }
 
 function createWindow(): void {
@@ -65,12 +85,19 @@ function createWindow(): void {
       sandbox: true
     }
   })
+  mainWindow = window
+  window.once('closed', () => {
+    if (mainWindow === window) mainWindow = null
+  })
 
   window.once('ready-to-show', () => window.show())
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  window.webContents.on('will-navigate', (event, url) => {
+    if (url !== window.webContents.getURL()) event.preventDefault()
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -82,15 +109,15 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   threadStore = new ThreadStore(join(app.getPath('userData'), 'local-agent.sqlite'))
-  ipcMain.handle(OLLAMA_STATUS_CHANNEL, () => getOllamaStatus())
-  ipcMain.handle(SETUP_INFO_CHANNEL, async () => {
+  handle(OLLAMA_STATUS_CHANNEL, () => getOllamaStatus())
+  handle(SETUP_INFO_CHANNEL, async () => {
     const hardware = await getHardwareInfo()
     return { hardware, models: getModelCatalog(hardware) }
   })
-  ipcMain.handle(OLLAMA_DOWNLOAD_CHANNEL, async () => {
+  handle(OLLAMA_DOWNLOAD_CHANNEL, async () => {
     await shell.openExternal(OLLAMA_DOWNLOAD_URL)
   })
-  ipcMain.handle(MODEL_PULL_CHANNEL, async (event, input: unknown) => {
+  handle(MODEL_PULL_CHANNEL, async (event, input: unknown) => {
     const parsedModel = modelIdSchema.safeParse(input)
     if (!parsedModel.success) {
       return { success: false, reason: 'Ce modèle ne fait pas partie du catalogue autorisé.' }
@@ -117,19 +144,26 @@ app.whenReady().then(() => {
       activeDownload = null
     }
   })
-  ipcMain.handle(PROJECT_SELECT_CHANNEL, async () => {
+  handle(PROJECT_SELECT_CHANNEL, async () => {
     const result = await dialog.showOpenDialog({
       title: 'Choisir un projet',
       properties: ['openDirectory', 'createDirectory']
     })
     if (result.canceled || !result.filePaths[0]) return null
     const path = result.filePaths[0]
+    approvedProjectPaths.add(path)
     return { path, name: basename(path) }
   })
-  ipcMain.handle(THREADS_LIST_CHANNEL, () => getThreadStore().listThreads())
-  ipcMain.handle(THREADS_CREATE_CHANNEL, async (_event, input: unknown) => {
+  handle(THREADS_LIST_CHANNEL, () => getThreadStore().listThreads())
+  handle(THREADS_CREATE_CHANNEL, async (event, input: unknown) => {
     const parsed = createThreadSchema.parse(input)
     const store = getThreadStore()
+    const isPersistedProject = parsed.projectPath && store.listThreads().some(
+      (thread) => thread.projectPath === parsed.projectPath
+    )
+    if (parsed.projectPath && !approvedProjectPaths.has(parsed.projectPath) && !isPersistedProject) {
+      throw new Error('Ce projet doit être choisi avec le sélecteur de dossier.')
+    }
     const thread = store.createThread(parsed)
     if (!parsed.projectPath) return thread
 
@@ -139,30 +173,89 @@ app.whenReady().then(() => {
         join(app.getPath('userData'), 'workspaces'),
         thread.id
       )
-      return store.updateThread(thread.id, { workspacePath }) ?? thread
-    } catch {
-      return thread
+      return store.updateThread(thread.id, {
+        workspacePath,
+        workspaceMode: 'worktree'
+      }) ?? thread
+    } catch (error) {
+      const owner = BrowserWindow.fromWebContents(event.sender)
+      const options = {
+        type: 'warning' as const,
+        title: 'Isolation Git indisponible',
+        message: 'Continuer directement dans le dossier sélectionné ?',
+        detail: `Le worktree isolé n’a pas pu être créé. Les modifications autorisées toucheront le dossier original.\n\n${error instanceof Error ? error.message : 'Erreur inconnue'}`,
+        buttons: ['Annuler', 'Continuer en mode direct'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      }
+      const result = owner
+        ? await dialog.showMessageBox(owner, options)
+        : await dialog.showMessageBox(options)
+      if (result.response !== 1) {
+        store.deleteThread(thread.id)
+        throw new Error('Création annulée : l’isolation Git est indisponible.')
+      }
+      return store.updateThread(thread.id, { workspaceMode: 'direct' }) ?? thread
     }
   })
-  ipcMain.handle(THREADS_MESSAGES_CHANNEL, (_event, input: unknown) => {
+  handle(THREADS_MESSAGES_CHANNEL, (_event, input: unknown) => {
     const threadId = requestIdSchema.parse(input)
     return getThreadStore().listMessages(threadId)
   })
-  ipcMain.handle(THREADS_DELETE_CHANNEL, async (_event, input: unknown) => {
+  handle(THREADS_DELETE_CHANNEL, async (event, input: unknown) => {
     const threadId = requestIdSchema.parse(input)
     const store = getThreadStore()
     const thread = store.getThread(threadId)
     if (!thread) return false
+    if (activeThreadChats.has(threadId)) {
+      throw new Error('Arrêtez la génération avant de supprimer ce thread.')
+    }
     if (thread.projectPath && thread.workspacePath) {
+      const project = await ProjectTools.create(thread.workspacePath)
+      const status = await project.gitStatus()
+      let force = false
+      if (status.trim()) {
+        const owner = BrowserWindow.fromWebContents(event.sender)
+        const options = {
+          type: 'warning' as const,
+          title: 'Supprimer des modifications locales ?',
+          message: 'Ce thread contient des changements non enregistrés.',
+          detail: status.slice(0, 20_000),
+          buttons: ['Conserver le thread', 'Supprimer définitivement'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true
+        }
+        const result = owner
+          ? await dialog.showMessageBox(owner, options)
+          : await dialog.showMessageBox(options)
+        if (result.response !== 1) return false
+        force = true
+      }
       await removeThreadWorktree(
         thread.projectPath,
         join(app.getPath('userData'), 'workspaces'),
-        thread.id
+        thread.id,
+        force
       )
     }
     return store.deleteThread(threadId)
   })
-  ipcMain.handle(CHAT_START_CHANNEL, async (event, input: unknown) => {
+  handle(THREADS_REVIEW_PROJECT_CHANNEL, async (_event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    const thread = getThreadStore().getThread(threadId)
+    const executionPath = thread?.workspacePath ?? thread?.projectPath
+    if (!thread || !executionPath) return null
+    const project = await ProjectTools.create(executionPath)
+    const [status, diff] = await Promise.all([project.gitStatus(), project.gitDiff()])
+    return {
+      status,
+      diff,
+      workspaceMode: thread.workspaceMode === 'worktree' ? 'worktree' as const : 'direct' as const
+    }
+  })
+  handle(CHAT_START_CHANNEL, async (event, input: unknown) => {
     const parsed = chatRequestSchema.safeParse(input)
     if (!parsed.success) {
       throw new Error('La demande de conversation est invalide.')
@@ -170,9 +263,15 @@ app.whenReady().then(() => {
     if (activeChats.has(parsed.data.requestId)) {
       throw new Error('Cette génération est déjà active.')
     }
+    if (parsed.data.threadId && activeThreadChats.has(parsed.data.threadId)) {
+      throw new Error('Ce thread exécute déjà une génération.')
+    }
 
     const controller = new AbortController()
     activeChats.set(parsed.data.requestId, controller)
+    if (parsed.data.threadId) {
+      activeThreadChats.set(parsed.data.threadId, parsed.data.requestId)
+    }
     let assistantContent = ''
     const send = (payload: object): void => {
       if (!event.sender.isDestroyed()) {
@@ -199,6 +298,9 @@ app.whenReady().then(() => {
         send({ type: 'content', content })
       }
       if (executionPath) {
+        if (!await modelSupportsTools(parsed.data.model)) {
+          throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
+        }
         const project = await ProjectTools.create(executionPath)
         await runCodingAgent({
           model: parsed.data.model,
@@ -224,6 +326,7 @@ app.whenReady().then(() => {
             const result = owner
               ? await dialog.showMessageBox(owner, options)
               : await dialog.showMessageBox(options)
+            if (controller.signal.aborted) return false
             return result.response === 1
           }
         })
@@ -243,15 +346,24 @@ app.whenReady().then(() => {
       }
       send({ type: 'done' })
     } catch (error) {
+      if (parsed.data.threadId && assistantContent) {
+        getThreadStore().appendMessage(parsed.data.threadId, {
+          role: 'assistant',
+          content: controller.signal.aborted
+            ? `${assistantContent}\n\n[Réponse interrompue]`
+            : `${assistantContent}\n\n[Réponse incomplète]`
+        })
+      }
       const reason = controller.signal.aborted
         ? 'Génération interrompue.'
         : error instanceof Error ? error.message : 'La génération a échoué.'
       send({ type: 'error', reason })
     } finally {
       activeChats.delete(parsed.data.requestId)
+      if (parsed.data.threadId) activeThreadChats.delete(parsed.data.threadId)
     }
   })
-  ipcMain.handle(CHAT_CANCEL_CHANNEL, (_event, input: unknown) => {
+  handle(CHAT_CANCEL_CHANNEL, (_event, input: unknown) => {
     const parsed = requestIdSchema.safeParse(input)
     if (parsed.success) activeChats.get(parsed.data)?.abort()
   })
@@ -278,6 +390,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(THREADS_CREATE_CHANNEL)
   ipcMain.removeHandler(THREADS_MESSAGES_CHANNEL)
   ipcMain.removeHandler(THREADS_DELETE_CHANNEL)
+  ipcMain.removeHandler(THREADS_REVIEW_PROJECT_CHANNEL)
   for (const controller of activeChats.values()) controller.abort()
   activeChats.clear()
   threadStore?.close()

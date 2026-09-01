@@ -15,6 +15,7 @@ export type CommandResult = {
 export type CommandOptions = {
   cwd?: string
   timeoutMs?: number
+  env?: NodeJS.ProcessEnv
 }
 
 export type CommandRunner = (
@@ -45,6 +46,7 @@ export const runCommand: CommandRunner = (executable, args, options = {}) =>
   new Promise((resolve) => {
     const child = spawn(executable, [...args], {
       cwd: options.cwd,
+      env: options.env,
       stdio: ['ignore', 'pipe', 'pipe']
     })
     let stdout = ''
@@ -85,8 +87,8 @@ function validateIdentifier(value: string, label: string): void {
 }
 
 function validateAbsolutePath(value: string, label: string): string {
-  if (!path.isAbsolute(value) || value.includes('\0') || value.includes(',')) {
-    throw new Error(`${label} must be an absolute path without NUL bytes or commas`)
+  if (!path.isAbsolute(value) || value.includes('\0')) {
+    throw new Error(`${label} must be an absolute path without NUL bytes`)
   }
   return path.resolve(value)
 }
@@ -143,11 +145,26 @@ export async function createThreadWorktree(
 
   await requireDirectory(repository, 'repositoryPath')
   await mkdir(root, { recursive: true })
+  const disabledHooksPath = path.join(root, '.disabled-git-hooks')
+  await mkdir(disabledHooksPath, { recursive: true })
+  const environment = sanitizedGitEnvironment()
+  const configuredFilters = await runner('git', [
+    '-C', repository,
+    'config', '--get-regexp', '^filter\\..*\\.(smudge|process)$'
+  ], { env: environment })
+  if (configuredFilters.exitCode === 0 && configuredFilters.stdout.trim()) {
+    throw new Error('Git checkout filters are not allowed for isolated worktrees')
+  }
+  if (configuredFilters.exitCode !== 0 && configuredFilters.exitCode !== 1) {
+    requireSuccess(configuredFilters, 'Git filter inspection')
+  }
   const worktreePath = path.join(root, threadId)
   const result = await runner('git', [
+    '-c', `core.hooksPath=${disabledHooksPath}`,
+    '-c', 'core.fsmonitor=false',
     '-C', repository,
     'worktree', 'add', '--detach', worktreePath, ref
-  ])
+  ], { env: environment })
   requireSuccess(result, 'Git worktree creation')
   return worktreePath
 }
@@ -156,6 +173,7 @@ export async function removeThreadWorktree(
   repositoryPath: string,
   workspaceRoot: string,
   threadId: string,
+  force = false,
   runner: CommandRunner = runCommand
 ): Promise<void> {
   const repository = validateAbsolutePath(repositoryPath, 'repositoryPath')
@@ -164,13 +182,18 @@ export async function removeThreadWorktree(
   await requireDirectory(repository, 'repositoryPath')
 
   const worktreePath = path.join(root, threadId)
+  const environment = sanitizedGitEnvironment()
   const removeResult = await runner('git', [
+    '-c', 'core.fsmonitor=false',
     '-C', repository,
-    'worktree', 'remove', '--force', worktreePath
-  ])
+    'worktree', 'remove', ...(force ? ['--force'] : []), worktreePath
+  ], { env: environment })
   requireSuccess(removeResult, 'Git worktree removal')
 
-  const pruneResult = await runner('git', ['-C', repository, 'worktree', 'prune'])
+  const pruneResult = await runner('git', [
+    '-c', 'core.fsmonitor=false',
+    '-C', repository, 'worktree', 'prune'
+  ], { env: environment })
   requireSuccess(pruneResult, 'Git worktree pruning')
 }
 
@@ -180,6 +203,7 @@ export async function executeInContainer(
 ): Promise<CommandResult> {
   validateIdentifier(options.threadId, 'threadId')
   const projectPath = validateAbsolutePath(options.projectPath, 'projectPath')
+  if (projectPath.includes(',')) throw new Error('projectPath must not contain commas for container mounts')
   await requireDirectory(projectPath, 'projectPath')
 
   if (!IMAGE_PATTERN.test(options.image)) throw new Error('image is not a valid container image')
@@ -226,4 +250,12 @@ export async function executeInContainer(
       { timeoutMs: 10_000 }
     )
   }
+}
+
+function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env }
+  for (const key of Object.keys(environment)) {
+    if (key.toUpperCase().startsWith('GIT_')) delete environment[key]
+  }
+  return environment
 }

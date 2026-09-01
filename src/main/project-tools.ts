@@ -1,6 +1,13 @@
-import { lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { lstat, mkdir, open, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn as nodeSpawn } from 'node:child_process'
+import spawn from 'cross-spawn'
+import { rgPath } from '@vscode/ripgrep'
+
+const RIPGREP_PATH = process.resourcesPath
+  ? path.join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'rg.exe' : 'rg')
+  : rgPath
 
 export interface SearchResult {
   path: string
@@ -12,6 +19,7 @@ export interface SearchResult {
 export interface CommandOptions {
   timeoutMs?: number
   maxOutputBytes?: number
+  signal?: AbortSignal
 }
 
 export interface CommandResult {
@@ -39,7 +47,7 @@ export class ProjectTools {
       throw new Error('List path must be a directory')
     }
 
-    const result = await this.run('rg', ['--files', '--hidden', '--glob', '!.git', '--', directory])
+    const result = await this.run(RIPGREP_PATH, ['--files', '--hidden', '--glob', '!.git', '--', directory])
     if (result.outputTruncated) throw new Error('File listing exceeded the output limit')
     if (result.exitCode !== 0 && result.exitCode !== 1) {
       throw new Error(result.stderr.trim() || 'Unable to list project files')
@@ -54,7 +62,7 @@ export class ProjectTools {
   async search(query: string, relativePath = '.'): Promise<SearchResult[]> {
     if (!query) throw new Error('Search query must not be empty')
     const target = await this.safePath(relativePath)
-    const result = await this.run('rg', [
+    const result = await this.run(RIPGREP_PATH, [
       '--json',
       '--color',
       'never',
@@ -94,24 +102,48 @@ export class ProjectTools {
   }
 
   async readFile(relativePath: string): Promise<string> {
-    return readFile(await this.safePath(relativePath), 'utf8')
+    const handle = await open(
+      await this.safePath(relativePath),
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
+    )
+    try {
+      return await handle.readFile('utf8')
+    } finally {
+      await handle.close()
+    }
   }
 
   async writeFile(relativePath: string, content: string): Promise<void> {
     const target = await this.safePath(relativePath, true)
     await mkdir(path.dirname(target), { recursive: true })
-    await writeFile(target, content, 'utf8')
+    await this.safePath(path.dirname(relativePath) || '.')
+    const handle = await open(
+      target,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0),
+      0o666
+    )
+    try {
+      await handle.writeFile(content, 'utf8')
+    } finally {
+      await handle.close()
+    }
   }
 
   async gitStatus(): Promise<string> {
-    const result = await this.run('git', ['status', '--short'])
+    const result = await this.run('git', [
+      '-c', 'core.fsmonitor=false',
+      'status', '--short'
+    ], {}, sanitizedGitEnvironment())
     if (result.outputTruncated) throw new Error('Git status exceeded the output limit')
     if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Unable to read Git status')
     return result.stdout
   }
 
   async gitDiff(staged = false): Promise<string> {
-    const result = await this.run('git', ['diff', ...(staged ? ['--cached'] : [])])
+    const result = await this.run('git', [
+      '-c', 'core.fsmonitor=false',
+      'diff', '--no-ext-diff', '--no-textconv', ...(staged ? ['--cached'] : [])
+    ], {}, sanitizedGitEnvironment())
     if (result.outputTruncated) throw new Error('Git diff exceeded the output limit')
     if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Unable to read Git diff')
     return result.stdout
@@ -158,6 +190,7 @@ export class ProjectTools {
     command: string,
     args: readonly string[],
     options: CommandOptions = {},
+    environment?: NodeJS.ProcessEnv,
   ): Promise<CommandResult> {
     const timeoutMs = options.timeoutMs ?? 30_000
     const maxOutputBytes = options.maxOutputBytes ?? 1_048_576
@@ -166,12 +199,30 @@ export class ProjectTools {
     }
 
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, { cwd: this.root, shell: false, windowsHide: true })
+      const child = spawn(command, args, {
+        cwd: this.root,
+        shell: false,
+        windowsHide: true,
+        detached: process.platform !== 'win32',
+        env: environment
+      })
       const stdout: Buffer[] = []
       const stderr: Buffer[] = []
       let outputBytes = 0
       let timedOut = false
       let outputTruncated = false
+
+      const stop = (): void => {
+        if (!child.pid) return
+        if (process.platform === 'win32') {
+          nodeSpawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+            windowsHide: true,
+            stdio: 'ignore'
+          })
+        } else {
+          try { process.kill(-child.pid, 'SIGKILL') } catch { child.kill('SIGKILL') }
+        }
+      }
 
       const capture = (chunks: Buffer[], chunk: Buffer): void => {
         const remaining = maxOutputBytes - outputBytes
@@ -179,19 +230,22 @@ export class ProjectTools {
         outputBytes += Math.min(chunk.length, Math.max(remaining, 0))
         if (chunk.length > remaining) {
           outputTruncated = true
-          child.kill('SIGKILL')
+          stop()
         }
       }
-      child.stdout.on('data', (chunk: Buffer) => capture(stdout, chunk))
-      child.stderr.on('data', (chunk: Buffer) => capture(stderr, chunk))
+      child.stdout?.on('data', (chunk: Buffer) => capture(stdout, chunk))
+      child.stderr?.on('data', (chunk: Buffer) => capture(stderr, chunk))
       child.once('error', reject)
 
       const timer = setTimeout(() => {
         timedOut = true
-        child.kill('SIGKILL')
+        stop()
       }, timeoutMs)
+      if (options.signal?.aborted) stop()
+      else options.signal?.addEventListener('abort', stop, { once: true })
       child.once('close', (exitCode) => {
         clearTimeout(timer)
+        options.signal?.removeEventListener('abort', stop)
         resolve({
           exitCode,
           stdout: Buffer.concat(stdout).toString('utf8'),
@@ -202,4 +256,12 @@ export class ProjectTools {
       })
     })
   }
+}
+
+function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env }
+  for (const key of Object.keys(environment)) {
+    if (key.toUpperCase().startsWith('GIT_')) delete environment[key]
+  }
+  return environment
 }

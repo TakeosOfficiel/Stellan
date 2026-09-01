@@ -30,7 +30,8 @@ const api: LocalAgentApi = {
   listThreads: () => ipcRenderer.invoke('threads:list'),
   createThread: (request) => ipcRenderer.invoke('threads:create', request),
   loadThreadMessages: (threadId) => ipcRenderer.invoke('threads:messages', threadId),
-  deleteThread: (threadId) => ipcRenderer.invoke('threads:delete', threadId)
+  deleteThread: (threadId) => ipcRenderer.invoke('threads:delete', threadId),
+  reviewThreadProject: (threadId) => ipcRenderer.invoke('threads:review-project', threadId)
 }
 
 contextBridge.exposeInMainWorld('localAgent', api)

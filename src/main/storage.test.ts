@@ -75,6 +75,44 @@ describe('ThreadStore', () => {
     }
   })
 
+  it('upgrades a legacy database that predates project workspaces', () => {
+    const path = temporaryDatabase()
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE messages (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      PRAGMA user_version = 1;
+    `)
+    legacy.close()
+
+    const store = new ThreadStore(path)
+    try {
+      expect(store.createThread({
+        title: 'Upgraded',
+        projectPath: '/project',
+        workspacePath: '/workspace',
+        model: 'local-model'
+      })).toMatchObject({
+        projectPath: '/project',
+        workspacePath: '/workspace',
+        model: 'local-model'
+      })
+    } finally {
+      store.close()
+    }
+  })
+
   it('cascade deletes a thread\'s messages and closes safely more than once', () => {
     const path = temporaryDatabase()
     const store = new ThreadStore(path)

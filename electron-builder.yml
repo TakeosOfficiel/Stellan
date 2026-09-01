@@ -1,0 +1,36 @@
+appId: dev.localagent.desktop
+productName: Local Agent
+copyright: Copyright © 2026 Local Agent contributors
+
+directories:
+  output: dist
+
+artifactName: Local-Agent-${version}-${os}-${arch}.${ext}
+asar: true
+files:
+  - out/**/*
+  - package.json
+
+win:
+  extraResources:
+    - from: node_modules/@vscode/ripgrep-win32-${arch}/bin/rg.exe
+      to: bin/rg.exe
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Local Agent
+
+linux:
+  category: Development
+  maintainer: Local Agent contributors
+  extraResources:
+    - from: node_modules/@vscode/ripgrep-linux-${arch}/bin/rg
+      to: bin/rg
+  target:
+    - AppImage
+    - deb

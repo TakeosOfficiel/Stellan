@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { getOllamaStatus, pullOllamaModel, streamOllamaChat } from './ollama'
+import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat } from './ollama'
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -56,6 +56,20 @@ describe('pullOllamaModel', () => {
       total: 100,
       percent: 50
     })
+  })
+})
+
+describe('modelSupportsTools', () => {
+  it('uses Ollama model capabilities instead of assuming every model supports tools', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({
+      capabilities: ['completion', 'tools']
+    }))
+
+    await expect(modelSupportsTools('coder:latest', fetcher)).resolves.toBe(true)
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:11434/api/show',
+      expect.objectContaining({ body: JSON.stringify({ model: 'coder:latest' }) })
+    )
   })
 })
 

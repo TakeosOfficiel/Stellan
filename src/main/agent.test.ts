@@ -89,4 +89,36 @@ describe('runCodingAgent', () => {
 
     await expect(readFile(join(projectPath, 'hello.txt'), 'utf8')).resolves.toBe('original')
   })
+
+  it('keeps recent context within a bounded request size', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(streamResponse([
+      { message: { content: 'Terminé.' }, done: true }
+    ]))
+    vi.stubGlobal('fetch', fetcher)
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [
+        ...Array.from({ length: 10 }, (_, index) => ({
+          role: index % 2 === 0 ? 'user' as const : 'assistant' as const,
+          content: `${index}: ${'x'.repeat(15_000)}`
+        })),
+        { role: 'user', content: 'message récent à conserver' }
+      ],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(false)
+    })
+
+    const request = fetcher.mock.calls[0]?.[1]
+    const body = String(request?.body)
+    expect(body.length).toBeLessThan(70_000)
+    expect(body).toContain('message récent à conserver')
+    expect(body).not.toContain('0: xxxxx')
+  })
 })

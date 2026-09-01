@@ -6,6 +6,7 @@ export type Thread = {
   title: string
   projectPath: string | null
   workspacePath: string | null
+  workspaceMode: 'none' | 'worktree' | 'direct'
   model: string | null
   createdAt: string
   updatedAt: string
@@ -15,6 +16,7 @@ export type CreateThreadInput = {
   title: string
   projectPath?: string | null
   workspacePath?: string | null
+  workspaceMode?: Thread['workspaceMode']
   model?: string | null
 }
 
@@ -22,6 +24,7 @@ export type UpdateThreadInput = {
   title?: string
   projectPath?: string | null
   workspacePath?: string | null
+  workspaceMode?: Thread['workspaceMode']
   model?: string | null
 }
 
@@ -49,6 +52,7 @@ const migrations = [
       title TEXT NOT NULL,
       project_path TEXT,
       workspace_path TEXT,
+      workspace_mode TEXT NOT NULL DEFAULT 'none' CHECK (workspace_mode IN ('none', 'worktree', 'direct')),
       model TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -73,6 +77,9 @@ function toThread(row: StorageRow): Thread {
     title: String(row.title),
     projectPath: row.project_path === null ? null : String(row.project_path),
     workspacePath: row.workspace_path === null ? null : String(row.workspace_path),
+    workspaceMode: row.workspace_mode === 'worktree' || row.workspace_mode === 'direct'
+      ? row.workspace_mode
+      : 'none',
     model: row.model === null ? null : String(row.model),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
@@ -99,6 +106,7 @@ export class ThreadStore {
     try {
       this.database.exec('PRAGMA foreign_keys = ON')
       this.migrate()
+      this.ensureThreadColumns()
     } catch (error) {
       this.database.close()
       this.closed = true
@@ -114,18 +122,20 @@ export class ThreadStore {
       title: input.title,
       projectPath: input.projectPath ?? null,
       workspacePath: input.workspacePath ?? null,
+      workspaceMode: input.workspaceMode ?? 'none',
       model: input.model ?? null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }
     this.database.prepare(`
-      INSERT INTO threads (id, title, project_path, workspace_path, model, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO threads (id, title, project_path, workspace_path, workspace_mode, model, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       thread.id,
       thread.title,
       thread.projectPath,
       thread.workspacePath,
+      thread.workspaceMode,
       thread.model,
       thread.createdAt,
       thread.updatedAt
@@ -138,7 +148,7 @@ export class ThreadStore {
     this.assertOpen()
 
     return this.database.prepare(`
-      SELECT id, title, project_path, workspace_path, model, created_at, updated_at
+      SELECT id, title, project_path, workspace_path, workspace_mode, model, created_at, updated_at
       FROM threads
       ORDER BY created_at ASC, rowid ASC
     `).all().map(toThread)
@@ -148,7 +158,7 @@ export class ThreadStore {
     this.assertOpen()
 
     const row = this.database.prepare(`
-      SELECT id, title, project_path, workspace_path, model, created_at, updated_at
+      SELECT id, title, project_path, workspace_path, workspace_mode, model, created_at, updated_at
       FROM threads
       WHERE id = ?
     `).get(id)
@@ -163,6 +173,7 @@ export class ThreadStore {
       input.title === undefined &&
       input.projectPath === undefined &&
       input.workspacePath === undefined &&
+      input.workspaceMode === undefined &&
       input.model === undefined
     ) {
       return this.getThread(id)
@@ -174,12 +185,13 @@ export class ThreadStore {
     const updatedAt = new Date().toISOString()
     const result = this.database.prepare(`
       UPDATE threads
-      SET title = ?, project_path = ?, workspace_path = ?, model = ?, updated_at = ?
+      SET title = ?, project_path = ?, workspace_path = ?, workspace_mode = ?, model = ?, updated_at = ?
       WHERE id = ?
     `).run(
       input.title ?? current.title,
       input.projectPath === undefined ? current.projectPath : input.projectPath,
       input.workspacePath === undefined ? current.workspacePath : input.workspacePath,
+      input.workspaceMode ?? current.workspaceMode,
       input.model === undefined ? current.model : input.model,
       updatedAt,
       id
@@ -253,6 +265,23 @@ export class ThreadStore {
         this.database.exec('ROLLBACK')
         throw error
       }
+    }
+  }
+
+  private ensureThreadColumns(): void {
+    const columns = new Set(
+      this.database.prepare('PRAGMA table_info(threads)').all()
+        .map((row) => String(row.name))
+    )
+    const missingColumns = [
+      ['project_path', 'TEXT'],
+      ['workspace_path', 'TEXT'],
+      ['workspace_mode', "TEXT NOT NULL DEFAULT 'none' CHECK (workspace_mode IN ('none', 'worktree', 'direct'))"],
+      ['model', 'TEXT']
+    ] as const
+
+    for (const [name, type] of missingColumns) {
+      if (!columns.has(name)) this.database.exec(`ALTER TABLE threads ADD COLUMN ${name} ${type}`)
     }
   }
 }

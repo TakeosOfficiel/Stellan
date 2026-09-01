@@ -41,6 +41,10 @@ const chatChunkSchema = z.object({
   error: z.string().optional()
 })
 
+const showResponseSchema = z.object({
+  capabilities: z.array(z.string()).default([])
+})
+
 const OLLAMA_URL = 'http://127.0.0.1:11434'
 
 export type OllamaToolCall = {
@@ -58,6 +62,22 @@ export type OllamaMessage = ChatMessage & {
 export type OllamaChatResult = {
   content: string
   toolCalls: OllamaToolCall[]
+}
+
+export async function modelSupportsTools(
+  model: string,
+  fetcher: typeof fetch = fetch
+): Promise<boolean> {
+  const response = await fetcher(`${OLLAMA_URL}/api/show`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model }),
+    signal: AbortSignal.timeout(5_000)
+  })
+  if (!response.ok) {
+    throw new Error(`Ollama n’a pas pu vérifier les capacités du modèle (statut ${response.status}).`)
+  }
+  return showResponseSchema.parse(await response.json()).capabilities.includes('tools')
 }
 
 export async function getOllamaStatus(

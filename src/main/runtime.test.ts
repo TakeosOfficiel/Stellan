@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -103,6 +103,18 @@ describe('Git worktree lifecycle', () => {
       'commit', '-m', 'project'
     ])).exitCode).toBe(0)
 
+    const hookMarker = path.join(root, 'hook-ran')
+    if (process.platform !== 'win32') {
+      const hooks = path.join(repository, '.untrusted-hooks')
+      await mkdir(hooks)
+      const hook = path.join(hooks, 'post-checkout')
+      await writeFile(hook, `#!/bin/sh\ntouch "${hookMarker}"\n`)
+      await chmod(hook, 0o755)
+      expect((await runCommand('git', [
+        '-C', repository, 'config', 'core.hooksPath', hooks
+      ])).exitCode).toBe(0)
+    }
+
     const worktree = await createThreadWorktree(
       repository,
       workspaceRoot,
@@ -110,6 +122,7 @@ describe('Git worktree lifecycle', () => {
     )
     expect(worktree).toBe(path.join(workspaceRoot, 'thread-123'))
     await expect(readFile(path.join(worktree, 'project.txt'), 'utf8')).resolves.toBe('isolated\n')
+    if (process.platform !== 'win32') await expect(stat(hookMarker)).rejects.toThrow()
 
     await removeThreadWorktree(repository, workspaceRoot, 'thread-123')
     await expect(stat(worktree)).rejects.toThrow()
@@ -127,6 +140,58 @@ describe('Git worktree lifecycle', () => {
       runner
     )).rejects.toThrow('repositoryPath must be an absolute path')
     expect(runner).not.toHaveBeenCalled()
+  })
+
+  it('refuses repository-configured checkout filters before creating a worktree', async () => {
+    const repository = await temporaryDirectory()
+    const workspaceRoot = await temporaryDirectory()
+    const runner = vi.fn<CommandRunner>().mockResolvedValue(result({
+      stdout: 'filter.evil.process /tmp/untrusted-filter\n'
+    }))
+
+    await expect(createThreadWorktree(
+      repository,
+      workspaceRoot,
+      'safe-thread',
+      'HEAD',
+      runner
+    )).rejects.toThrow('checkout filters')
+    expect(runner).toHaveBeenCalledOnce()
+    expect(runner.mock.calls[0]?.[1]).toEqual([
+      '-C', repository,
+      'config', '--get-regexp', '^filter\\..*\\.(smudge|process)$'
+    ])
+  })
+
+  it('detects checkout filters from real Git configuration', async () => {
+    const root = await temporaryDirectory()
+    const repository = path.join(root, 'repository')
+    const workspaceRoot = path.join(root, 'workspaces')
+    await mkdir(repository)
+    expect((await runCommand('git', ['init', repository])).exitCode).toBe(0)
+    expect((await runCommand('git', [
+      '-C', repository, 'config', 'filter.untrusted.process', 'untrusted-filter'
+    ])).exitCode).toBe(0)
+
+    await expect(createThreadWorktree(
+      repository,
+      workspaceRoot,
+      'safe-thread'
+    )).rejects.toThrow('checkout filters')
+  })
+
+  it('overrides repository hooks and fsmonitor when creating a worktree', async () => {
+    const repository = await temporaryDirectory()
+    const workspaceRoot = await temporaryDirectory()
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result({ exitCode: 1 }))
+      .mockResolvedValueOnce(result())
+
+    await createThreadWorktree(repository, workspaceRoot, 'safe-thread', 'HEAD', runner)
+
+    const worktreeArgs = runner.mock.calls[1]?.[1] ?? []
+    expect(worktreeArgs).toContain(`core.hooksPath=${path.join(workspaceRoot, '.disabled-git-hooks')}`)
+    expect(worktreeArgs).toContain('core.fsmonitor=false')
   })
 })
 

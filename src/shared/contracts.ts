@@ -81,6 +81,7 @@ export type StoredThread = {
   title: string
   projectPath: string | null
   workspacePath: string | null
+  workspaceMode: 'none' | 'worktree' | 'direct'
   model: string | null
   createdAt: string
   updatedAt: string
@@ -98,6 +99,12 @@ export type CreateThreadRequest = {
   title: string
   projectPath: string | null
   model: string | null
+}
+
+export type ProjectReview = {
+  status: string
+  diff: string
+  workspaceMode: 'worktree' | 'direct'
 }
 
 export type OllamaStatus =
@@ -125,4 +132,5 @@ export type LocalAgentApi = {
   createThread: (request: CreateThreadRequest) => Promise<StoredThread>
   loadThreadMessages: (threadId: string) => Promise<StoredMessage[]>
   deleteThread: (threadId: string) => Promise<boolean>
+  reviewThreadProject: (threadId: string) => Promise<ProjectReview | null>
 }

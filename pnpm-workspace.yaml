@@ -5,3 +5,12 @@ packages:
 allowBuilds:
   electron: true
   esbuild: true
+
+supportedArchitectures:
+  os:
+    - current
+    - linux
+    - win32
+  cpu:
+    - x64
+    - arm64

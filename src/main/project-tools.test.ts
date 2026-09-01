@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -62,6 +62,39 @@ describe('ProjectTools', () => {
       timeoutMs: 20,
     })
     expect(timeout.timedOut).toBe(true)
+
+    const controller = new AbortController()
+    const canceled = tools.runCommand(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], {
+      signal: controller.signal
+    })
+    controller.abort()
+    await expect(canceled).resolves.toMatchObject({ timedOut: false })
+  })
+
+  it.skipIf(process.platform === 'win32')('cancels the complete command process group', async () => {
+    const controller = new AbortController()
+    const command = tools.runCommand(process.execPath, ['-e', `
+      const { spawn } = require('node:child_process')
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' })
+      console.log(child.pid)
+      setInterval(() => {}, 10000)
+    `], { signal: controller.signal })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    controller.abort()
+    const result = await command
+    const childPid = Number(result.stdout.trim())
+
+    expect(childPid).toBeGreaterThan(0)
+    let running = true
+    for (let attempt = 0; attempt < 20 && running; attempt += 1) {
+      try {
+        process.kill(childPid, 0)
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      } catch {
+        running = false
+      }
+    }
+    expect(running).toBe(false)
   })
 
   it('returns Git status and unstaged and staged diffs', async () => {
@@ -76,5 +109,23 @@ describe('ProjectTools', () => {
 
     execFileSync('git', ['add', 'src/hello.txt'], { cwd: project })
     expect(await tools.gitDiff(true)).toContain('+changed')
+  })
+
+  it.skipIf(process.platform === 'win32')('disables configured Git helpers for status and diff', async () => {
+    execFileSync('git', ['add', '.'], { cwd: project })
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: project })
+    const marker = path.join(project, 'git-helper-ran')
+    const helper = path.join(project, 'git-helper.sh')
+    await writeFile(helper, `#!/bin/sh\ntouch "${marker}"\n`)
+    await chmod(helper, 0o755)
+    await writeFile(path.join(project, '.gitattributes'), '*.txt diff=evil\n')
+    execFileSync('git', ['config', 'core.fsmonitor', helper], { cwd: project })
+    execFileSync('git', ['config', 'diff.evil.command', helper], { cwd: project })
+    await writeFile(path.join(project, 'src', 'hello.txt'), 'changed\n')
+
+    await tools.gitStatus()
+    await tools.gitDiff()
+
+    await expect(stat(marker)).rejects.toThrow()
   })
 })

@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   OllamaStatus,
   ProjectSelection,
+  ProjectReview,
   StoredThread
 } from '../../shared/contracts'
 
@@ -15,6 +16,22 @@ type UiMessage = ChatMessage & {
 type WorkspaceViewProps = {
   status: OllamaStatus | null | 'loading'
   onOpenSetup: () => void
+}
+
+type ToolActivity = {
+  id: string
+  tool: string
+  status: 'running' | 'done' | 'denied' | 'error'
+}
+
+const TOOL_LABELS: Record<string, string> = {
+  list_files: 'Liste des fichiers',
+  read_file: 'Lecture de fichier',
+  search_files: 'Recherche dans le projet',
+  write_file: 'Écriture de fichier',
+  run_command: 'Commande locale',
+  git_status: 'Statut Git',
+  git_diff: 'Diff Git'
 }
 
 function projectName(projectPath: string): string {
@@ -30,6 +47,9 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
   const [messages, setMessages] = useState<UiMessage[]>([])
   const [prompt, setPrompt] = useState('')
   const [activeRequest, setActiveRequest] = useState<string | null>(null)
+  const [toolActivities, setToolActivities] = useState<ToolActivity[]>([])
+  const [projectReview, setProjectReview] = useState<ProjectReview | null>(null)
+  const [reviewError, setReviewError] = useState<string | null>(null)
 
   const effectiveModel = useMemo(() => {
     if (models.some((model) => model.name === selectedModel)) return selectedModel
@@ -46,7 +66,20 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
 
   useEffect(() => {
     const handleEvent = (event: ChatEvent): void => {
-      if (event.type === 'tool') return
+      if (event.type === 'tool') {
+        setToolActivities((current) => {
+          const running = [...current].reverse().find(
+            (activity) => activity.tool === event.tool && activity.status === 'running'
+          )
+          if (running && event.status !== 'running') {
+            return current.map((activity) => activity.id === running.id
+              ? { ...activity, status: event.status }
+              : activity)
+          }
+          return [...current, { id: crypto.randomUUID(), tool: event.tool, status: event.status }]
+        })
+        return
+      }
       if (event.type === 'content') {
         setMessages((current) => current.map((message) =>
           message.id === event.requestId
@@ -89,17 +122,38 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
       ? { path: thread.projectPath, name: projectName(thread.projectPath) }
       : null)
     if (thread.model) setSelectedModel(thread.model)
+    setToolActivities([])
+    setProjectReview(null)
+    setReviewError(null)
   }
 
   function newThread(): void {
     setActiveThreadId(null)
     setMessages([])
+    setToolActivities([])
+    setProjectReview(null)
+    setReviewError(null)
+  }
+
+  async function reviewProject(): Promise<void> {
+    if (!activeThreadId) return
+    setReviewError(null)
+    try {
+      setProjectReview(await window.localAgent.reviewThreadProject(activeThreadId))
+    } catch {
+      setProjectReview(null)
+      setReviewError('Impossible de lire les changements Git de ce projet.')
+    }
   }
 
   async function removeThread(threadId: string): Promise<void> {
-    if (!await window.localAgent.deleteThread(threadId)) return
-    setThreads((current) => current.filter((thread) => thread.id !== threadId))
-    if (activeThreadId === threadId) newThread()
+    try {
+      if (!await window.localAgent.deleteThread(threadId)) return
+      setThreads((current) => current.filter((thread) => thread.id !== threadId))
+      if (activeThreadId === threadId) newThread()
+    } catch {
+      setReviewError('Impossible de supprimer ce thread pendant son utilisation.')
+    }
   }
 
   async function sendMessage(): Promise<void> {
@@ -108,14 +162,18 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
 
     let threadId = activeThreadId
     if (!threadId) {
-      const thread = await window.localAgent.createThread({
-        title: content.length > 60 ? `${content.slice(0, 57)}…` : content,
-        projectPath: project?.path ?? null,
-        model: effectiveModel
-      })
-      threadId = thread.id
-      setActiveThreadId(thread.id)
-      setThreads((current) => [...current, thread])
+      try {
+        const thread = await window.localAgent.createThread({
+          title: content.length > 60 ? `${content.slice(0, 57)}…` : content,
+          projectPath: project?.path ?? null,
+          model: effectiveModel
+        })
+        threadId = thread.id
+        setActiveThreadId(thread.id)
+        setThreads((current) => [...current, thread])
+      } catch {
+        return
+      }
     }
 
     const requestId = crypto.randomUUID()
@@ -128,6 +186,8 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
     setPrompt('')
     setMessages((current) => [...current, userMessage, assistantMessage])
     setActiveRequest(requestId)
+    setToolActivities([])
+    setProjectReview(null)
 
     try {
       await window.localAgent.startChat({
@@ -157,6 +217,7 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
   }
 
   const hasOllama = Boolean(status && status !== 'loading' && status.available)
+  const activeThread = threads.find((thread) => thread.id === activeThreadId)
 
   return (
     <section className="workspace-view">
@@ -196,28 +257,59 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
           {threads.map((thread) => (
             <div className={`thread-row ${activeThreadId === thread.id ? 'active' : ''}`} key={thread.id}>
               <button type="button" onClick={() => void openThread(thread)}>{thread.title}</button>
-              <button type="button" aria-label={`Supprimer ${thread.title}`} onClick={() => void removeThread(thread.id)}>×</button>
+              <button
+                type="button"
+                aria-label={`Supprimer ${thread.title}`}
+                disabled={Boolean(activeRequest) && activeThreadId === thread.id}
+                onClick={() => void removeThread(thread.id)}
+              >×</button>
             </div>
           ))}
         </div>
 
         <div className="runtime-summary">
-          <span className={`status-dot ${hasOllama ? 'online' : 'offline'}`} />
-          <span>{hasOllama ? 'Ollama connecté' : 'Ollama indisponible'}</span>
+          <div><span className={`status-dot ${hasOllama ? 'online' : 'offline'}`} />
+            <span>{hasOllama ? 'Ollama connecté' : 'Ollama indisponible'}</span>
+          </div>
+          {activeThread?.projectPath && (
+            <small>{activeThread.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
+          )}
         </div>
       </aside>
 
       <div className="chat-panel">
         <div className="chat-header">
-          <div><p className="eyebrow">THREAD LOCAL</p><h3>{threads.find((thread) => thread.id === activeThreadId)?.title ?? 'Nouvelle conversation'}</h3></div>
-          {messages.length > 0 && !activeRequest && (
-            <button className="ghost-button" type="button" onClick={newThread}>
-              Nouveau
-            </button>
-          )}
+          <div><p className="eyebrow">THREAD LOCAL</p><h3>{activeThread?.title ?? 'Nouvelle conversation'}</h3></div>
+          <div className="chat-header-actions">
+            {activeThread?.projectPath && !activeRequest && (
+              <button className="ghost-button" type="button" onClick={() => void reviewProject()}>
+                Voir les changements
+              </button>
+            )}
+            {messages.length > 0 && !activeRequest && (
+              <button className="ghost-button" type="button" onClick={newThread}>
+                Nouveau
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="messages" aria-live="polite">
+          {(projectReview || reviewError) && (
+            <article className="project-review">
+              <div>
+                <strong>Changements du projet</strong>
+                <button type="button" aria-label="Fermer les changements" onClick={() => { setProjectReview(null); setReviewError(null) }}>×</button>
+              </div>
+              {reviewError ? <p>{reviewError}</p> : projectReview && (
+                <>
+                  <small>{projectReview.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct'}</small>
+                  <pre>{projectReview.status || 'Aucun fichier modifié.'}</pre>
+                  {projectReview.diff && <pre>{projectReview.diff}</pre>}
+                </>
+              )}
+            </article>
+          )}
           {messages.length === 0 ? (
             <div className="empty-chat">
               <span>⌁</span>
@@ -230,6 +322,17 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
               <p>{message.content || (activeRequest === message.id ? 'Réflexion…' : '')}</p>
             </article>
           ))}
+          {toolActivities.length > 0 && (
+            <div className="tool-activities" aria-label="Activité des outils">
+              {toolActivities.map((activity) => (
+                <div className={activity.status} key={activity.id}>
+                  <span>{activity.status === 'running' ? '○' : activity.status === 'done' ? '✓' : '!'}</span>
+                  <span>{TOOL_LABELS[activity.tool] ?? activity.tool}</span>
+                  <small>{activity.status === 'running' ? 'en cours' : activity.status === 'done' ? 'terminé' : activity.status === 'denied' ? 'refusé' : 'erreur'}</small>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
