@@ -5,11 +5,13 @@ import { runCodingAgent } from './agent'
 import { getHardwareInfo } from './hardware'
 import { getModelCatalog, isCatalogModel } from './model-catalog'
 import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat } from './ollama'
+import { startOllamaServer } from './ollama-process'
 import { ProjectTools } from './project-tools'
 import { createThreadWorktree, removeThreadWorktree } from './runtime'
 import { ThreadStore } from './storage'
 
 const OLLAMA_STATUS_CHANNEL = 'ollama:get-status'
+const OLLAMA_START_CHANNEL = 'ollama:start'
 const SETUP_INFO_CHANNEL = 'setup:get-info'
 const OLLAMA_DOWNLOAD_CHANNEL = 'ollama:open-download'
 const MODEL_PULL_CHANNEL = 'ollama:pull-model'
@@ -123,6 +125,20 @@ app.whenReady().then(() => {
   })
   handle(WINDOW_CLOSE_CHANNEL, () => mainWindow?.close())
   handle(OLLAMA_STATUS_CHANNEL, () => getOllamaStatus())
+  handle(OLLAMA_START_CHANNEL, async () => {
+    const started = await startOllamaServer()
+    if (!started.success) return { available: false as const, reason: started.reason }
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      const status = await getOllamaStatus()
+      if (status.available) return status
+    }
+    return {
+      available: false as const,
+      reason: "Ollama a été lancé mais son service local ne répond toujours pas."
+    }
+  })
   handle(SETUP_INFO_CHANNEL, async () => {
     const hardware = await getHardwareInfo()
     return { hardware, models: getModelCatalog(hardware) }
@@ -396,6 +412,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(WINDOW_TOGGLE_MAXIMIZE_CHANNEL)
   ipcMain.removeHandler(WINDOW_CLOSE_CHANNEL)
   ipcMain.removeHandler(OLLAMA_STATUS_CHANNEL)
+  ipcMain.removeHandler(OLLAMA_START_CHANNEL)
   ipcMain.removeHandler(SETUP_INFO_CHANNEL)
   ipcMain.removeHandler(OLLAMA_DOWNLOAD_CHANNEL)
   ipcMain.removeHandler(MODEL_PULL_CHANNEL)

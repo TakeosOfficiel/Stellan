@@ -123,6 +123,7 @@ export type LocalAgentApi = {
   toggleMaximizeWindow: () => Promise<void>
   closeWindow: () => Promise<void>
   getOllamaStatus: () => Promise<OllamaStatus>
+  startOllama: () => Promise<OllamaStatus>
   getSetupInfo: () => Promise<SetupInfo>
   openOllamaDownload: () => Promise<void>
   pullModel: (model: string) => Promise<ModelPullResult>

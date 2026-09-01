@@ -10,6 +10,7 @@ const api: LocalAgentApi = {
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   getOllamaStatus: () => ipcRenderer.invoke('ollama:get-status'),
+  startOllama: () => ipcRenderer.invoke('ollama:start'),
   getSetupInfo: () => ipcRenderer.invoke('setup:get-info'),
   openOllamaDownload: () => ipcRenderer.invoke('ollama:open-download'),
   pullModel: (model) => ipcRenderer.invoke('ollama:pull-model', model),

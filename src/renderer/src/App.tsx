@@ -71,6 +71,7 @@ export function App(): React.JSX.Element {
   const [pullError, setPullError] = useState<string | null>(null)
   const [downloadingModel, setDownloadingModel] = useState<string | null>(null)
   const [checkingOllama, setCheckingOllama] = useState(false)
+  const [startingOllama, setStartingOllama] = useState(false)
 
   const refreshStatus = useCallback(async () => {
     setCheckingOllama(true)
@@ -81,6 +82,15 @@ export function App(): React.JSX.Element {
       setCheckingOllama(false)
     }
   }, [])
+
+  async function startOllama(): Promise<void> {
+    setStartingOllama(true)
+    try {
+      setStatus(await window.localAgent.startOllama())
+    } finally {
+      setStartingOllama(false)
+    }
+  }
 
   useEffect(() => {
     void refreshStatus()
@@ -169,9 +179,12 @@ export function App(): React.JSX.Element {
               <>
                 <p className="error">{status.reason}</p>
                 <p className="muted">
-                  S’il est déjà installé, ouvrez Ollama depuis le menu Démarrer puis vérifiez à nouveau.
+                  S’il est déjà installé, Local Agent peut démarrer son service automatiquement.
                 </p>
-                <button type="button" onClick={() => void window.localAgent.openOllamaDownload()}>
+                <button type="button" disabled={startingOllama || checkingOllama} onClick={() => void startOllama()}>
+                  {startingOllama ? 'Démarrage…' : 'Démarrer Ollama'}
+                </button>
+                <button className="secondary-button" type="button" onClick={() => void window.localAgent.openOllamaDownload()}>
                   Installer Ollama
                 </button>
                 <button className="secondary-button" type="button" disabled={checkingOllama} onClick={() => void refreshStatus()}>
