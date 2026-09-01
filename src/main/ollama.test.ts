@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { getOllamaStatus } from './ollama'
+import { getOllamaStatus, pullOllamaModel } from './ollama'
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -29,6 +29,32 @@ describe('getOllamaStatus', () => {
     await expect(getOllamaStatus(fetcher)).resolves.toEqual({
       available: false,
       reason: "Ollama n'est pas accessible sur cette machine."
+    })
+  })
+})
+
+describe('pullOllamaModel', () => {
+  it('parses streamed progress updates', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          '{"status":"pulling manifest"}\n{"status":"downloading","completed":50,"total":100}\n'
+        ))
+        controller.close()
+      }
+    })
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(stream, { status: 200 }))
+    const onProgress = vi.fn()
+
+    await expect(pullOllamaModel('qwen3.5:4b', onProgress, fetcher)).resolves.toEqual({
+      success: true
+    })
+    expect(onProgress).toHaveBeenLastCalledWith({
+      model: 'qwen3.5:4b',
+      status: 'downloading',
+      completed: 50,
+      total: 100,
+      percent: 50
     })
   })
 })
