@@ -5,6 +5,7 @@ export type ThreadRunState = Record<string, { requestId: string; status: 'queued
 
 export function applyRunEvent(current: ThreadRunState, event: ChatEvent): ThreadRunState {
   if (event.type === 'status') {
+    if (event.status === 'queued' && current[event.threadId]?.status === 'running') return current
     return { ...current, [event.threadId]: { requestId: event.requestId, status: event.status } }
   }
   if (event.type !== 'done' && event.type !== 'error') return current
@@ -20,6 +21,7 @@ export function applyMessageEvent(
 ): Record<string, ChatUiMessage[]> {
   const messages = current[event.threadId] ?? []
   if (event.type === 'status') {
+    if (event.status === 'queued') return current
     return messages.some((message) => message.id === event.requestId)
       ? current
       : { ...current, [event.threadId]: [...messages, { id: event.requestId, role: 'assistant', content: '' }] }

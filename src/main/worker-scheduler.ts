@@ -31,8 +31,33 @@ export class WorkerScheduler {
     return 'queued'
   }
 
+  removeQueued(requestId: string): boolean {
+    const worker = this.jobs.get(requestId)
+    if (!worker || worker.state !== 'queued') return false
+    this.jobs.delete(requestId)
+    this.drain(worker.projectKey)
+    return true
+  }
+
+  prioritize(requestId: string): boolean {
+    const worker = this.jobs.get(requestId)
+    if (!worker || worker.state !== 'queued') return false
+    const queued = [...this.jobs.entries()]
+    this.jobs.clear()
+    this.jobs.set(requestId, worker)
+    for (const [id, job] of queued) {
+      if (id !== requestId) this.jobs.set(id, job)
+    }
+    this.drain(worker.projectKey)
+    return true
+  }
+
   hasThread(threadId: string): boolean {
     return [...this.jobs.values()].some((worker) => worker.threadId === threadId)
+  }
+
+  has(requestId: string): boolean {
+    return this.jobs.has(requestId)
   }
 
   updateProjectLimit(projectKey: string, maxConcurrentWorkers: number): void {
@@ -42,12 +67,12 @@ export class WorkerScheduler {
     this.drain(projectKey)
   }
 
-  shutdown(): void {
+  shutdown(preserveQueued = false): void {
     this.stopped = true
     for (const worker of [...this.jobs.values()]) {
       if (worker.state === 'queued') {
         this.jobs.delete(worker.requestId)
-        worker.cancelQueued()
+        if (!preserveQueued) worker.cancelQueued()
       }
     }
   }
@@ -59,6 +84,7 @@ export class WorkerScheduler {
     for (const worker of projectJobs) {
       if (worker.state !== 'queued') continue
       if (running.length >= worker.maxConcurrentWorkers) break
+      if (running.some((active) => active.threadId === worker.threadId)) continue
       if (worker.isolationKey && running.some((active) => active.isolationKey === worker.isolationKey)) continue
       worker.state = 'running'
       running.push(worker)

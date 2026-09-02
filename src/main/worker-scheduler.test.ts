@@ -49,4 +49,30 @@ describe('WorkerScheduler', () => {
     expect(scheduler.hasThread('two')).toBe(false)
     first.resolve()
   })
+
+  it('serializes one thread and can prioritize or remove its queued messages', async () => {
+    const scheduler = new WorkerScheduler()
+    const first = deferred()
+    const third = deferred()
+    const starts: string[] = []
+    const add = (requestId: string, run: () => Promise<void>): void => scheduler.enqueue({
+      requestId,
+      threadId: 'same-thread',
+      projectKey: 'project',
+      isolationKey: null,
+      maxConcurrentWorkers: 3,
+      run: () => { starts.push(requestId); return run() },
+      cancelQueued: vi.fn()
+    })
+
+    add('first', () => first.promise)
+    add('second', async () => undefined)
+    add('third', () => third.promise)
+    expect(starts).toEqual(['first'])
+    expect(scheduler.prioritize('third')).toBe(true)
+    expect(scheduler.removeQueued('second')).toBe(true)
+    first.resolve()
+    await vi.waitFor(() => expect(starts).toEqual(['first', 'third']))
+    third.resolve()
+  })
 })

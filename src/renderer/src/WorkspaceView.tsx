@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
+  AgentRunSummary,
   ChatEvent,
   ChatMessage,
   OllamaStatus,
@@ -61,6 +62,10 @@ export function WorkspaceView({
   const [messagesByThread, setMessagesByThread] = useState<Record<string, UiMessage[]>>({})
   const [prompt, setPrompt] = useState('')
   const [runsByThread, setRunsByThread] = useState<ThreadRunState>({})
+  const [runHistoryByThread, setRunHistoryByThread] = useState<Record<string, AgentRunSummary[]>>({})
+  const [runHistoryOpen, setRunHistoryOpen] = useState(false)
+  const [editingRequestId, setEditingRequestId] = useState<string | null>(null)
+  const [editingContent, setEditingContent] = useState('')
   const [toolsByThread, setToolsByThread] = useState<Record<string, ToolActivity[]>>({})
   const [projectReview, setProjectReview] = useState<ProjectReview | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
@@ -90,6 +95,8 @@ export function WorkspaceView({
   const messages = messagesByThread[messageKey] ?? []
   const activeRun = activeThreadId ? runsByThread[activeThreadId] : undefined
   const activeRequest = activeRun?.requestId ?? null
+  const activeRunHistory = activeThreadId ? runHistoryByThread[activeThreadId] ?? [] : []
+  const queuedRunCount = activeRunHistory.filter((run) => run.status === 'queued').length
   const toolActivities = activeThreadId ? toolsByThread[activeThreadId] ?? [] : []
 
   const effectiveModel = useMemo(() => {
@@ -100,10 +107,18 @@ export function WorkspaceView({
   useEffect(() => {
     void Promise.all([window.localAgent.listThreads(), window.localAgent.listActiveRuns()]).then(([storedThreads, runs]) => {
       setThreads(storedThreads)
-      setRunsByThread(Object.fromEntries(runs.map((run) => [run.threadId, {
-        requestId: run.requestId,
-        status: run.status
+      const representatives = new Map<string, (typeof runs)[number]>()
+      for (const run of runs) {
+        const current = representatives.get(run.threadId)
+        if (!current || run.status === 'running') representatives.set(run.threadId, run)
+      }
+      setRunsByThread(Object.fromEntries([...representatives.values()].map((run) => [run.threadId, {
+        requestId: run.requestId, status: run.status
       }])))
+      void Promise.all(storedThreads.map(async (thread) => [
+        thread.id,
+        await window.localAgent.listThreadRuns(thread.id)
+      ] as const)).then((entries) => setRunHistoryByThread(Object.fromEntries(entries)))
     })
   }, [])
 
@@ -120,6 +135,7 @@ export function WorkspaceView({
       if (event.type === 'status') {
         setRunsByThread((current) => applyRunEvent(current, event))
         setMessagesByThread((current) => applyMessageEvent(current, event))
+        void refreshRunHistory(event.threadId)
         return
       }
       if (event.type === 'tool') {
@@ -146,6 +162,7 @@ export function WorkspaceView({
         setMessagesByThread((current) => applyMessageEvent(current, event))
       }
       setRunsByThread((current) => applyRunEvent(current, event))
+      void refreshRunHistory(event.threadId)
     }
 
     return window.localAgent.onChatEvent(handleEvent)
@@ -215,6 +232,28 @@ export function WorkspaceView({
     requestAnimationFrame(() => portalTriggerRef.current?.focus())
   }
 
+  function storeRunHistory(threadId: string, runs: AgentRunSummary[]): void {
+    setRunHistoryByThread((current) => ({ ...current, [threadId]: runs }))
+    const representative = runs.find((run) => run.status === 'running')
+      ?? runs.find((run) => run.status === 'queued')
+    setRunsByThread((current) => {
+      if (representative) {
+        return { ...current, [threadId]: {
+          requestId: representative.requestId,
+          status: representative.status as 'queued' | 'running'
+        } }
+      }
+      if (!current[threadId]) return current
+      const next = { ...current }
+      delete next[threadId]
+      return next
+    })
+  }
+
+  async function refreshRunHistory(threadId: string): Promise<void> {
+    storeRunHistory(threadId, await window.localAgent.listThreadRuns(threadId))
+  }
+
   async function chooseProject(): Promise<void> {
     closeThreadMenu()
     const selection = await window.localAgent.selectProject()
@@ -233,12 +272,19 @@ export function WorkspaceView({
   async function openThread(thread: StoredThread): Promise<void> {
     await closeTerminal()
     await window.localAgent.setActiveThread(thread.id)
-    let storedMessages = await window.localAgent.loadThreadMessages(thread.id)
-    const activeRuns = await window.localAgent.listActiveRuns()
-    const active = activeRuns.find((run) => run.threadId === thread.id)
-    if (!active) storedMessages = await window.localAgent.loadThreadMessages(thread.id)
+    const [storedMessages, runHistory] = await Promise.all([
+      window.localAgent.loadThreadMessages(thread.id),
+      window.localAgent.listThreadRuns(thread.id)
+    ])
+    const active = runHistory.find((run) => run.status === 'running')
+      ?? runHistory.find((run) => run.status === 'queued')
     setActiveThreadId(thread.id)
-    const ephemeral = active ? { requestId: active.requestId, status: active.status } : undefined
+    setRunHistoryOpen(false)
+    storeRunHistory(thread.id, runHistory)
+    const ephemeral = active ? {
+      requestId: active.requestId,
+      status: active.status as 'queued' | 'running'
+    } : undefined
     setRunsByThread((current) => {
       if (ephemeral) return { ...current, [thread.id]: ephemeral }
       if (!current[thread.id]) return current
@@ -256,7 +302,7 @@ export function WorkspaceView({
           role: message.role,
           content: message.content
         })),
-        ...(ephemeral && !storedMessages.some((message) => message.id === ephemeral.requestId)
+        ...(ephemeral?.status === 'running' && !storedMessages.some((message) => message.id === ephemeral.requestId)
           ? [ephemeralMessage ?? { id: ephemeral.requestId, role: 'assistant' as const, content: '' }]
           : [])
       ] }
@@ -423,7 +469,7 @@ export function WorkspaceView({
 
   async function sendMessage(): Promise<void> {
     const content = prompt.trim()
-    if (!content || !effectiveModel || activeRequest) return
+    if (!content || !effectiveModel) return
 
     let threadId = activeThreadId
     if (!threadId) {
@@ -445,7 +491,6 @@ export function WorkspaceView({
 
     const requestId = crypto.randomUUID()
     const userMessage: UiMessage = { id: crypto.randomUUID(), role: 'user', content }
-    const assistantMessage: UiMessage = { id: requestId, role: 'assistant', content: '' }
     const history: ChatMessage[] = messages
       .filter((message) => !message.failed && message.content)
       .map(({ role, content: messageContent }) => ({ role, content: messageContent }))
@@ -453,14 +498,16 @@ export function WorkspaceView({
     setPrompt('')
     setMessagesByThread((current) => ({
       ...current,
-      [threadId]: [...(current[threadId] ?? messages), userMessage, assistantMessage]
+      [threadId]: [...(current[threadId] ?? messages), userMessage]
     }))
-    setRunsByThread((current) => ({ ...current, [threadId]: { requestId, status: 'queued' } }))
-    setToolsByThread((current) => ({ ...current, [threadId]: [] }))
+    setRunsByThread((current) => current[threadId]
+      ? current
+      : { ...current, [threadId]: { requestId, status: 'queued' } })
+    if (!activeRequest) setToolsByThread((current) => ({ ...current, [threadId]: [] }))
     setProjectReview(null)
 
     try {
-      await window.localAgent.startChat({
+      const queuedRun = await window.localAgent.startChat({
         requestId,
         threadId,
         model: effectiveModel,
@@ -476,18 +523,49 @@ export function WorkspaceView({
           { role: 'user', content }
         ]
       })
+      setMessagesByThread((current) => ({
+        ...current,
+        [threadId]: (current[threadId] ?? []).map((message) => message.id === userMessage.id
+          ? { ...message, id: queuedRun.userMessageId }
+          : message)
+      }))
+      await refreshRunHistory(threadId)
     } catch {
-      setMessagesByThread((current) => ({ ...current, [threadId]: (current[threadId] ?? []).map((message) =>
-        message.id === requestId
-          ? { ...message, content: 'Impossible de démarrer la conversation.', failed: true }
-          : message
-      ) }))
-      setRunsByThread((current) => {
-        const next = { ...current }
-        delete next[threadId]
-        return next
-      })
+      setMessagesByThread((current) => ({
+        ...current,
+        [threadId]: (current[threadId] ?? []).filter((message) => message.id !== userMessage.id)
+      }))
+      await refreshRunHistory(threadId)
     }
+  }
+
+  async function saveQueuedMessage(requestId: string): Promise<void> {
+    const updated = await window.localAgent.updateQueuedMessage({ requestId, content: editingContent })
+    setMessagesByThread((current) => ({
+      ...current,
+      [updated.threadId]: (current[updated.threadId] ?? []).map((message) => message.id === updated.userMessageId
+        ? { ...message, content: updated.userContent }
+        : message)
+    }))
+    setEditingRequestId(null)
+    if (activeThreadId) await refreshRunHistory(activeThreadId)
+  }
+
+  async function deleteQueuedMessage(requestId: string): Promise<void> {
+    const queued = activeRunHistory.find((run) => run.requestId === requestId)
+    await window.localAgent.deleteQueuedMessage(requestId)
+    if (activeThreadId && queued) {
+      setMessagesByThread((current) => ({
+        ...current,
+        [activeThreadId]: (current[activeThreadId] ?? []).filter((message) => message.id !== queued.userMessageId)
+      }))
+      await refreshRunHistory(activeThreadId)
+    }
+  }
+
+  async function sendQueuedMessageNow(requestId: string): Promise<void> {
+    await window.localAgent.sendQueuedMessageNow(requestId)
+    if (activeThreadId) await refreshRunHistory(activeThreadId)
   }
 
   const hasOllama = Boolean(status && status !== 'loading' && status.available)
@@ -719,6 +797,49 @@ export function WorkspaceView({
           />
         )}
 
+        {activeThreadId && activeRunHistory.length > 0 && (
+          <div className="run-history-area">
+            <button
+              className="run-history-trigger"
+              type="button"
+              aria-expanded={runHistoryOpen}
+              aria-controls="run-history-panel"
+              onClick={() => setRunHistoryOpen((open) => !open)}
+            >
+              <span aria-hidden="true">☷</span>
+              Historique et file
+              {queuedRunCount > 0 && <strong>{queuedRunCount} en attente</strong>}
+            </button>
+            {runHistoryOpen && (
+              <section id="run-history-panel" className="run-history-panel" aria-label="Historique et file des messages">
+                {activeRunHistory.map((run) => (
+                  <article className={`run-history-item ${run.status}`} key={run.requestId}>
+                    <div className="run-history-status">
+                      <span aria-hidden="true">{run.status === 'running' ? '●' : run.status === 'queued' ? '○' : run.status === 'completed' ? '✓' : '!'}</span>
+                      <strong>{run.status === 'running' ? 'En cours' : run.status === 'queued' ? 'En attente' : run.status === 'completed' ? 'Terminé' : run.status === 'interrupted' ? 'Interrompu' : 'Erreur'}</strong>
+                    </div>
+                    {run.status === 'queued' && editingRequestId === run.requestId ? (
+                      <div className="run-history-editor">
+                        <textarea aria-label="Modifier le message en attente" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} />
+                        <button type="button" disabled={!editingContent.trim()} onClick={() => void saveQueuedMessage(run.requestId)}>Enregistrer</button>
+                        <button type="button" onClick={() => setEditingRequestId(null)}>Annuler</button>
+                      </div>
+                    ) : <p>{run.userContent}</p>}
+                    {run.error && <small>{run.error}</small>}
+                    {run.status === 'queued' && editingRequestId !== run.requestId && (
+                      <div className="run-history-actions">
+                        <button type="button" onClick={() => { setEditingRequestId(run.requestId); setEditingContent(run.userContent) }}>Modifier</button>
+                        <button type="button" onClick={() => void deleteQueuedMessage(run.requestId)}>Supprimer</button>
+                        <button className="send-now" type="button" onClick={() => void sendQueuedMessageNow(run.requestId)}>Envoyer maintenant</button>
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </section>
+            )}
+          </div>
+        )}
+
         <div className="composer-area">
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
             <textarea
@@ -733,15 +854,16 @@ export function WorkspaceView({
                   void sendMessage()
                 }
               }}
-              disabled={!effectiveModel || Boolean(activeRequest)}
+              disabled={!effectiveModel}
             />
             <div className="composer-toolbar">
               <span>{project ? `◇ ${project.name}` : 'Aucun projet'}</span>
-              {activeRequest ? (
-                <button className="stop-button" type="button" onClick={() => void window.localAgent.cancelChat(activeRequest)}>Arrêter</button>
-              ) : (
-                <button type="submit" aria-label="Envoyer" disabled={!prompt.trim() || !effectiveModel}>↑</button>
-              )}
+              <div className="composer-actions">
+                {activeRequest && (
+                  <button className="stop-button" type="button" onClick={() => void window.localAgent.cancelChat(activeRequest)}>Arrêter</button>
+                )}
+                <button type="submit" aria-label={activeRequest ? 'Ajouter à la file d’attente' : 'Envoyer'} disabled={!prompt.trim() || !effectiveModel}>↑</button>
+              </div>
             </div>
           </form>
           <small>Entrée pour envoyer · Maj + Entrée pour une nouvelle ligne</small>

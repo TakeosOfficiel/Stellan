@@ -56,8 +56,14 @@ export type AgentRun = {
   model: string
   status: AgentRunStatus
   error: string | null
+  priority: number
+  assistantContent: string | null
   startedAt: string
   finishedAt: string | null
+}
+
+export type AgentRunSummary = AgentRun & {
+  userContent: string
 }
 
 export type ToolEventStatus = 'running' | 'done' | 'denied' | 'error' | 'interrupted'
@@ -246,6 +252,27 @@ const migrations = [
     ALTER TABLE agent_tool_events_new RENAME TO agent_tool_events;
     CREATE INDEX agent_runs_thread_id_started_at ON agent_runs(thread_id, started_at);
     CREATE INDEX agent_tool_events_run_id_sequence ON agent_tool_events(run_id, sequence);
+  `,
+  `
+    ALTER TABLE agent_runs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX agent_runs_thread_queue
+      ON agent_runs(thread_id, status, priority DESC, started_at);
+  `,
+  `
+    ALTER TABLE agent_runs ADD COLUMN assistant_content TEXT;
+
+    UPDATE agent_runs
+    SET assistant_content = (
+      SELECT assistant.content
+      FROM messages AS user_message
+      JOIN messages AS assistant ON assistant.thread_id = user_message.thread_id
+      WHERE user_message.id = agent_runs.user_message_id
+        AND assistant.role = 'assistant'
+        AND assistant.rowid > user_message.rowid
+      ORDER BY assistant.rowid ASC
+      LIMIT 1
+    )
+    WHERE status IN ('completed', 'interrupted', 'error');
   `
 ]
 
@@ -314,6 +341,10 @@ function toAgentRun(row: StorageRow): AgentRun {
     model: String(row.model),
     status: String(row.status) as AgentRunStatus,
     error: row.error === null ? null : String(row.error),
+    priority: Number(row.priority ?? 0),
+    assistantContent: row.assistant_content === null || row.assistant_content === undefined
+      ? null
+      : String(row.assistant_content),
     startedAt: String(row.started_at),
     finishedAt: row.finished_at === null ? null : String(row.finished_at)
   }
@@ -575,15 +606,28 @@ export class ThreadStore {
   listActiveAgentRuns(): AgentRun[] {
     this.assertOpen()
     return this.database.prepare(`
-      SELECT id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
-      FROM agent_runs WHERE status IN ('queued', 'running') ORDER BY started_at ASC, rowid ASC
+      SELECT id, thread_id, request_id, user_message_id, model, status, error, priority, assistant_content,
+             started_at, finished_at
+      FROM agent_runs WHERE status IN ('queued', 'running')
+      ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, priority DESC, started_at ASC, rowid ASC
+    `).all().map(toAgentRun)
+  }
+
+  listQueuedAgentRuns(): AgentRun[] {
+    this.assertOpen()
+    return this.database.prepare(`
+      SELECT id, thread_id, request_id, user_message_id, model, status, error, priority, assistant_content,
+             started_at, finished_at
+      FROM agent_runs WHERE status = 'queued'
+      ORDER BY priority DESC, started_at ASC, rowid ASC
     `).all().map(toAgentRun)
   }
 
   getAgentRun(id: string): AgentRun | null {
     this.assertOpen()
     const row = this.database.prepare(`
-      SELECT id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
+      SELECT id, thread_id, request_id, user_message_id, model, status, error, priority, assistant_content,
+             started_at, finished_at
       FROM agent_runs
       WHERE id = ?
     `).get(id)
@@ -593,11 +637,64 @@ export class ThreadStore {
   listAgentRuns(threadId: string): AgentRun[] {
     this.assertOpen()
     return this.database.prepare(`
-      SELECT id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
+      SELECT id, thread_id, request_id, user_message_id, model, status, error, priority, assistant_content,
+             started_at, finished_at
       FROM agent_runs
       WHERE thread_id = ?
       ORDER BY started_at ASC, rowid ASC
     `).all(threadId).map(toAgentRun)
+  }
+
+  listAgentRunSummaries(threadId: string): AgentRunSummary[] {
+    this.assertOpen()
+    return this.database.prepare(`
+      SELECT runs.id, runs.thread_id, runs.request_id, runs.user_message_id, runs.model,
+             runs.status, runs.error, runs.priority, runs.assistant_content, runs.started_at, runs.finished_at,
+             messages.content AS user_content
+      FROM agent_runs runs
+      JOIN messages ON messages.id = runs.user_message_id
+      WHERE runs.thread_id = ?
+      ORDER BY CASE runs.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+               runs.priority DESC, runs.started_at ASC, runs.rowid ASC
+    `).all(threadId).map((row) => ({ ...toAgentRun(row), userContent: String(row.user_content) }))
+  }
+
+  updateQueuedAgentRun(requestId: string, content: string): AgentRunSummary {
+    this.assertOpen()
+    const trimmed = content.trim()
+    if (!trimmed) throw new Error('Le message en attente ne peut pas être vide.')
+    const run = this.getAgentRunByRequestId(requestId)
+    if (!run || run.status !== 'queued') throw new Error('Ce message n’est plus modifiable.')
+    this.database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(trimmed, run.userMessageId)
+    return this.listAgentRunSummaries(run.threadId).find((entry) => entry.requestId === requestId) as AgentRunSummary
+  }
+
+  deleteQueuedAgentRun(requestId: string): boolean {
+    this.assertOpen()
+    const run = this.getAgentRunByRequestId(requestId)
+    if (!run || run.status !== 'queued') return false
+    this.database.exec('BEGIN')
+    try {
+      this.database.prepare('DELETE FROM agent_runs WHERE id = ? AND status = \'queued\'').run(run.id)
+      this.database.prepare('DELETE FROM messages WHERE id = ?').run(run.userMessageId)
+      this.database.exec('COMMIT')
+      return true
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  prioritizeQueuedAgentRun(requestId: string): AgentRun {
+    this.assertOpen()
+    const run = this.getAgentRunByRequestId(requestId)
+    if (!run || run.status !== 'queued') throw new Error('Ce message n’est plus en attente.')
+    const row = this.database.prepare(`
+      SELECT COALESCE(MAX(priority), 0) + 1 AS priority FROM agent_runs WHERE status = 'queued'
+    `).get()
+    this.database.prepare('UPDATE agent_runs SET priority = ? WHERE id = ? AND status = \'queued\'')
+      .run(Number(row?.priority ?? 1), run.id)
+    return this.getAgentRun(run.id) as AgentRun
   }
 
   recordToolStarted(
@@ -709,9 +806,9 @@ export class ThreadStore {
       }
       this.database.prepare(`
         UPDATE agent_runs
-        SET status = ?, error = ?, finished_at = ?
+        SET status = ?, error = ?, assistant_content = ?, finished_at = ?
         WHERE id = ? AND status IN ('queued', 'running')
-      `).run(status, error?.trim() || null, finishedAt, runId)
+      `).run(status, error?.trim() || null, assistantContent || null, finishedAt, runId)
       this.database.exec('COMMIT')
     } catch (caught) {
       this.database.exec('ROLLBACK')
@@ -723,7 +820,7 @@ export class ThreadStore {
   recoverInterruptedAgentRuns(): number {
     this.assertOpen()
     const runs = this.database.prepare(`
-      SELECT id FROM agent_runs WHERE status IN ('queued', 'running') ORDER BY started_at ASC, rowid ASC
+      SELECT id FROM agent_runs WHERE status = 'running' ORDER BY started_at ASC, rowid ASC
     `).all()
     if (runs.length === 0) return 0
     const finishedAt = new Date().toISOString()
@@ -734,7 +831,7 @@ export class ThreadStore {
       this.database.prepare(`
         UPDATE agent_runs
         SET status = 'interrupted', error = 'Application fermée pendant la génération.', finished_at = ?
-        WHERE status IN ('queued', 'running')
+        WHERE status = 'running'
       `).run(finishedAt)
       this.database.exec('COMMIT')
     } catch (error) {
@@ -744,17 +841,17 @@ export class ThreadStore {
     return runs.length
   }
 
-  listPromptMessages(threadId: string): OllamaMessage[] {
+  listPromptMessages(threadId: string, throughUserMessageId?: string): OllamaMessage[] {
     this.assertOpen()
-    const runsByUserMessage = new Map(
-      this.listAgentRuns(threadId).map((run) => [run.userMessageId, run])
-    )
+    const runs = this.listAgentRuns(threadId)
+    const messages = new Map(this.listMessages(threadId).map((message) => [message.id, message]))
     const prompt: OllamaMessage[] = []
 
-    for (const message of this.listMessages(threadId)) {
-      prompt.push({ role: message.role, content: message.content })
-      const run = runsByUserMessage.get(message.id)
-      if (!run) continue
+    for (const run of runs) {
+      if (run.status === 'queued' && run.userMessageId !== throughUserMessageId) continue
+      const userMessage = messages.get(run.userMessageId)
+      if (!userMessage) continue
+      prompt.push({ role: 'user', content: userMessage.content })
 
       const events = this.listAgentToolEvents(run.id)
       const starts = events.filter((event) => event.status === 'running')
@@ -786,6 +883,8 @@ export class ThreadStore {
           })
         }
       }
+      if (run.assistantContent) prompt.push({ role: 'assistant', content: run.assistantContent })
+      if (run.userMessageId === throughUserMessageId) break
     }
     return prompt
   }
@@ -867,6 +966,15 @@ export class ThreadStore {
       WHERE id = ?
     `).get(id)
     return row ? toAgentToolEvent(row) : null
+  }
+
+  private getAgentRunByRequestId(requestId: string): AgentRun | null {
+    const row = this.database.prepare(`
+      SELECT id, thread_id, request_id, user_message_id, model, status, error, priority, assistant_content,
+             started_at, finished_at
+      FROM agent_runs WHERE request_id = ?
+    `).get(requestId)
+    return row ? toAgentRun(row) : null
   }
 
   private nextToolEventSequence(runId: string): number {

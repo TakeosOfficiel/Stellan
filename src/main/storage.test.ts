@@ -205,7 +205,7 @@ describe('ThreadStore', () => {
     }
   })
 
-  it('journals queued runs and marks them interrupted after restart', () => {
+  it('keeps queued runs durable across restart while recovering only running work', () => {
     const path = temporaryDatabase()
     const firstStore = new ThreadStore(path)
     const thread = firstStore.createThread({ title: 'Queued agent' })
@@ -215,13 +215,52 @@ describe('ThreadStore', () => {
 
     const reopened = new ThreadStore(path)
     try {
-      expect(reopened.recoverInterruptedAgentRuns()).toBe(1)
+      expect(reopened.recoverInterruptedAgentRuns()).toBe(0)
       expect(reopened.getAgentRun(run.id)).toMatchObject({
-        status: 'interrupted',
-        error: 'Application fermée pendant la génération.'
+        status: 'queued',
+        error: null
       })
+      expect(reopened.listQueuedAgentRuns()).toHaveLength(1)
     } finally {
       reopened.close()
+    }
+  })
+
+  it('edits, deletes, prioritizes, and bounds prompt history for queued messages', () => {
+    const store = new ThreadStore(temporaryDatabase())
+    try {
+      const thread = store.createThread({ title: 'Message queue' })
+      const first = store.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Premier')
+      const second = store.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Deuxième')
+
+      expect(store.listPromptMessages(thread.id, first.userMessageId)).toEqual([
+        { role: 'user', content: 'Premier' }
+      ])
+      expect(store.updateQueuedAgentRun(second.requestId, 'Deuxième modifié')).toMatchObject({
+        requestId: second.requestId,
+        userContent: 'Deuxième modifié'
+      })
+      store.prioritizeQueuedAgentRun(second.requestId)
+      expect(store.listQueuedAgentRuns().map((run) => run.requestId)).toEqual([
+        second.requestId,
+        first.requestId
+      ])
+      store.markAgentRunRunning(first.id)
+      store.finishAgentRun(first.id, 'completed', 'Réponse au premier')
+      expect(store.listPromptMessages(thread.id, second.userMessageId)).toEqual([
+        { role: 'user', content: 'Premier' },
+        { role: 'assistant', content: 'Réponse au premier' },
+        { role: 'user', content: 'Deuxième modifié' }
+      ])
+      expect(store.deleteQueuedAgentRun(second.requestId)).toBe(true)
+      expect(store.deleteQueuedAgentRun(second.requestId)).toBe(false)
+      expect(store.listMessages(thread.id).map((message) => message.content)).toEqual([
+        'Premier',
+        'Réponse au premier'
+      ])
+      expect(store.listAgentRunSummaries(thread.id).map((run) => run.requestId)).toEqual([first.requestId])
+    } finally {
+      store.close()
     }
   })
 
@@ -330,7 +369,7 @@ describe('ThreadStore', () => {
       })
       const version = new DatabaseSync(path, { readOnly: true })
       try {
-        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(6)
+        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(8)
       } finally {
         version.close()
       }

@@ -10,7 +10,7 @@ import { startOllamaServer } from './ollama-process'
 import { assertPortalAccess, PortalManager } from './portal'
 import { ProjectTools } from './project-tools'
 import { createThreadWorktree, getRuntimeInfo, removeThreadWorktree } from './runtime'
-import { ThreadStore } from './storage'
+import { ThreadStore, type AgentRun, type AgentRunSummary as StoredAgentRunSummary } from './storage'
 import { TerminalManager } from './terminal'
 import { createWorkerCommandExecutor } from './worker-runtime'
 import { WorkerScheduler } from './worker-scheduler'
@@ -27,6 +27,10 @@ const WORKER_PROFILE_SAVE_CHANNEL = 'worker-profile:save'
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_CANCEL_CHANNEL = 'chat:cancel'
 const CHAT_LIST_ACTIVE_CHANNEL = 'chat:list-active'
+const CHAT_LIST_THREAD_RUNS_CHANNEL = 'chat:list-thread-runs'
+const CHAT_UPDATE_QUEUED_CHANNEL = 'chat:update-queued'
+const CHAT_DELETE_QUEUED_CHANNEL = 'chat:delete-queued'
+const CHAT_SEND_NOW_CHANNEL = 'chat:send-now'
 const CHAT_EVENT_CHANNEL = 'chat:event'
 const THREADS_LIST_CHANNEL = 'threads:list'
 const THREADS_SET_ACTIVE_CHANNEL = 'threads:set-active'
@@ -61,6 +65,10 @@ const chatRequestSchema = z.object({
   })).min(1).max(200)
 })
 const requestIdSchema = z.uuid()
+const updateQueuedMessageSchema = z.object({
+  requestId: z.uuid(),
+  content: z.string().trim().min(1).max(200_000)
+})
 const terminalStartSchema = z.object({
   threadId: z.uuid(),
   cols: z.number().int().min(2).max(500),
@@ -103,6 +111,7 @@ const activeThreadChats = new Map<string, string>()
 const workerScheduler = new WorkerScheduler()
 const activeThreadOwners = new Map<number, string>()
 const approvedProjectPaths = new Set<string>()
+let recoveredQueueScheduled = false
 let threadStore: ThreadStore | null = null
 let mainWindow: BrowserWindow | null = null
 let shutdownReady = false
@@ -184,6 +193,158 @@ function handle<T extends unknown[], R>(
   })
 }
 
+function sendChatEvent(run: AgentRun, payload: object): void {
+  const contents = mainWindow?.webContents
+  if (contents && !contents.isDestroyed()) {
+    contents.send(CHAT_EVENT_CHANNEL, { requestId: run.requestId, threadId: run.threadId, ...payload })
+  }
+}
+
+function toPublicRunSummary(run: StoredAgentRunSummary) {
+  return {
+    requestId: run.requestId,
+    threadId: run.threadId,
+    userMessageId: run.userMessageId,
+    userContent: run.userContent,
+    model: run.model,
+    status: run.status,
+    error: run.error,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt
+  }
+}
+
+async function scheduleAgentRun(run: AgentRun): Promise<void> {
+  if (workerScheduler.has(run.requestId)) return
+  const store = getThreadStore()
+  const thread = store.getThread(run.threadId)
+  if (!thread) throw new Error('Le thread local est introuvable.')
+  if (thread.environmentStatus !== 'active' && thread.projectPath) {
+    throw new Error(thread.environmentError ?? 'L’environnement de ce thread n’est pas actif.')
+  }
+  const profile = thread.projectPath
+    ? store.getWorkerProfile(thread.projectPath) ?? store.saveWorkerProfile(await defaultWorkerProfile(thread.projectPath))
+    : null
+  if (thread.projectPath && !profile) throw new Error('Le profil worker du projet est invalide.')
+  if (profile?.mode === 'container') {
+    const runtime = await getRuntimeInfo()
+    if (!profile.runtime || !runtime[profile.runtime].available) {
+      throw new Error(`Le runtime ${profile.runtime ?? 'conteneur'} n’est pas disponible.`)
+    }
+  }
+
+  const controller = new AbortController()
+  sendChatEvent(run, { type: 'status', status: 'queued' })
+  workerScheduler.enqueue({
+    requestId: run.requestId,
+    threadId: thread.id,
+    projectKey: thread.projectPath ?? '__local-chat__',
+    isolationKey: thread.workspaceMode === 'direct' ? thread.projectPath : null,
+    maxConcurrentWorkers: profile?.maxConcurrentWorkers ?? 1,
+    cancelQueued: () => {
+      store.finishAgentRun(run.id, 'interrupted', '', 'Génération annulée dans la file d’attente.')
+      sendChatEvent(run, { type: 'error', reason: 'Génération annulée dans la file d’attente.' })
+    },
+    run: async () => {
+      activeChats.set(run.requestId, controller)
+      activeThreadChats.set(thread.id, run.requestId)
+      store.markAgentRunRunning(run.id)
+      sendChatEvent(run, { type: 'status', status: 'running' })
+      let assistantContent = ''
+      let toolAssistantCharacters = 0
+      try {
+        const executionPath = thread.workspacePath ?? thread.projectPath
+        const promptMessages = store.listPromptMessages(thread.id, run.userMessageId)
+        const onContent = (content: string): void => {
+          assistantContent += content
+          sendChatEvent(run, { type: 'content', content })
+        }
+        if (executionPath) {
+          if (!await modelSupportsTools(run.model)) {
+            throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
+          }
+          const project = await openThreadProject(thread.id)
+          await runCodingAgent({
+            model: run.model,
+            messages: promptMessages,
+            project,
+            signal: controller.signal,
+            onContent,
+            onTool: (tool, status) => sendChatEvent(run, { type: 'tool', tool, status }),
+            onToolEvent: async (toolEvent: AgentToolLifecycleEvent) => {
+              const currentStore = getThreadStore()
+              if (toolEvent.type === 'started') {
+                currentStore.recordToolStarted(run.id, toolEvent)
+                if (toolEvent.callIndex === 0) toolAssistantCharacters += toolEvent.assistantContent.length
+              } else {
+                currentStore.recordToolFinished(
+                  run.id,
+                  toolEvent.callId,
+                  toolEvent.status,
+                  toolEvent.result
+                )
+              }
+            },
+            runCommand: createWorkerCommandExecutor(profile, thread.id, executionPath),
+            authorize: async (tool, summary) => {
+              const owner = mainWindow
+              const options = {
+                type: 'warning' as const,
+                title: 'Autoriser une action',
+                message: tool === 'write_file'
+                  ? 'Autoriser la modification du projet ?'
+                  : 'Autoriser cette commande ?',
+                detail: summary,
+                buttons: ['Refuser', 'Autoriser'],
+                defaultId: 0,
+                cancelId: 0,
+                noLink: true
+              }
+              const result = owner
+                ? await dialog.showMessageBox(owner, options)
+                : await dialog.showMessageBox(options)
+              return !controller.signal.aborted && result.response === 1
+            }
+          })
+        } else {
+          await streamOllamaChat(
+            run.model,
+            compactConversation([
+              { role: 'system', content: 'Tu es un assistant local utile, précis et concis.' },
+              ...promptMessages.filter((message) => message.role !== 'system')
+            ]),
+            onContent,
+            controller.signal
+          )
+        }
+        getThreadStore().finishAgentRun(
+          run.id,
+          'completed',
+          assistantContent.slice(toolAssistantCharacters)
+        )
+        sendChatEvent(run, { type: 'done' })
+      } catch (error) {
+        const reason = controller.signal.aborted
+          ? 'Génération interrompue.'
+          : error instanceof Error ? error.message : 'La génération a échoué.'
+        const finalContent = assistantContent.slice(toolAssistantCharacters)
+        getThreadStore().finishAgentRun(
+          run.id,
+          controller.signal.aborted ? 'interrupted' : 'error',
+          finalContent
+            ? `${finalContent}\n\n${controller.signal.aborted ? '[Réponse interrompue]' : '[Réponse incomplète]'}`
+            : '',
+          reason
+        )
+        sendChatEvent(run, { type: 'error', reason })
+      } finally {
+        activeChats.delete(run.requestId)
+        if (activeThreadChats.get(thread.id) === run.requestId) activeThreadChats.delete(thread.id)
+      }
+    }
+  })
+}
+
 function createWindow(): void {
   const window = new BrowserWindow({
     width: 1180,
@@ -218,6 +379,17 @@ function createWindow(): void {
   })
 
   window.once('ready-to-show', () => window.show())
+  window.webContents.once('did-finish-load', () => {
+    if (recoveredQueueScheduled) return
+    recoveredQueueScheduled = true
+    for (const run of getThreadStore().listQueuedAgentRuns()) {
+      void scheduleAgentRun(run).catch((error: unknown) => {
+        const reason = error instanceof Error ? error.message : 'La génération en attente n’a pas pu redémarrer.'
+        getThreadStore().finishAgentRun(run.id, 'error', '', reason)
+        sendChatEvent(run, { type: 'error', reason })
+      })
+    }
+  })
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url)
@@ -521,16 +693,13 @@ app.whenReady().then(() => {
     if (!portal) throw new Error('Aucun portail actif pour ce thread.')
     await shell.openExternal(portal.url)
   })
-  handle(CHAT_START_CHANNEL, async (event, input: unknown) => {
+  handle(CHAT_START_CHANNEL, async (_event, input: unknown) => {
     const parsed = chatRequestSchema.safeParse(input)
     if (!parsed.success) {
       throw new Error('La demande de conversation est invalide.')
     }
     if (activeChats.has(parsed.data.requestId)) {
       throw new Error('Cette génération est déjà active.')
-    }
-    if (parsed.data.threadId && activeThreadChats.has(parsed.data.threadId)) {
-      throw new Error('Ce thread exécute déjà une génération.')
     }
 
     const store = getThreadStore()
@@ -552,127 +721,17 @@ app.whenReady().then(() => {
     const latestUserMessage = [...parsed.data.messages].reverse().find((message) => message.role === 'user')
     if (!latestUserMessage) throw new Error('La demande ne contient aucun nouveau message utilisateur.')
     const run = store.startAgentRun(thread.id, parsed.data.requestId, parsed.data.model, latestUserMessage.content)
-    const controller = new AbortController()
-    activeThreadChats.set(thread.id, parsed.data.requestId)
-    const send = (payload: object): void => {
-      if (!event.sender.isDestroyed()) {
-        event.sender.send(CHAT_EVENT_CHANNEL, { requestId: parsed.data.requestId, threadId: thread.id, ...payload })
-      }
+    try {
+      await scheduleAgentRun(run)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'La génération n’a pas pu être planifiée.'
+      store.finishAgentRun(run.id, 'error', '', reason)
+      sendChatEvent(run, { type: 'error', reason })
+      throw error
     }
-    send({ type: 'status', status: 'queued' })
-
-    workerScheduler.enqueue({
-      requestId: parsed.data.requestId,
-      threadId: thread.id,
-      projectKey: thread.projectPath ?? '__local-chat__',
-      isolationKey: thread.workspaceMode === 'direct' ? thread.projectPath : null,
-      maxConcurrentWorkers: profile?.maxConcurrentWorkers ?? 1,
-      cancelQueued: () => {
-        store.finishAgentRun(run.id, 'interrupted', '', 'Génération annulée dans la file d’attente.')
-        activeThreadChats.delete(thread.id)
-        send({ type: 'error', reason: 'Génération annulée dans la file d’attente.' })
-      },
-      run: async () => {
-        activeChats.set(parsed.data.requestId, controller)
-        store.markAgentRunRunning(run.id)
-        send({ type: 'status', status: 'running' })
-        let assistantContent = ''
-        let toolAssistantCharacters = 0
-        try {
-          const executionPath = thread.workspacePath ?? thread.projectPath
-          const promptMessages = store.listPromptMessages(thread.id)
-
-          const onContent = (content: string): void => {
-            assistantContent += content
-            send({ type: 'content', content })
-          }
-          if (executionPath) {
-            if (!await modelSupportsTools(parsed.data.model)) {
-              throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
-            }
-            const project = await openThreadProject(thread.id)
-            await runCodingAgent({
-              model: parsed.data.model,
-              messages: promptMessages,
-              project,
-              signal: controller.signal,
-              onContent,
-              onTool: (tool, status) => send({ type: 'tool', tool, status }),
-              onToolEvent: async (toolEvent: AgentToolLifecycleEvent) => {
-                const store = getThreadStore()
-                if (toolEvent.type === 'started') {
-                  store.recordToolStarted(run.id, toolEvent)
-                  if (toolEvent.callIndex === 0) {
-                    toolAssistantCharacters += toolEvent.assistantContent.length
-                  }
-                } else {
-                  store.recordToolFinished(
-                    run.id,
-                    toolEvent.callId,
-                    toolEvent.status,
-                    toolEvent.result
-                  )
-                }
-              },
-              runCommand: createWorkerCommandExecutor(profile, thread.id, executionPath),
-              authorize: async (tool, summary) => {
-                const owner = BrowserWindow.fromWebContents(event.sender)
-                const options = {
-                  type: 'warning' as const,
-                  title: 'Autoriser une action',
-                  message: tool === 'write_file'
-                    ? 'Autoriser la modification du projet ?'
-                    : 'Autoriser cette commande ?',
-                  detail: summary,
-                  buttons: ['Refuser', 'Autoriser'],
-                  defaultId: 0,
-                  cancelId: 0,
-                  noLink: true
-                }
-                const result = owner
-                  ? await dialog.showMessageBox(owner, options)
-                  : await dialog.showMessageBox(options)
-                if (controller.signal.aborted) return false
-                return result.response === 1
-              }
-            })
-          } else {
-            await streamOllamaChat(
-              parsed.data.model,
-              compactConversation([
-                { role: 'system', content: 'Tu es un assistant local utile, précis et concis.' },
-                ...promptMessages.filter((message) => message.role !== 'system')
-              ]),
-              onContent,
-              controller.signal
-            )
-          }
-          getThreadStore().finishAgentRun(
-            run.id,
-            'completed',
-            assistantContent.slice(toolAssistantCharacters)
-          )
-          send({ type: 'done' })
-        } catch (error) {
-          const reason = controller.signal.aborted
-            ? 'Génération interrompue.'
-            : error instanceof Error ? error.message : 'La génération a échoué.'
-          const finalContent = assistantContent.slice(toolAssistantCharacters)
-          getThreadStore().finishAgentRun(
-            run.id,
-            controller.signal.aborted ? 'interrupted' : 'error',
-            finalContent
-              ? `${finalContent}\n\n${controller.signal.aborted ? '[Réponse interrompue]' : '[Réponse incomplète]'}`
-              : '',
-            reason
-          )
-          send({ type: 'error', reason })
-        } finally {
-          activeChats.delete(parsed.data.requestId)
-          activeThreadChats.delete(thread.id)
-        }
-      }
-    })
+    return toPublicRunSummary(store.listAgentRunSummaries(thread.id).find(
+      (summary) => summary.requestId === run.requestId
+    ) as StoredAgentRunSummary)
   })
   handle(CHAT_CANCEL_CHANNEL, (_event, input: unknown) => {
     const parsed = requestIdSchema.safeParse(input)
@@ -685,6 +744,29 @@ app.whenReady().then(() => {
     threadId: run.threadId,
     status: run.status as 'queued' | 'running'
   })))
+  handle(CHAT_LIST_THREAD_RUNS_CHANNEL, (_event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    if (!getThreadStore().getThread(threadId)) throw new Error('Le thread local est introuvable.')
+    return getThreadStore().listAgentRunSummaries(threadId).map(toPublicRunSummary)
+  })
+  handle(CHAT_UPDATE_QUEUED_CHANNEL, (_event, input: unknown) => {
+    const request = updateQueuedMessageSchema.parse(input)
+    return toPublicRunSummary(getThreadStore().updateQueuedAgentRun(request.requestId, request.content))
+  })
+  handle(CHAT_DELETE_QUEUED_CHANNEL, (_event, input: unknown) => {
+    const requestId = requestIdSchema.parse(input)
+    if (workerScheduler.has(requestId) && !workerScheduler.removeQueued(requestId)) return false
+    return getThreadStore().deleteQueuedAgentRun(requestId)
+  })
+  handle(CHAT_SEND_NOW_CHANNEL, async (_event, input: unknown) => {
+    const requestId = requestIdSchema.parse(input)
+    const store = getThreadStore()
+    const run = store.prioritizeQueuedAgentRun(requestId)
+    if (!workerScheduler.has(requestId)) await scheduleAgentRun(run)
+    workerScheduler.prioritize(requestId)
+    const activeRequestId = activeThreadChats.get(run.threadId)
+    if (activeRequestId && activeRequestId !== requestId) activeChats.get(activeRequestId)?.abort()
+  })
   createWindow()
 
   app.on('activate', () => {
@@ -730,6 +812,10 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(CHAT_START_CHANNEL)
   ipcMain.removeHandler(CHAT_CANCEL_CHANNEL)
   ipcMain.removeHandler(CHAT_LIST_ACTIVE_CHANNEL)
+  ipcMain.removeHandler(CHAT_LIST_THREAD_RUNS_CHANNEL)
+  ipcMain.removeHandler(CHAT_UPDATE_QUEUED_CHANNEL)
+  ipcMain.removeHandler(CHAT_DELETE_QUEUED_CHANNEL)
+  ipcMain.removeHandler(CHAT_SEND_NOW_CHANNEL)
   ipcMain.removeHandler(THREADS_LIST_CHANNEL)
   ipcMain.removeHandler(THREADS_SET_ACTIVE_CHANNEL)
   ipcMain.removeHandler(THREADS_CREATE_CHANNEL)
@@ -745,7 +831,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(PORTAL_STOP_CHANNEL)
   ipcMain.removeHandler(PORTAL_COPY_URL_CHANNEL)
   ipcMain.removeHandler(PORTAL_OPEN_CHANNEL)
-  workerScheduler.shutdown()
+  workerScheduler.shutdown(true)
   for (const controller of activeChats.values()) controller.abort()
   activeChats.clear()
   threadStore?.recoverInterruptedAgentRuns()

@@ -108,6 +108,23 @@ export type ActiveRun = {
   status: 'queued' | 'running'
 }
 
+export type AgentRunSummary = {
+  requestId: string
+  threadId: string
+  userMessageId: string
+  userContent: string
+  model: string
+  status: 'queued' | 'running' | 'completed' | 'interrupted' | 'error'
+  error: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
+export type UpdateQueuedMessageRequest = {
+  requestId: string
+  content: string
+}
+
 export type SaveWorkerProfileRequest = Omit<WorkerProfile, 'updatedAt'>
 
 export type StoredThread = {
@@ -197,9 +214,13 @@ export type LocalAgentApi = {
   selectProject: () => Promise<ProjectSelection | null>
   getWorkerProfile: (projectPath: string) => Promise<WorkerProfile>
   saveWorkerProfile: (profile: SaveWorkerProfileRequest) => Promise<WorkerProfile>
-  startChat: (request: ChatRequest) => Promise<void>
+  startChat: (request: ChatRequest) => Promise<AgentRunSummary>
   cancelChat: (requestId: string) => Promise<void>
   listActiveRuns: () => Promise<ActiveRun[]>
+  listThreadRuns: (threadId: string) => Promise<AgentRunSummary[]>
+  updateQueuedMessage: (request: UpdateQueuedMessageRequest) => Promise<AgentRunSummary>
+  deleteQueuedMessage: (requestId: string) => Promise<boolean>
+  sendQueuedMessageNow: (requestId: string) => Promise<void>
   onChatEvent: (listener: (event: ChatEvent) => void) => () => void
   listThreads: () => Promise<StoredThread[]>
   setActiveThread: (threadId: string | null) => Promise<void>

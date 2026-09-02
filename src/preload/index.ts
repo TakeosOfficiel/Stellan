@@ -28,6 +28,10 @@ const api: LocalAgentApi = {
   startChat: (request) => ipcRenderer.invoke('chat:start', request),
   cancelChat: (requestId) => ipcRenderer.invoke('chat:cancel', requestId),
   listActiveRuns: () => ipcRenderer.invoke('chat:list-active'),
+  listThreadRuns: (threadId) => ipcRenderer.invoke('chat:list-thread-runs', threadId),
+  updateQueuedMessage: (request) => ipcRenderer.invoke('chat:update-queued', request),
+  deleteQueuedMessage: (requestId) => ipcRenderer.invoke('chat:delete-queued', requestId),
+  sendQueuedMessageNow: (requestId) => ipcRenderer.invoke('chat:send-now', requestId),
   onChatEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, chatEvent: ChatEvent): void => {
       listener(chatEvent)

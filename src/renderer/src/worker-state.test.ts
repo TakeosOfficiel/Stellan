@@ -18,7 +18,7 @@ describe('parallel worker renderer state', () => {
       'thread-a': { requestId: 'request-a', status: 'queued' },
       'thread-b': { requestId: 'request-b', status: 'running' }
     })
-    expect(messages['thread-a']?.[0]?.content).toBe('')
+    expect(messages['thread-a']).toBeUndefined()
     expect(messages['thread-b']?.[0]?.content).toBe('B result')
   })
 

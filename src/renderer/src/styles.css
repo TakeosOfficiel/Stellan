@@ -399,6 +399,31 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .message { max-width: 88%; }
 .message p { border: 0; padding: 0; color: #c6cec8; background: transparent; }
 .message.user p { padding: 10px 12px; background: #202722; }
+.run-history-area { position: relative; width: min(100% - 40px, 760px); margin: 0 auto; }
+.run-history-trigger {
+  display: flex; align-items: center; gap: 7px; min-height: 27px; padding: 4px 8px;
+  border: 1px solid #29312c; border-bottom: 0; border-radius: 7px 7px 0 0;
+  color: #929c95; background: #111613; font-size: 9px;
+}
+.run-history-trigger strong { padding: 2px 6px; border-radius: 999px; color: #d8ba73; background: #332d1d; font-size: 8px; }
+.run-history-panel {
+  position: absolute; z-index: 8; right: 0; bottom: 27px; width: min(100%, 620px); max-height: min(430px, 55vh);
+  padding: 7px; overflow: auto; border: 1px solid #303933; border-radius: 10px;
+  background: #111613; box-shadow: 0 18px 55px rgba(0, 0, 0, 0.48);
+  scrollbar-color: #3a433d #111613;
+}
+.run-history-item { padding: 9px; border-bottom: 1px solid #252d28; }
+.run-history-item:last-child { border-bottom: 0; }
+.run-history-item p { margin: 6px 0; color: #bbc4bd; font-size: 10px; white-space: pre-wrap; }
+.run-history-item > small { color: #c98787; font-size: 8px; }
+.run-history-status { display: flex; align-items: center; gap: 6px; color: #707b74; font-size: 8px; text-transform: uppercase; letter-spacing: 0.06em; }
+.run-history-item.running .run-history-status { color: #78c798; }
+.run-history-item.queued .run-history-status { color: #d9b45d; }
+.run-history-actions, .run-history-editor { display: flex; align-items: center; gap: 5px; }
+.run-history-actions button, .run-history-editor button { min-height: 25px; padding: 4px 7px; color: #9ea8a1; background: #202722; font-size: 8px; }
+.run-history-actions .send-now { color: #d8e7dc; background: #31513d; }
+.run-history-editor { align-items: end; }
+.run-history-editor textarea { flex: 1; min-height: 54px; padding: 7px; resize: vertical; }
 .composer-area { padding: 10px 20px 12px; border-top: 1px solid #202622; background: #0d110f; }
 .composer-area > small { display: block; width: min(100%, 760px); margin: 5px auto 0; color: #657069; font-size: 8px; text-align: center; }
 .composer {
@@ -416,6 +441,7 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .composer-toolbar > span { color: #667069; font-size: 9px; }
 .composer-toolbar button { display: grid; place-items: center; min-width: 0; width: 27px; height: 27px; padding: 0; border-radius: 7px; }
 .composer-toolbar .stop-button { width: auto; padding: 0 9px; }
+.composer-actions { display: flex; align-items: center; gap: 5px; }
 .terminal-panel {
   display: grid; grid-template-rows: 34px minmax(0, 1fr); min-height: 0;
   border-top: 1px solid #303832; border-bottom: 1px solid #202622; background: #090c0a;
