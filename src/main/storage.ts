@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
+import type { OllamaMessage, OllamaToolCall } from './ollama'
 
 export type Thread = {
   id: string
@@ -43,6 +44,37 @@ export type Message = {
 export type AppendMessageInput = {
   role: MessageRole
   content: string
+}
+
+export type AgentRunStatus = 'running' | 'completed' | 'interrupted' | 'error'
+
+export type AgentRun = {
+  id: string
+  threadId: string
+  requestId: string
+  userMessageId: string
+  model: string
+  status: AgentRunStatus
+  error: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
+export type ToolEventStatus = 'running' | 'done' | 'denied' | 'error' | 'interrupted'
+
+export type AgentToolEvent = {
+  id: number
+  runId: string
+  sequence: number
+  callId: string
+  step: number
+  callIndex: number
+  tool: string
+  status: ToolEventStatus
+  arguments: Record<string, unknown> | null
+  result: string | null
+  assistantContent: string | null
+  createdAt: string
 }
 
 export type WorkerProfile = {
@@ -131,6 +163,40 @@ const migrations = [
     BEGIN
       SELECT RAISE(ABORT, 'invalid worker profile mode/runtime');
     END;
+  `,
+  `
+    CREATE TABLE agent_runs (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      request_id TEXT NOT NULL UNIQUE,
+      user_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      model TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'interrupted', 'error')),
+      error TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+
+    CREATE TABLE agent_tool_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL,
+      call_id TEXT NOT NULL,
+      step INTEGER NOT NULL,
+      call_index INTEGER NOT NULL,
+      tool TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('running', 'done', 'denied', 'error', 'interrupted')),
+      arguments_json TEXT,
+      result TEXT,
+      assistant_content TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (run_id, sequence)
+    );
+
+    CREATE INDEX agent_runs_thread_id_started_at
+      ON agent_runs(thread_id, started_at);
+    CREATE INDEX agent_tool_events_run_id_sequence
+      ON agent_tool_events(run_id, sequence);
   `
 ]
 
@@ -177,6 +243,39 @@ function toWorkerProfile(row: StorageRow): WorkerProfile {
     image: String(row.image),
     network: row.network === 'bridge' ? 'bridge' : 'none',
     updatedAt: String(row.updated_at)
+  }
+}
+
+function toAgentRun(row: StorageRow): AgentRun {
+  return {
+    id: String(row.id),
+    threadId: String(row.thread_id),
+    requestId: String(row.request_id),
+    userMessageId: String(row.user_message_id),
+    model: String(row.model),
+    status: String(row.status) as AgentRunStatus,
+    error: row.error === null ? null : String(row.error),
+    startedAt: String(row.started_at),
+    finishedAt: row.finished_at === null ? null : String(row.finished_at)
+  }
+}
+
+function toAgentToolEvent(row: StorageRow): AgentToolEvent {
+  return {
+    id: Number(row.id),
+    runId: String(row.run_id),
+    sequence: Number(row.sequence),
+    callId: String(row.call_id),
+    step: Number(row.step),
+    callIndex: Number(row.call_index),
+    tool: String(row.tool),
+    status: String(row.status) as ToolEventStatus,
+    arguments: row.arguments_json === null
+      ? null
+      : JSON.parse(String(row.arguments_json)) as Record<string, unknown>,
+    result: row.result === null ? null : String(row.result),
+    assistantContent: row.assistant_content === null ? null : String(row.assistant_content),
+    createdAt: String(row.created_at)
   }
 }
 
@@ -381,6 +480,240 @@ export class ThreadStore {
     `).all(threadId).map(toMessage)
   }
 
+  startAgentRun(threadId: string, requestId: string, model: string, userContent: string): AgentRun {
+    this.assertOpen()
+    const runId = randomUUID()
+    const startedAt = new Date().toISOString()
+
+    this.database.exec('BEGIN')
+    try {
+      const userMessage = this.appendMessage(threadId, { role: 'user', content: userContent })
+      this.database.prepare(`
+        INSERT INTO agent_runs (
+          id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL)
+      `).run(runId, threadId, requestId, userMessage.id, model, startedAt)
+      this.database.prepare('UPDATE threads SET model = ?, updated_at = ? WHERE id = ?')
+        .run(model, startedAt, threadId)
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+
+    return this.getAgentRun(runId) as AgentRun
+  }
+
+  getAgentRun(id: string): AgentRun | null {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
+      FROM agent_runs
+      WHERE id = ?
+    `).get(id)
+    return row ? toAgentRun(row) : null
+  }
+
+  listAgentRuns(threadId: string): AgentRun[] {
+    this.assertOpen()
+    return this.database.prepare(`
+      SELECT id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
+      FROM agent_runs
+      WHERE thread_id = ?
+      ORDER BY started_at ASC, rowid ASC
+    `).all(threadId).map(toAgentRun)
+  }
+
+  recordToolStarted(
+    runId: string,
+    input: {
+      callId: string
+      step: number
+      callIndex: number
+      tool: string
+      arguments: Record<string, unknown>
+      assistantContent: string
+    }
+  ): AgentToolEvent {
+    this.assertOpen()
+    const run = this.getAgentRun(runId)
+    if (!run) throw new Error(`Agent run not found: ${runId}`)
+    if (run.status !== 'running') throw new Error(`Agent run is not active: ${runId}`)
+    const sequence = this.nextToolEventSequence(runId)
+    const createdAt = new Date().toISOString()
+    const result = this.database.prepare(`
+      INSERT INTO agent_tool_events (
+        run_id, sequence, call_id, step, call_index, tool, status,
+        arguments_json, result, assistant_content, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, NULL, ?, ?)
+    `).run(
+      runId,
+      sequence,
+      input.callId,
+      input.step,
+      input.callIndex,
+      input.tool,
+      JSON.stringify(input.arguments),
+      input.assistantContent,
+      createdAt
+    )
+    return this.getAgentToolEvent(Number(result.lastInsertRowid)) as AgentToolEvent
+  }
+
+  recordToolFinished(
+    runId: string,
+    callId: string,
+    status: Exclude<ToolEventStatus, 'running' | 'interrupted'>,
+    result: string
+  ): AgentToolEvent {
+    this.assertOpen()
+    const started = this.database.prepare(`
+      SELECT tool, step, call_index
+      FROM agent_tool_events
+      WHERE run_id = ? AND call_id = ? AND status = 'running'
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_tool_events terminal
+          WHERE terminal.run_id = agent_tool_events.run_id
+            AND terminal.call_id = agent_tool_events.call_id
+            AND terminal.status != 'running'
+        )
+      ORDER BY sequence DESC
+      LIMIT 1
+    `).get(runId, callId)
+    if (!started) throw new Error(`Tool call is not active: ${callId}`)
+    const sequence = this.nextToolEventSequence(runId)
+    const createdAt = new Date().toISOString()
+    const insert = this.database.prepare(`
+      INSERT INTO agent_tool_events (
+        run_id, sequence, call_id, step, call_index, tool, status,
+        arguments_json, result, assistant_content, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)
+    `).run(
+      runId,
+      sequence,
+      callId,
+      Number(started.step),
+      Number(started.call_index),
+      String(started.tool),
+      status,
+      result,
+      createdAt
+    )
+    return this.getAgentToolEvent(Number(insert.lastInsertRowid)) as AgentToolEvent
+  }
+
+  listAgentToolEvents(runId: string): AgentToolEvent[] {
+    this.assertOpen()
+    return this.database.prepare(`
+      SELECT id, run_id, sequence, call_id, step, call_index, tool, status,
+             arguments_json, result, assistant_content, created_at
+      FROM agent_tool_events
+      WHERE run_id = ?
+      ORDER BY sequence ASC
+    `).all(runId).map(toAgentToolEvent)
+  }
+
+  finishAgentRun(
+    runId: string,
+    status: Exclude<AgentRunStatus, 'running'>,
+    assistantContent: string,
+    error?: string
+  ): AgentRun {
+    this.assertOpen()
+    const run = this.getAgentRun(runId)
+    if (!run) throw new Error(`Agent run not found: ${runId}`)
+    if (run.status !== 'running') return run
+    const finishedAt = new Date().toISOString()
+
+    this.database.exec('BEGIN')
+    try {
+      this.interruptOpenToolCalls(runId, finishedAt)
+      if (assistantContent) {
+        this.appendMessage(run.threadId, { role: 'assistant', content: assistantContent })
+      }
+      this.database.prepare(`
+        UPDATE agent_runs
+        SET status = ?, error = ?, finished_at = ?
+        WHERE id = ? AND status = 'running'
+      `).run(status, error?.trim() || null, finishedAt, runId)
+      this.database.exec('COMMIT')
+    } catch (caught) {
+      this.database.exec('ROLLBACK')
+      throw caught
+    }
+    return this.getAgentRun(runId) as AgentRun
+  }
+
+  recoverInterruptedAgentRuns(): number {
+    this.assertOpen()
+    const runs = this.database.prepare(`
+      SELECT id FROM agent_runs WHERE status = 'running' ORDER BY started_at ASC, rowid ASC
+    `).all()
+    if (runs.length === 0) return 0
+    const finishedAt = new Date().toISOString()
+
+    this.database.exec('BEGIN')
+    try {
+      for (const row of runs) this.interruptOpenToolCalls(String(row.id), finishedAt)
+      this.database.prepare(`
+        UPDATE agent_runs
+        SET status = 'interrupted', error = 'Application fermée pendant la génération.', finished_at = ?
+        WHERE status = 'running'
+      `).run(finishedAt)
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+    return runs.length
+  }
+
+  listPromptMessages(threadId: string): OllamaMessage[] {
+    this.assertOpen()
+    const runsByUserMessage = new Map(
+      this.listAgentRuns(threadId).map((run) => [run.userMessageId, run])
+    )
+    const prompt: OllamaMessage[] = []
+
+    for (const message of this.listMessages(threadId)) {
+      prompt.push({ role: message.role, content: message.content })
+      const run = runsByUserMessage.get(message.id)
+      if (!run) continue
+
+      const events = this.listAgentToolEvents(run.id)
+      const starts = events.filter((event) => event.status === 'running')
+      const terminalByCall = new Map(
+        events.filter((event) => event.status !== 'running').map((event) => [event.callId, event])
+      )
+      const steps = new Map<number, AgentToolEvent[]>()
+      for (const event of starts) {
+        const step = steps.get(event.step) ?? []
+        step.push(event)
+        steps.set(event.step, step)
+      }
+      for (const stepEvents of [...steps.values()]) {
+        stepEvents.sort((left, right) => left.callIndex - right.callIndex)
+        const toolCalls: OllamaToolCall[] = stepEvents.map((event) => ({
+          function: { name: event.tool, arguments: event.arguments ?? {} }
+        }))
+        prompt.push({
+          role: 'assistant',
+          content: stepEvents[0]?.assistantContent ?? '',
+          tool_calls: toolCalls
+        })
+        for (const event of stepEvents) {
+          const terminal = terminalByCall.get(event.callId)
+          prompt.push({
+            role: 'tool',
+            tool_name: event.tool,
+            content: terminal?.result ?? '[Appel d’outil interrompu]'
+          })
+        }
+      }
+    }
+    return prompt
+  }
+
   getWorkerProfile(projectPath: string): WorkerProfile | null {
     this.assertOpen()
     const row = this.database.prepare(`
@@ -434,6 +767,57 @@ export class ThreadStore {
     const thread = this.getThread(id)
     if (!thread) throw new Error(`Thread not found: ${id}`)
     throw new Error(`Invalid environment transition: ${thread.environmentStatus} -> ${status}`)
+  }
+
+  private getAgentToolEvent(id: number): AgentToolEvent | null {
+    const row = this.database.prepare(`
+      SELECT id, run_id, sequence, call_id, step, call_index, tool, status,
+             arguments_json, result, assistant_content, created_at
+      FROM agent_tool_events
+      WHERE id = ?
+    `).get(id)
+    return row ? toAgentToolEvent(row) : null
+  }
+
+  private nextToolEventSequence(runId: string): number {
+    const row = this.database.prepare(`
+      SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
+      FROM agent_tool_events
+      WHERE run_id = ?
+    `).get(runId)
+    return Number(row?.sequence ?? 1)
+  }
+
+  private interruptOpenToolCalls(runId: string, createdAt: string): void {
+    const openCalls = this.database.prepare(`
+      SELECT started.call_id, started.step, started.call_index, started.tool
+      FROM agent_tool_events started
+      WHERE started.run_id = ? AND started.status = 'running'
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_tool_events terminal
+          WHERE terminal.run_id = started.run_id
+            AND terminal.call_id = started.call_id
+            AND terminal.status != 'running'
+        )
+      ORDER BY started.sequence ASC
+    `).all(runId)
+    for (const call of openCalls) {
+      this.database.prepare(`
+        INSERT INTO agent_tool_events (
+          run_id, sequence, call_id, step, call_index, tool, status,
+          arguments_json, result, assistant_content, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'interrupted', NULL, ?, NULL, ?)
+      `).run(
+        runId,
+        this.nextToolEventSequence(runId),
+        String(call.call_id),
+        Number(call.step),
+        Number(call.call_index),
+        String(call.tool),
+        'Appel d’outil interrompu.',
+        createdAt
+      )
+    }
   }
 
   private migrate(): void {

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { runCodingAgent } from './agent'
+import { compactConversation, MAX_CONVERSATION_CHARACTERS, runCodingAgent } from './agent'
 import { ProjectTools } from './project-tools'
 
 const temporaryDirectories: string[] = []
@@ -54,6 +54,43 @@ describe('runCodingAgent', () => {
     expect(onTool).toHaveBeenNthCalledWith(1, 'read_file', 'running')
     expect(onTool).toHaveBeenNthCalledWith(2, 'read_file', 'done')
     expect(onContent).toHaveBeenCalledWith('Le fichier contient du contenu local.')
+  })
+
+  it('awaits durable tool lifecycle callbacks before publishing live statuses', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    await writeFile(join(projectPath, 'hello.txt'), 'contenu local')
+    const project = await ProjectTools.create(projectPath)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: {
+          tool_calls: [{ function: { name: 'read_file', arguments: { path: 'hello.txt' } } }]
+        },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Terminé.' }, done: true }])))
+    const order: string[] = []
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Lis le fichier.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: (_tool, status) => order.push(`ipc:${status}`),
+      onToolEvent: async (event) => {
+        await Promise.resolve()
+        order.push(`stored:${event.type === 'started' ? 'running' : event.status}`)
+      },
+      authorize: vi.fn().mockResolvedValue(false)
+    })
+
+    expect(order).toEqual([
+      'stored:running',
+      'ipc:running',
+      'stored:done',
+      'ipc:done'
+    ])
   })
 
   it('does not write when the user refuses authorization', async () => {
@@ -120,6 +157,22 @@ describe('runCodingAgent', () => {
     expect(body.length).toBeLessThan(70_000)
     expect(body).toContain('message récent à conserver')
     expect(body).not.toContain('0: xxxxx')
+  })
+
+  it('deterministically bounds an oversized newest message without semantic summarization', () => {
+    const newestSuffix = 'suffixe récent à conserver'
+    const compacted = compactConversation([
+      { role: 'system', content: 'instruction système' },
+      { role: 'user', content: `ancien ${'a'.repeat(70_000)}` },
+      { role: 'assistant', content: 'ancienne réponse' },
+      { role: 'user', content: `${'x'.repeat(90_000)}${newestSuffix}` }
+    ])
+
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(MAX_CONVERSATION_CHARACTERS)
+    expect(compacted).toHaveLength(2)
+    expect(compacted[1]?.content).toContain('[début tronqué]')
+    expect(compacted[1]?.content).toContain(newestSuffix)
+    expect(compacted[1]?.content).not.toContain('ancien')
   })
 
   it('routes authorized commands through the configured worker executor', async () => {

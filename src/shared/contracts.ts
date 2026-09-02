@@ -72,7 +72,7 @@ export type ChatMessage = {
 
 export type ChatRequest = {
   requestId: string
-  threadId: string | null
+  threadId: string
   model: string
   projectPath: string | null
   messages: ChatMessage[]

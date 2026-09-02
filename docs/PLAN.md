@@ -224,6 +224,8 @@ Le mode direct est présenté comme moins isolé que le mode conteneur. L'applic
 
 État actuel du terminal : xterm.js est relié à un PTY `node-pty` réel sous Windows et Linux. Une session unique est liée à l’identifiant d’un thread possédant un environnement projet actif ; le dossier effectif est résolu exclusivement dans le processus principal. Le terminal suit le profil worker direct ou conteneur, diffuse les sorties, accepte les entrées et redimensionnements validés, et nettoie l’arbre de processus ainsi que tout conteneur à la fermeture, à la suppression du thread ou à la fermeture de la fenêtre. L’historique du terminal et la reprise après redémarrage restent volontairement hors périmètre de cette tranche.
 
+État actuel de la reprise agent : le processus principal journalise dans SQLite chaque exécution et les transitions ordonnées des appels d’outils avec leurs arguments et résultats. Une annulation, une erreur ou un redémarrage marque atomiquement l’exécution et les outils encore actifs comme interrompus. Le contexte envoyé au modèle est reconstruit depuis cet historique principal puis borné déterministement à 60 000 caractères en conservant les échanges récents et les paires appel/résultat ; les éléments surdimensionnés sont tronqués, sans prétendre produire un résumé sémantique. La reprise automatique d’une génération interrompue et la réduction sémantique des anciens échanges restent à réaliser.
+
 ### Phase 5 — Distribution
 
 - installateurs Windows et Linux ;

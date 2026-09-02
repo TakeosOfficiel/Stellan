@@ -108,7 +108,26 @@ const commandSchema = z.object({
 
 type ToolStatus = 'running' | 'done' | 'denied' | 'error'
 
-const MAX_CONVERSATION_CHARACTERS = 60_000
+export type AgentToolLifecycleEvent =
+  | {
+      type: 'started'
+      callId: string
+      step: number
+      callIndex: number
+      tool: string
+      arguments: Record<string, unknown>
+      assistantContent: string
+    }
+  | {
+      type: 'finished'
+      callId: string
+      status: Exclude<ToolStatus, 'running'>
+      result: string
+    }
+
+export const MAX_CONVERSATION_CHARACTERS = 60_000
+const MAX_TOOL_ARGUMENT_CHARACTERS = 10_000
+const MAX_SYSTEM_CHARACTERS = 10_000
 
 export type CodingAgentOptions = {
   model: string
@@ -117,6 +136,7 @@ export type CodingAgentOptions = {
   signal: AbortSignal
   onContent: (content: string) => void
   onTool: (tool: string, status: ToolStatus) => void
+  onToolEvent?: (event: AgentToolLifecycleEvent) => Promise<void>
   authorize: (tool: string, summary: string) => Promise<boolean>
   runCommand?: (
     command: string,
@@ -130,8 +150,53 @@ function compactResult(value: unknown): string {
   return result.length > 20_000 ? `${result.slice(0, 20_000)}\n… résultat tronqué` : result
 }
 
-function compactConversation(messages: OllamaMessage[]): OllamaMessage[] {
-  const system = messages[0]?.role === 'system' ? messages[0] : undefined
+function contextSize(messages: OllamaMessage[]): number {
+  return JSON.stringify(messages).length
+}
+
+function compactToolArguments(message: OllamaMessage): OllamaMessage {
+  if (!message.tool_calls) return { ...message }
+  return {
+    ...message,
+    tool_calls: message.tool_calls.map((call) => {
+      const serialized = JSON.stringify(call.function.arguments)
+      return serialized.length <= MAX_TOOL_ARGUMENT_CHARACTERS
+        ? call
+        : {
+            function: {
+              name: call.function.name,
+              arguments: { omitted: `Arguments tronqués (${serialized.length} caractères).` }
+            }
+          }
+    })
+  }
+}
+
+function fitNewestGroup(group: OllamaMessage[], available: number): OllamaMessage[] {
+  const fitted = group.map(compactToolArguments)
+  let excess = contextSize(fitted) - available
+  for (const message of fitted) {
+    if (excess <= 0) break
+    const removable = Math.max(0, message.content.length - 80)
+    const removed = Math.min(removable, excess)
+    if (removed > 0) {
+      message.content = `[début tronqué]\n${message.content.slice(removed + 17)}`
+      excess = contextSize(fitted) - available
+    }
+  }
+  return contextSize(fitted) <= available ? fitted : []
+}
+
+export function compactConversation(messages: OllamaMessage[]): OllamaMessage[] {
+  const first = messages[0]
+  const system = first?.role === 'system'
+    ? {
+        ...first,
+        content: first.content.length > MAX_SYSTEM_CHARACTERS
+          ? `${first.content.slice(0, MAX_SYSTEM_CHARACTERS)}\n[fin tronquée]`
+          : first.content
+      }
+    : undefined
   const groups: OllamaMessage[][] = []
 
   for (const message of messages.slice(system ? 1 : 0)) {
@@ -141,11 +206,17 @@ function compactConversation(messages: OllamaMessage[]): OllamaMessage[] {
   }
 
   const selected: OllamaMessage[][] = []
-  let characters = system?.content.length ?? 0
+  let characters = contextSize(system ? [system] : [])
   for (let index = groups.length - 1; index >= 0; index -= 1) {
-    const group = groups[index] ?? []
-    const groupCharacters = group.reduce((total, message) => total + message.content.length, 0)
-    if (selected.length > 0 && characters + groupCharacters > MAX_CONVERSATION_CHARACTERS) break
+    const group = (groups[index] ?? []).map(compactToolArguments)
+    const groupCharacters = contextSize(group)
+    if (characters + groupCharacters > MAX_CONVERSATION_CHARACTERS) {
+      if (selected.length === 0) {
+        const fitted = fitNewestGroup(group, MAX_CONVERSATION_CHARACTERS - characters)
+        if (fitted.length > 0) selected.unshift(fitted)
+      }
+      break
+    }
     selected.unshift(group)
     characters += groupCharacters
   }
@@ -159,7 +230,7 @@ async function executeTool(
   authorize: CodingAgentOptions['authorize'],
   signal: AbortSignal,
   runCommand: CodingAgentOptions['runCommand']
-): Promise<{ content: string; status: ToolStatus }> {
+): Promise<{ content: string; status: Exclude<ToolStatus, 'running'> }> {
   const name = call.function.name
   const input = call.function.arguments
 
@@ -240,8 +311,18 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       tool_calls: result.toolCalls
     })
 
-    for (const call of result.toolCalls) {
+    for (const [callIndex, call] of result.toolCalls.entries()) {
       const tool = call.function.name
+      const callId = `${step}:${callIndex}`
+      await options.onToolEvent?.({
+        type: 'started',
+        callId,
+        step,
+        callIndex,
+        tool,
+        arguments: call.function.arguments,
+        assistantContent: result.content
+      })
       options.onTool(tool, 'running')
       const toolResult = await executeTool(
         call,
@@ -250,6 +331,12 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         options.signal,
         options.runCommand
       )
+      await options.onToolEvent?.({
+        type: 'finished',
+        callId,
+        status: toolResult.status,
+        result: toolResult.content
+      })
       options.onTool(tool, toolResult.status)
       conversation.push({
         role: 'tool',

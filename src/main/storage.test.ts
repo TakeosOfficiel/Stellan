@@ -75,6 +75,133 @@ describe('ThreadStore', () => {
     }
   })
 
+  it('persists ordered tool lifecycle events and reconstructs completed prompt history', () => {
+    const path = temporaryDatabase()
+    const firstStore = new ThreadStore(path)
+    const thread = firstStore.createThread({ title: 'Durable agent' })
+    const run = firstStore.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Inspecte le projet')
+    firstStore.recordToolStarted(run.id, {
+      callId: '0:0',
+      step: 0,
+      callIndex: 0,
+      tool: 'read_file',
+      arguments: { path: 'a.txt' },
+      assistantContent: 'Je vérifie.'
+    })
+    firstStore.recordToolFinished(run.id, '0:0', 'done', 'contenu A')
+    firstStore.recordToolStarted(run.id, {
+      callId: '1:0',
+      step: 1,
+      callIndex: 0,
+      tool: 'git_status',
+      arguments: {},
+      assistantContent: ''
+    })
+    firstStore.recordToolFinished(run.id, '1:0', 'done', 'M a.txt')
+    firstStore.finishAgentRun(run.id, 'completed', 'Terminé.')
+    firstStore.close()
+
+    const reopened = new ThreadStore(path)
+    try {
+      expect(reopened.getAgentRun(run.id)).toMatchObject({ status: 'completed', error: null })
+      expect(reopened.listAgentToolEvents(run.id).map((event) => ({
+        sequence: event.sequence,
+        callId: event.callId,
+        status: event.status,
+        result: event.result
+      }))).toEqual([
+        { sequence: 1, callId: '0:0', status: 'running', result: null },
+        { sequence: 2, callId: '0:0', status: 'done', result: 'contenu A' },
+        { sequence: 3, callId: '1:0', status: 'running', result: null },
+        { sequence: 4, callId: '1:0', status: 'done', result: 'M a.txt' }
+      ])
+      expect(reopened.listPromptMessages(thread.id)).toEqual([
+        { role: 'user', content: 'Inspecte le projet' },
+        {
+          role: 'assistant',
+          content: 'Je vérifie.',
+          tool_calls: [{ function: { name: 'read_file', arguments: { path: 'a.txt' } } }]
+        },
+        { role: 'tool', tool_name: 'read_file', content: 'contenu A' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ function: { name: 'git_status', arguments: {} } }]
+        },
+        { role: 'tool', tool_name: 'git_status', content: 'M a.txt' },
+        { role: 'assistant', content: 'Terminé.' }
+      ])
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('atomically marks a canceled run and its in-flight tool interrupted', () => {
+    const store = new ThreadStore(temporaryDatabase())
+    try {
+      const thread = store.createThread({ title: 'Canceled agent' })
+      const run = store.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Lance la commande')
+      store.recordToolStarted(run.id, {
+        callId: '0:0',
+        step: 0,
+        callIndex: 0,
+        tool: 'run_command',
+        arguments: { command: 'pnpm', args: ['test'] },
+        assistantContent: ''
+      })
+
+      store.finishAgentRun(run.id, 'interrupted', '', 'Génération interrompue.')
+
+      expect(store.getAgentRun(run.id)).toMatchObject({
+        status: 'interrupted',
+        error: 'Génération interrompue.'
+      })
+      expect(store.listAgentToolEvents(run.id).map((event) => event.status)).toEqual([
+        'running',
+        'interrupted'
+      ])
+      expect(store.listPromptMessages(thread.id).at(-1)).toEqual({
+        role: 'tool',
+        tool_name: 'run_command',
+        content: 'Appel d’outil interrompu.'
+      })
+    } finally {
+      store.close()
+    }
+  })
+
+  it('recovers running agent and tool state once after an app restart', () => {
+    const path = temporaryDatabase()
+    const firstStore = new ThreadStore(path)
+    const thread = firstStore.createThread({ title: 'Restarted agent' })
+    const run = firstStore.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Continue')
+    firstStore.recordToolStarted(run.id, {
+      callId: '0:0',
+      step: 0,
+      callIndex: 0,
+      tool: 'read_file',
+      arguments: { path: 'README.md' },
+      assistantContent: ''
+    })
+    firstStore.close()
+
+    const reopened = new ThreadStore(path)
+    try {
+      expect(reopened.recoverInterruptedAgentRuns()).toBe(1)
+      expect(reopened.getAgentRun(run.id)).toMatchObject({
+        status: 'interrupted',
+        error: 'Application fermée pendant la génération.'
+      })
+      expect(reopened.listAgentToolEvents(run.id).map((event) => event.status)).toEqual([
+        'running',
+        'interrupted'
+      ])
+      expect(reopened.recoverInterruptedAgentRuns()).toBe(0)
+    } finally {
+      reopened.close()
+    }
+  })
+
   it('enforces fail-closed environment state transitions', () => {
     const store = new ThreadStore(temporaryDatabase())
     try {
@@ -178,6 +305,12 @@ describe('ThreadStore', () => {
         environmentStatus: 'creating',
         model: 'local-model'
       })
+      const version = new DatabaseSync(path, { readOnly: true })
+      try {
+        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(5)
+      } finally {
+        version.close()
+      }
     } finally {
       store.close()
     }

@@ -1,7 +1,7 @@
 import { basename, join } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
-import { runCodingAgent } from './agent'
+import { compactConversation, runCodingAgent, type AgentToolLifecycleEvent } from './agent'
 import { getHardwareInfo } from './hardware'
 import { getModelCatalog, isCatalogModel } from './model-catalog'
 import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat } from './ollama'
@@ -43,7 +43,7 @@ const OLLAMA_DOWNLOAD_URL = 'https://ollama.com/download'
 const modelIdSchema = z.string().min(1).max(100).refine(isCatalogModel)
 const chatRequestSchema = z.object({
   requestId: z.uuid(),
-  threadId: z.uuid().nullable(),
+  threadId: z.uuid(),
   model: z.string().min(1).max(200),
   projectPath: z.string().min(1).max(10_000).nullable(),
   messages: z.array(z.object({
@@ -203,6 +203,7 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
   threadStore = new ThreadStore(join(app.getPath('userData'), 'local-agent.sqlite'))
   threadStore.recoverInterruptedEnvironments()
+  threadStore.recoverInterruptedAgentRuns()
   handle(WINDOW_MINIMIZE_CHANNEL, () => mainWindow?.minimize())
   handle(WINDOW_TOGGLE_MAXIMIZE_CHANNEL, () => {
     if (!mainWindow) return
@@ -471,6 +472,8 @@ app.whenReady().then(() => {
       activeThreadChats.set(parsed.data.threadId, parsed.data.requestId)
     }
     let assistantContent = ''
+    let toolAssistantCharacters = 0
+    let runId: string | null = null
     const send = (payload: object): void => {
       if (!event.sender.isDestroyed()) {
         event.sender.send(CHAT_EVENT_CHANNEL, { requestId: parsed.data.requestId, ...payload })
@@ -480,16 +483,22 @@ app.whenReady().then(() => {
     try {
       let executionPath = parsed.data.projectPath
       let thread = null
+      let promptMessages = parsed.data.messages
       if (parsed.data.threadId) {
         const store = getThreadStore()
         thread = store.getThread(parsed.data.threadId)
         if (!thread) throw new Error('Le thread local est introuvable.')
         executionPath = thread.workspacePath ?? thread.projectPath
         const latestUserMessage = [...parsed.data.messages].reverse().find((message) => message.role === 'user')
-        if (latestUserMessage) store.appendMessage(parsed.data.threadId, latestUserMessage)
-        store.updateThread(parsed.data.threadId, {
-          model: parsed.data.model
-        })
+        if (!latestUserMessage) throw new Error('La demande ne contient aucun nouveau message utilisateur.')
+        const run = store.startAgentRun(
+          parsed.data.threadId,
+          parsed.data.requestId,
+          parsed.data.model,
+          latestUserMessage.content
+        )
+        runId = run.id
+        promptMessages = store.listPromptMessages(parsed.data.threadId)
       }
 
       const onContent = (content: string): void => {
@@ -508,11 +517,29 @@ app.whenReady().then(() => {
           : null
         await runCodingAgent({
           model: parsed.data.model,
-          messages: parsed.data.messages,
+          messages: promptMessages,
           project,
           signal: controller.signal,
           onContent,
           onTool: (tool, status) => send({ type: 'tool', tool, status }),
+          onToolEvent: runId
+            ? async (toolEvent: AgentToolLifecycleEvent) => {
+                const store = getThreadStore()
+                if (toolEvent.type === 'started') {
+                  store.recordToolStarted(runId as string, toolEvent)
+                  if (toolEvent.callIndex === 0) {
+                    toolAssistantCharacters += toolEvent.assistantContent.length
+                  }
+                } else {
+                  store.recordToolFinished(
+                    runId as string,
+                    toolEvent.callId,
+                    toolEvent.status,
+                    toolEvent.result
+                  )
+                }
+              }
+            : undefined,
           runCommand: thread
             ? createWorkerCommandExecutor(workerProfile, thread.id, executionPath)
             : undefined,
@@ -540,30 +567,37 @@ app.whenReady().then(() => {
       } else {
         await streamOllamaChat(
           parsed.data.model,
-          parsed.data.messages,
+          compactConversation([
+            { role: 'system', content: 'Tu es un assistant local utile, précis et concis.' },
+            ...promptMessages.filter((message) => message.role !== 'system')
+          ]),
           onContent,
           controller.signal
         )
       }
-      if (parsed.data.threadId && assistantContent) {
-        getThreadStore().appendMessage(parsed.data.threadId, {
-          role: 'assistant',
-          content: assistantContent
-        })
+      if (runId) {
+        getThreadStore().finishAgentRun(
+          runId,
+          'completed',
+          assistantContent.slice(toolAssistantCharacters)
+        )
       }
       send({ type: 'done' })
     } catch (error) {
-      if (parsed.data.threadId && assistantContent) {
-        getThreadStore().appendMessage(parsed.data.threadId, {
-          role: 'assistant',
-          content: controller.signal.aborted
-            ? `${assistantContent}\n\n[Réponse interrompue]`
-            : `${assistantContent}\n\n[Réponse incomplète]`
-        })
-      }
       const reason = controller.signal.aborted
         ? 'Génération interrompue.'
         : error instanceof Error ? error.message : 'La génération a échoué.'
+      if (runId) {
+        const finalContent = assistantContent.slice(toolAssistantCharacters)
+        getThreadStore().finishAgentRun(
+          runId,
+          controller.signal.aborted ? 'interrupted' : 'error',
+          finalContent
+            ? `${finalContent}\n\n${controller.signal.aborted ? '[Réponse interrompue]' : '[Réponse incomplète]'}`
+            : '',
+          reason
+        )
+      }
       send({ type: 'error', reason })
     } finally {
       activeChats.delete(parsed.data.requestId)
@@ -619,6 +653,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(TERMINAL_CLOSE_CHANNEL)
   for (const controller of activeChats.values()) controller.abort()
   activeChats.clear()
+  threadStore?.recoverInterruptedAgentRuns()
   threadStore?.close()
   threadStore = null
 })
