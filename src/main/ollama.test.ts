@@ -114,6 +114,35 @@ describe('streamOllamaChat', () => {
     )
 
     expect(onContent.mock.calls.flat()).toEqual(['Bonjour ', '!'])
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({
+      model: 'qwen3.5:4b',
+      stream: true,
+      think: false
+    })
+  })
+
+  it('accepts thinking chunks without exposing the private reasoning as the answer', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          '{"message":{"thinking":"raisonnement interne"}}\n' +
+          '{"message":{"content":"Réponse directe"},"done":true}\n'
+        ))
+        controller.close()
+      }
+    })
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(stream, { status: 200 }))
+    const onContent = vi.fn()
+
+    await expect(streamOllamaChat(
+      'qwen3.5:4b',
+      [{ role: 'user', content: 'Bonjour' }],
+      onContent,
+      undefined,
+      fetcher
+    )).resolves.toEqual({ content: 'Réponse directe', toolCalls: [] })
+    expect(onContent).toHaveBeenCalledOnce()
+    expect(onContent).toHaveBeenCalledWith('Réponse directe')
   })
 
   it('rejects an unavailable Ollama response', async () => {

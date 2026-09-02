@@ -248,11 +248,20 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
     run: async () => {
       activeChats.set(run.requestId, controller)
       activeThreadChats.set(thread.id, run.requestId)
-      store.markAgentRunRunning(run.id)
-      sendChatEvent(run, { type: 'status', status: 'running' })
       let assistantContent = ''
       let toolAssistantCharacters = 0
       try {
+        store.markAgentRunRunning(run.id)
+        sendChatEvent(run, { type: 'status', status: 'running' })
+        const summary = store.listAgentRunSummaries(thread.id).find(
+          (candidate) => candidate.requestId === run.requestId
+        )
+        if (!summary) throw new Error('La génération active est introuvable.')
+        sendChatEvent(run, {
+          type: 'started',
+          userMessageId: summary.userMessageId,
+          userContent: summary.userContent
+        })
         const executionPath = thread.workspacePath ?? thread.projectPath
         const promptMessages = store.listPromptMessages(thread.id, run.userMessageId)
         const onContent = (content: string): void => {

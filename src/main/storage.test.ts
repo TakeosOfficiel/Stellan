@@ -233,6 +233,7 @@ describe('ThreadStore', () => {
       const first = store.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Premier')
       const second = store.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Deuxième')
 
+      expect(store.listMessages(thread.id)).toEqual([])
       expect(store.listPromptMessages(thread.id, first.userMessageId)).toEqual([
         { role: 'user', content: 'Premier' }
       ])
@@ -246,6 +247,7 @@ describe('ThreadStore', () => {
         first.requestId
       ])
       store.markAgentRunRunning(first.id)
+      expect(store.listMessages(thread.id).map((message) => message.content)).toEqual(['Premier'])
       store.finishAgentRun(first.id, 'completed', 'Réponse au premier')
       expect(store.listPromptMessages(thread.id, second.userMessageId)).toEqual([
         { role: 'user', content: 'Premier' },

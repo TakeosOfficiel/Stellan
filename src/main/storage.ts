@@ -563,10 +563,12 @@ export class ThreadStore {
     this.assertOpen()
 
     return this.database.prepare(`
-      SELECT id, thread_id, role, content, created_at
+      SELECT messages.id, messages.thread_id, messages.role, messages.content, messages.created_at
       FROM messages
-      WHERE thread_id = ?
-      ORDER BY created_at ASC, rowid ASC
+      LEFT JOIN agent_runs ON agent_runs.user_message_id = messages.id
+      WHERE messages.thread_id = ?
+        AND (agent_runs.id IS NULL OR agent_runs.status != 'queued')
+      ORDER BY messages.created_at ASC, messages.rowid ASC
     `).all(threadId).map(toMessage)
   }
 
@@ -844,7 +846,12 @@ export class ThreadStore {
   listPromptMessages(threadId: string, throughUserMessageId?: string): OllamaMessage[] {
     this.assertOpen()
     const runs = this.listAgentRuns(threadId)
-    const messages = new Map(this.listMessages(threadId).map((message) => [message.id, message]))
+    const messages = new Map(this.database.prepare(`
+      SELECT id, thread_id, role, content, created_at
+      FROM messages
+      WHERE thread_id = ?
+      ORDER BY created_at ASC, rowid ASC
+    `).all(threadId).map(toMessage).map((message) => [message.id, message]))
     const prompt: OllamaMessage[] = []
 
     for (const run of runs) {

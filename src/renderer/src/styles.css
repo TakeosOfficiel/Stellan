@@ -211,10 +211,12 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .empty-chat > span { display: grid; place-items: center; width: 48px; height: 48px; border: 1px solid #353844; border-radius: 15px; color: #9f91f0; background: #1b1c23; font-size: 26px; }
 .empty-chat h3 { margin: 18px 0 7px; font-size: 23px; letter-spacing: -0.03em; }
 .empty-chat p { margin: 0; color: #717580; font-size: 12px; }
-.message { max-width: 82%; margin-bottom: 22px; }
+.message { max-width: 82%; margin-bottom: 14px; }
 .message.user { margin-left: auto; }
 .message > span { display: block; margin-bottom: 6px; color: #686c77; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; }
-.message p { margin: 0; padding: 12px 14px; border: 1px solid #29302c; border-radius: 9px; color: #c9cfcb; background: #171b19; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+.message p { margin: 0; padding: 12px 14px; border: 1px solid #29302c; border-radius: 9px; color: #c9cfcb; background: #171b19; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+.message-paragraph { display: block; }
+.message-paragraph + .message-paragraph { margin-top: 5px; }
 .message.user p { border-color: #3e4a41; color: #e4e9e5; background: #222a25; }
 .message.failed p { border-color: #633939; color: #ffb0b0; }
 .tool-activities { display: grid; gap: 5px; max-width: 520px; margin: 8px 0 22px; }
@@ -408,19 +410,49 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .message { max-width: 88%; }
 .message p { border: 0; padding: 0; color: #c6cec8; background: transparent; }
 .message.user p { padding: 10px 12px; background: #202722; }
-.run-history-area { position: relative; width: min(100% - 40px, 760px); margin: 0 auto; }
+.run-history-area { position: relative; width: min(100% - 40px, 760px); margin: 0 auto; padding-top: 31px; }
 .run-history-trigger {
-  display: flex; align-items: center; gap: 7px; min-height: 27px; padding: 4px 8px;
-  border: 1px solid #29312c; border-bottom: 0; border-radius: 7px 7px 0 0;
-  color: #929c95; background: #111613; font-size: 9px;
+  position: absolute; top: 2px; right: 2px; display: flex; align-items: center; justify-content: center; gap: 4px;
+  width: 27px; min-height: 27px; padding: 0; border: 1px solid #303933; border-radius: 50%;
+  color: #929c95; background: #171d19;
 }
-.run-history-trigger strong { padding: 2px 6px; border-radius: 999px; color: #d8ba73; background: #332d1d; font-size: 8px; }
+.run-history-trigger svg, .scroll-to-bottom svg, .queued-message-actions svg, .composer-actions svg {
+  width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.run-history-trigger:hover { color: #d4ddd6; background: #222a25; }
+.run-history-trigger strong {
+  position: absolute; top: -5px; right: -5px; min-width: 14px; padding: 1px 3px;
+  border-radius: 999px; color: #142019; background: #c8e4d1; font-size: 7px;
+}
+.message-queue {
+  width: 87.5%; max-height: min(50vh, 384px); margin: 0 auto; overflow: auto;
+  border: 1px solid #28332d; border-bottom: 0;
+  border-radius: 9px 9px 0 0; background: #111815; scrollbar-color: #3a433d #111815;
+}
+.queued-message { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 6px 7px 6px 12px; border-bottom: 1px solid #26302a; }
+.queued-message:last-child { border-bottom: 0; }
+.queued-message > p { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: #aab4ad; font-size: 12px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.queued-message-actions { display: flex; align-items: center; gap: 3px; }
+.queued-message-actions button {
+  width: 26px; min-height: 26px; padding: 0; border: 0; border-radius: 50%;
+  color: #8f9b93; background: transparent; font-size: 12px;
+}
+.queued-message-actions button:hover { color: #d6ded8; background: #252d28; }
+.queued-message-actions .send-now { color: #132019; background: #d9e9de; }
+.queued-message-actions .send-now:hover { color: #0b120e; background: #eff8f1; }
+.scroll-to-bottom {
+  position: absolute; top: 2px; right: 33px; display: grid; place-items: center;
+  width: 27px; min-height: 27px; padding: 0; border: 1px solid #303933; border-radius: 50%;
+  color: #d6ded8; background: #202722; box-shadow: 0 5px 18px rgba(0, 0, 0, 0.3);
+}
 .run-history-panel {
-  position: absolute; z-index: 8; right: 0; bottom: 27px; width: min(100%, 620px); max-height: min(430px, 55vh);
+  position: absolute; z-index: 8; right: 0; bottom: calc(100% - 29px); width: min(100%, 620px); max-height: min(430px, 55vh);
   padding: 7px; overflow: auto; border: 1px solid #303933; border-radius: 10px;
   background: #111613; box-shadow: 0 18px 55px rgba(0, 0, 0, 0.48);
   scrollbar-color: #3a433d #111613;
 }
+.empty-run-history { margin: 0; padding: 12px; color: #78847c; font-size: 9px; text-align: center; }
 .run-history-item { padding: 9px; border-bottom: 1px solid #252d28; }
 .run-history-item:last-child { border-bottom: 0; }
 .run-history-item p { margin: 6px 0; color: #bbc4bd; font-size: 10px; white-space: pre-wrap; }
@@ -428,12 +460,12 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .run-history-status { display: flex; align-items: center; gap: 6px; color: #707b74; font-size: 8px; text-transform: uppercase; letter-spacing: 0.06em; }
 .run-history-item.running .run-history-status { color: #78c798; }
 .run-history-item.queued .run-history-status { color: #d9b45d; }
-.run-history-actions, .run-history-editor { display: flex; align-items: center; gap: 5px; }
-.run-history-actions button, .run-history-editor button { min-height: 25px; padding: 4px 7px; color: #9ea8a1; background: #202722; font-size: 8px; }
-.run-history-actions .send-now { color: #d8e7dc; background: #31513d; }
+.run-history-editor { display: flex; flex: 1; align-items: center; gap: 5px; }
+.run-history-editor button { min-height: 25px; padding: 4px 7px; color: #9ea8a1; background: #202722; font-size: 8px; }
 .run-history-editor { align-items: end; }
 .run-history-editor textarea { flex: 1; min-height: 54px; padding: 7px; resize: vertical; }
 .composer-area { padding: 10px 20px 12px; border-top: 1px solid #202622; background: #0d110f; }
+.run-history-area + .composer-area { padding-top: 0; border-top: 0; }
 .composer-area > small { display: block; width: min(100%, 760px); margin: 5px auto 0; color: #657069; font-size: 8px; text-align: center; }
 .composer {
   display: grid; width: min(100%, 760px); margin: 0 auto; padding: 0;
@@ -449,7 +481,8 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 33px; padding: 3px 6px 5px 12px; }
 .composer-toolbar > span { color: #667069; font-size: 9px; }
 .composer-toolbar button { display: grid; place-items: center; min-width: 0; width: 27px; height: 27px; padding: 0; border-radius: 7px; }
-.composer-toolbar .stop-button { width: auto; padding: 0 9px; }
+.composer-toolbar .stop-button { width: 27px; padding: 0; border-radius: 50%; color: #172019; background: #dbeade; }
+.composer-toolbar .stop-button svg { fill: currentColor; stroke: none; }
 .composer-actions { display: flex; align-items: center; gap: 5px; }
 .terminal-panel {
   display: grid; grid-template-rows: 34px minmax(0, 1fr); min-height: 0;

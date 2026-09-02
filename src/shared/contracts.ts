@@ -80,6 +80,13 @@ export type ChatRequest = {
 
 export type ChatEvent =
   | { requestId: string; threadId: string; type: 'status'; status: 'queued' | 'running' }
+  | {
+      requestId: string
+      threadId: string
+      type: 'started'
+      userMessageId: string
+      userContent: string
+    }
   | { requestId: string; threadId: string; type: 'content'; content: string }
   | { requestId: string; threadId: string; type: 'tool'; tool: string; status: 'running' | 'done' | 'denied' | 'error' }
   | { requestId: string; threadId: string; type: 'done' }

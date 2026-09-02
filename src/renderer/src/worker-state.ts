@@ -21,10 +21,15 @@ export function applyMessageEvent(
 ): Record<string, ChatUiMessage[]> {
   const messages = current[event.threadId] ?? []
   if (event.type === 'status') {
-    if (event.status === 'queued') return current
-    return messages.some((message) => message.id === event.requestId)
+    return current
+  }
+  if (event.type === 'started') {
+    const withUserMessage = messages.some((message) => message.id === event.userMessageId)
+      ? messages
+      : [...messages, { id: event.userMessageId, role: 'user' as const, content: event.userContent }]
+    return withUserMessage.some((message) => message.id === event.requestId)
       ? current
-      : { ...current, [event.threadId]: [...messages, { id: event.requestId, role: 'assistant', content: '' }] }
+      : { ...current, [event.threadId]: [...withUserMessage, { id: event.requestId, role: 'assistant', content: '' }] }
   }
   if (event.type === 'content') {
     return { ...current, [event.threadId]: messages.map((message) => message.id === event.requestId

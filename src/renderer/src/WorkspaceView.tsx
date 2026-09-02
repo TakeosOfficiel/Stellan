@@ -33,6 +33,8 @@ type ToolActivity = {
   status: 'running' | 'done' | 'denied' | 'error'
 }
 
+type ContentEvent = Extract<ChatEvent, { type: 'content' }>
+
 const TOOL_LABELS: Record<string, string> = {
   list_files: 'Liste des fichiers',
   read_file: 'Lecture de fichier',
@@ -45,6 +47,30 @@ const TOOL_LABELS: Record<string, string> = {
 
 function projectName(projectPath: string): string {
   return projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? projectPath
+}
+
+function TrashIcon(): React.JSX.Element {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+}
+
+function PencilIcon(): React.JSX.Element {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.17 6.81a2.82 2.82 0 0 0-3.98-3.98L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.63L7 20.66a2 2 0 0 0 .83-.5zM15 5l4 4" /></svg>
+}
+
+function ArrowUpIcon(): React.JSX.Element {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 19V5" /></svg>
+}
+
+function OutlineIcon(): React.JSX.Element {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13" /></svg>
+}
+
+function ArrowDownIcon(): React.JSX.Element {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m7-7-7 7-7-7" /></svg>
+}
+
+function StopIcon(): React.JSX.Element {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
 }
 
 export function WorkspaceView({
@@ -64,6 +90,7 @@ export function WorkspaceView({
   const [runsByThread, setRunsByThread] = useState<ThreadRunState>({})
   const [runHistoryByThread, setRunHistoryByThread] = useState<Record<string, AgentRunSummary[]>>({})
   const [runHistoryOpen, setRunHistoryOpen] = useState(false)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [editingRequestId, setEditingRequestId] = useState<string | null>(null)
   const [editingContent, setEditingContent] = useState('')
   const [toolsByThread, setToolsByThread] = useState<Record<string, ToolActivity[]>>({})
@@ -90,19 +117,66 @@ export function WorkspaceView({
   const portalCloseRef = useRef<HTMLButtonElement>(null)
   const portalPanelRef = useRef<HTMLElement>(null)
   const threadMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const runHistoryTriggerRef = useRef<HTMLButtonElement>(null)
+  const messagesScrollRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
+  const bufferedContentRef = useRef(new Map<string, ContentEvent>())
+  const contentFrameRef = useRef<number | null>(null)
   const handledShortcutRef = useRef<typeof shortcut>(null)
   const messageKey = activeThreadId ?? '__draft__'
   const messages = messagesByThread[messageKey] ?? []
   const activeRun = activeThreadId ? runsByThread[activeThreadId] : undefined
   const activeRequest = activeRun?.requestId ?? null
   const activeRunHistory = activeThreadId ? runHistoryByThread[activeThreadId] ?? [] : []
-  const queuedRunCount = activeRunHistory.filter((run) => run.status === 'queued').length
+  const queuedRuns = activeRunHistory.filter((run) => run.status === 'queued')
+  const historyRuns = activeRunHistory.filter((run) => run.status !== 'queued')
   const toolActivities = activeThreadId ? toolsByThread[activeThreadId] ?? [] : []
 
   const effectiveModel = useMemo(() => {
     if (models.some((model) => model.name === selectedModel)) return selectedModel
     return models[0]?.name ?? ''
   }, [models, selectedModel])
+
+  function contentEventKey(threadId: string, requestId: string): string {
+    return `${threadId}:${requestId}`
+  }
+
+  function renderBufferedContent(): void {
+    const chunks: ContentEvent[] = []
+    for (const [key, event] of bufferedContentRef.current) {
+      const characters = Array.from(event.content)
+      const content = characters.slice(0, 2).join('')
+      chunks.push({ ...event, content })
+      if (characters.length <= 2) bufferedContentRef.current.delete(key)
+      else bufferedContentRef.current.set(key, { ...event, content: characters.slice(2).join('') })
+    }
+    if (chunks.length > 0) {
+      setMessagesByThread((current) => chunks.reduce(applyMessageEvent, current))
+    }
+    contentFrameRef.current = bufferedContentRef.current.size > 0
+      ? requestAnimationFrame(renderBufferedContent)
+      : null
+  }
+
+  function bufferContent(event: ContentEvent): void {
+    const key = contentEventKey(event.threadId, event.requestId)
+    const pending = bufferedContentRef.current.get(key)
+    bufferedContentRef.current.set(key, {
+      ...event,
+      content: `${pending?.content ?? ''}${event.content}`
+    })
+    if (contentFrameRef.current === null) {
+      contentFrameRef.current = requestAnimationFrame(renderBufferedContent)
+    }
+  }
+
+  function flushBufferedContent(threadId: string, requestId: string): void {
+    const key = contentEventKey(threadId, requestId)
+    const pending = bufferedContentRef.current.get(key)
+    if (!pending) return
+    bufferedContentRef.current.delete(key)
+    setMessagesByThread((current) => applyMessageEvent(current, pending))
+  }
 
   useEffect(() => {
     void Promise.all([window.localAgent.listThreads(), window.localAgent.listActiveRuns()]).then(([storedThreads, runs]) => {
@@ -130,6 +204,16 @@ export function WorkspaceView({
     if (terminalThreadId) void window.localAgent.closeTerminal(terminalThreadId)
   }, [terminalThreadId])
 
+  useEffect(() => () => {
+    if (contentFrameRef.current !== null) cancelAnimationFrame(contentFrameRef.current)
+  }, [])
+
+  useEffect(() => {
+    if (stickToBottomRef.current) {
+      messagesScrollRef.current?.scrollTo({ top: messagesScrollRef.current.scrollHeight })
+    }
+  }, [messages, toolActivities])
+
   useEffect(() => {
     const handleEvent = (event: ChatEvent): void => {
       if (event.type === 'status') {
@@ -153,12 +237,17 @@ export function WorkspaceView({
         })
         return
       }
-      if (event.type === 'content') {
+      if (event.type === 'started') {
         setMessagesByThread((current) => applyMessageEvent(current, event))
+        return
+      }
+      if (event.type === 'content') {
+        bufferContent(event)
         return
       }
 
       if (event.type === 'error') {
+        flushBufferedContent(event.threadId, event.requestId)
         setMessagesByThread((current) => applyMessageEvent(current, event))
       }
       setRunsByThread((current) => applyRunEvent(current, event))
@@ -196,12 +285,19 @@ export function WorkspaceView({
         event.preventDefault()
         setThreadMenuOpen(false)
         threadMenuButtonRef.current?.focus()
+        return
+      }
+
+      if (runHistoryOpen) {
+        event.preventDefault()
+        setRunHistoryOpen(false)
+        runHistoryTriggerRef.current?.focus()
       }
     }
 
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [portalPanelOpen, threadMenuOpen, workerPanelOpen])
+  }, [portalPanelOpen, runHistoryOpen, threadMenuOpen, workerPanelOpen])
 
   useEffect(() => {
     if (!shortcut || handledShortcutRef.current === shortcut) return
@@ -278,8 +374,11 @@ export function WorkspaceView({
     ])
     const active = runHistory.find((run) => run.status === 'running')
       ?? runHistory.find((run) => run.status === 'queued')
+    stickToBottomRef.current = true
+    setShowScrollToBottom(false)
     setActiveThreadId(thread.id)
     setRunHistoryOpen(false)
+    setEditingRequestId(null)
     storeRunHistory(thread.id, runHistory)
     const ephemeral = active ? {
       requestId: active.requestId,
@@ -354,7 +453,11 @@ export function WorkspaceView({
     closeThreadMenu()
     await closeTerminal()
     await window.localAgent.setActiveThread(null)
+    stickToBottomRef.current = true
+    setShowScrollToBottom(false)
     setActiveThreadId(null)
+    setRunHistoryOpen(false)
+    setEditingRequestId(null)
     setMessagesByThread((current) => ({ ...current, __draft__: [] }))
     setProjectReview(null)
     setReviewError(null)
@@ -490,16 +593,11 @@ export function WorkspaceView({
     }
 
     const requestId = crypto.randomUUID()
-    const userMessage: UiMessage = { id: crypto.randomUUID(), role: 'user', content }
     const history: ChatMessage[] = messages
       .filter((message) => !message.failed && message.content)
       .map(({ role, content: messageContent }) => ({ role, content: messageContent }))
 
     setPrompt('')
-    setMessagesByThread((current) => ({
-      ...current,
-      [threadId]: [...(current[threadId] ?? messages), userMessage]
-    }))
     setRunsByThread((current) => current[threadId]
       ? current
       : { ...current, [threadId]: { requestId, status: 'queued' } })
@@ -507,7 +605,7 @@ export function WorkspaceView({
     setProjectReview(null)
 
     try {
-      const queuedRun = await window.localAgent.startChat({
+      await window.localAgent.startChat({
         requestId,
         threadId,
         model: effectiveModel,
@@ -523,44 +621,21 @@ export function WorkspaceView({
           { role: 'user', content }
         ]
       })
-      setMessagesByThread((current) => ({
-        ...current,
-        [threadId]: (current[threadId] ?? []).map((message) => message.id === userMessage.id
-          ? { ...message, id: queuedRun.userMessageId }
-          : message)
-      }))
       await refreshRunHistory(threadId)
     } catch {
-      setMessagesByThread((current) => ({
-        ...current,
-        [threadId]: (current[threadId] ?? []).filter((message) => message.id !== userMessage.id)
-      }))
       await refreshRunHistory(threadId)
     }
   }
 
   async function saveQueuedMessage(requestId: string): Promise<void> {
-    const updated = await window.localAgent.updateQueuedMessage({ requestId, content: editingContent })
-    setMessagesByThread((current) => ({
-      ...current,
-      [updated.threadId]: (current[updated.threadId] ?? []).map((message) => message.id === updated.userMessageId
-        ? { ...message, content: updated.userContent }
-        : message)
-    }))
+    await window.localAgent.updateQueuedMessage({ requestId, content: editingContent })
     setEditingRequestId(null)
     if (activeThreadId) await refreshRunHistory(activeThreadId)
   }
 
   async function deleteQueuedMessage(requestId: string): Promise<void> {
-    const queued = activeRunHistory.find((run) => run.requestId === requestId)
     await window.localAgent.deleteQueuedMessage(requestId)
-    if (activeThreadId && queued) {
-      setMessagesByThread((current) => ({
-        ...current,
-        [activeThreadId]: (current[activeThreadId] ?? []).filter((message) => message.id !== queued.userMessageId)
-      }))
-      await refreshRunHistory(activeThreadId)
-    }
+    if (activeThreadId) await refreshRunHistory(activeThreadId)
   }
 
   async function sendQueuedMessageNow(requestId: string): Promise<void> {
@@ -735,7 +810,17 @@ export function WorkspaceView({
           </div>
         </div>
 
-        <div className="messages" aria-live="polite">
+        <div
+          ref={messagesScrollRef}
+          className="messages"
+          aria-live="polite"
+          onScroll={(event) => {
+            const element = event.currentTarget
+            const awayFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight > 72
+            stickToBottomRef.current = !awayFromBottom
+            setShowScrollToBottom(awayFromBottom)
+          }}
+        >
           <div className="conversation-column">
             {terminalError && (
               <div className="terminal-error" role="alert">
@@ -772,7 +857,15 @@ export function WorkspaceView({
             ) : messages.map((message) => (
               <article className={`message ${message.role} ${message.failed ? 'failed' : ''}`} key={message.id}>
                 <span>{message.role === 'user' ? 'Vous' : 'Agent'}</span>
-                <p>{message.content || (activeRequest === message.id ? (activeRun?.status === 'queued' ? 'En attente…' : 'Réflexion…') : '')}</p>
+                <p>{message.content
+                  ? message.role === 'assistant'
+                    ? message.content.split(/\n{2,}/).map((paragraph, index) => (
+                        <span className="message-paragraph" key={index}>{paragraph}</span>
+                      ))
+                    : message.content
+                  : activeRequest === message.id
+                    ? activeRun?.status === 'queued' ? 'En attente…' : 'Réflexion…'
+                    : ''}</p>
               </article>
             ))}
             {toolActivities.length > 0 && (
@@ -799,40 +892,67 @@ export function WorkspaceView({
 
         {activeThreadId && activeRunHistory.length > 0 && (
           <div className="run-history-area">
-            <button
-              className="run-history-trigger"
-              type="button"
-              aria-expanded={runHistoryOpen}
-              aria-controls="run-history-panel"
-              onClick={() => setRunHistoryOpen((open) => !open)}
-            >
-              <span aria-hidden="true">☷</span>
-              Historique et file
-              {queuedRunCount > 0 && <strong>{queuedRunCount} en attente</strong>}
-            </button>
-            {runHistoryOpen && (
-              <section id="run-history-panel" className="run-history-panel" aria-label="Historique et file des messages">
-                {activeRunHistory.map((run) => (
-                  <article className={`run-history-item ${run.status}`} key={run.requestId}>
-                    <div className="run-history-status">
-                      <span aria-hidden="true">{run.status === 'running' ? '●' : run.status === 'queued' ? '○' : run.status === 'completed' ? '✓' : '!'}</span>
-                      <strong>{run.status === 'running' ? 'En cours' : run.status === 'queued' ? 'En attente' : run.status === 'completed' ? 'Terminé' : run.status === 'interrupted' ? 'Interrompu' : 'Erreur'}</strong>
-                    </div>
-                    {run.status === 'queued' && editingRequestId === run.requestId ? (
+            {queuedRuns.length > 0 && (
+              <section className="message-queue" aria-label="File d’attente des messages">
+                {queuedRuns.map((run) => (
+                  <article className="queued-message" key={run.requestId}>
+                    {editingRequestId === run.requestId ? (
                       <div className="run-history-editor">
                         <textarea aria-label="Modifier le message en attente" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} />
                         <button type="button" disabled={!editingContent.trim()} onClick={() => void saveQueuedMessage(run.requestId)}>Enregistrer</button>
                         <button type="button" onClick={() => setEditingRequestId(null)}>Annuler</button>
                       </div>
-                    ) : <p>{run.userContent}</p>}
-                    {run.error && <small>{run.error}</small>}
-                    {run.status === 'queued' && editingRequestId !== run.requestId && (
-                      <div className="run-history-actions">
-                        <button type="button" onClick={() => { setEditingRequestId(run.requestId); setEditingContent(run.userContent) }}>Modifier</button>
-                        <button type="button" onClick={() => void deleteQueuedMessage(run.requestId)}>Supprimer</button>
-                        <button className="send-now" type="button" onClick={() => void sendQueuedMessageNow(run.requestId)}>Envoyer maintenant</button>
-                      </div>
+                    ) : (
+                      <>
+                        <p title={run.userContent}>{run.userContent}</p>
+                        <div className="queued-message-actions">
+                          <button type="button" aria-label="Supprimer le message en attente" title="Supprimer" onClick={() => void deleteQueuedMessage(run.requestId)}><TrashIcon /></button>
+                          <button type="button" aria-label="Modifier le message en attente" title="Modifier" onClick={() => { setEditingRequestId(run.requestId); setEditingContent(run.userContent) }}><PencilIcon /></button>
+                          <button className="send-now" type="button" aria-label="Envoyer ce message maintenant" title="Envoyer maintenant" onClick={() => void sendQueuedMessageNow(run.requestId)}><ArrowUpIcon /></button>
+                        </div>
+                      </>
                     )}
+                  </article>
+                ))}
+              </section>
+            )}
+            <button
+              ref={runHistoryTriggerRef}
+              className="run-history-trigger"
+              type="button"
+              aria-expanded={runHistoryOpen}
+              aria-controls="run-history-panel"
+              aria-label="Afficher l’historique des messages"
+              title="Historique"
+              onClick={() => setRunHistoryOpen((open) => !open)}
+            >
+              <OutlineIcon />
+              {queuedRuns.length > 0 && <strong>{queuedRuns.length}</strong>}
+            </button>
+            {showScrollToBottom && (
+              <button
+                className="scroll-to-bottom"
+                type="button"
+                aria-label="Aller aux nouveaux messages"
+                title="Nouveaux messages"
+                onClick={() => {
+                  stickToBottomRef.current = true
+                  setShowScrollToBottom(false)
+                  messagesScrollRef.current?.scrollTo({ top: messagesScrollRef.current.scrollHeight, behavior: 'smooth' })
+                }}
+              ><ArrowDownIcon /></button>
+            )}
+            {runHistoryOpen && (
+              <section id="run-history-panel" className="run-history-panel" aria-label="Historique des messages">
+                {historyRuns.length === 0 && <p className="empty-run-history">Aucun message traité pour le moment.</p>}
+                {historyRuns.map((run) => (
+                  <article className={`run-history-item ${run.status}`} key={run.requestId}>
+                    <div className="run-history-status">
+                      <span aria-hidden="true">{run.status === 'running' ? '●' : run.status === 'completed' ? '✓' : '!'}</span>
+                      <strong>{run.status === 'running' ? 'En cours' : run.status === 'completed' ? 'Terminé' : run.status === 'interrupted' ? 'Interrompu' : 'Erreur'}</strong>
+                    </div>
+                    <p>{run.userContent}</p>
+                    {run.error && <small>{run.error}</small>}
                   </article>
                 ))}
               </section>
@@ -859,10 +979,11 @@ export function WorkspaceView({
             <div className="composer-toolbar">
               <span>{project ? `◇ ${project.name}` : 'Aucun projet'}</span>
               <div className="composer-actions">
-                {activeRequest && (
-                  <button className="stop-button" type="button" onClick={() => void window.localAgent.cancelChat(activeRequest)}>Arrêter</button>
+                {activeRequest && !prompt.trim() ? (
+                  <button className="stop-button" type="button" aria-label="Arrêter l’agent" title="Arrêter" onClick={() => void window.localAgent.cancelChat(activeRequest)}><StopIcon /></button>
+                ) : (
+                  <button type="submit" aria-label={activeRequest ? 'Ajouter à la file d’attente' : 'Envoyer'} disabled={!prompt.trim() || !effectiveModel}><ArrowUpIcon /></button>
                 )}
-                <button type="submit" aria-label={activeRequest ? 'Ajouter à la file d’attente' : 'Envoyer'} disabled={!prompt.trim() || !effectiveModel}>↑</button>
               </div>
             </div>
           </form>

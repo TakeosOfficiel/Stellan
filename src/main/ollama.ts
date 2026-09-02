@@ -30,6 +30,7 @@ const pullProgressSchema = z.object({
 const chatChunkSchema = z.object({
   message: z.object({
     content: z.string().optional(),
+    thinking: z.string().optional(),
     tool_calls: z.array(z.object({
       function: z.object({
         name: z.string(),
@@ -205,7 +206,7 @@ export async function streamOllamaChat(
   const response = await fetcher(`${activeOllamaUrl}/api/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: true, ...(tools ? { tools } : {}) }),
+    body: JSON.stringify({ model, messages, stream: true, think: false, ...(tools ? { tools } : {}) }),
     signal
   })
 
