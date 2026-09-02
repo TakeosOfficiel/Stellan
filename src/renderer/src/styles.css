@@ -77,6 +77,10 @@ button {
 }
 button:hover:not(:disabled) { background: #363f39; }
 button:disabled { cursor: not-allowed; opacity: 0.48; }
+button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid #a9b68b;
+  outline-offset: 2px;
+}
 .diagnostic-card button { width: 100%; margin-top: 10px; }
 .diagnostic-card button:not(.secondary-button) { color: #111411; background: #e1e5df; }
 .diagnostic-card button:not(.secondary-button):hover { background: #f4f6f2; }
@@ -314,7 +318,7 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .thread-row button { padding: 6px 3px; color: #a1aaa4; font-size: 9px; }
 .thread-row.active button:first-of-type { color: #dde3df; }
 .thread-row .thread-delete { width: 20px; padding: 3px; opacity: 0; text-align: center; }
-.thread-row:hover .thread-delete { opacity: 1; }
+.thread-row:hover .thread-delete, .thread-row:focus-within .thread-delete { opacity: 1; }
 .sidebar-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid #252b27; }
 .runtime-summary { margin: 0 6px 9px; font-size: 9px; }
 .model-selector { margin: 0; padding: 0; border: 0; }
@@ -330,12 +334,11 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .chat-header-actions { align-items: center; }
 .ghost-button { border: 1px solid #29312c; color: #8d9790; background: #151a17; }
 .thread-menu { position: relative; }
-.thread-menu summary {
+.thread-menu .thread-menu-trigger {
   display: grid; place-items: center; width: 31px; height: 29px; border-radius: 6px;
-  color: #8a938d; cursor: pointer; list-style: none;
+  padding: 0; color: #8a938d; background: transparent;
 }
-.thread-menu summary:hover, .thread-menu[open] summary { color: #d9dfdb; background: #222824; }
-.thread-menu summary::-webkit-details-marker { display: none; }
+.thread-menu .thread-menu-trigger:hover, .thread-menu .thread-menu-trigger[aria-expanded="true"] { color: #d9dfdb; background: #222824; }
 .thread-menu-popover {
   position: absolute; z-index: 20; top: 35px; right: 0; display: grid; width: 225px;
   padding: 5px; border: 1px solid #303a34; border-radius: 8px; background: #101613;
@@ -373,6 +376,7 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
   border: 0; border-radius: 10px; background: transparent; resize: none;
 }
 .composer textarea:focus { border: 0; box-shadow: none; }
+.composer textarea:focus-visible { outline-offset: -2px; }
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 33px; padding: 3px 6px 5px 12px; }
 .composer-toolbar > span { color: #667069; font-size: 9px; }
 .composer-toolbar button { display: grid; place-items: center; min-width: 0; width: 27px; height: 27px; padding: 0; border-radius: 7px; }

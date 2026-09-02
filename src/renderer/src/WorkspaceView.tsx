@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   ChatEvent,
   ChatMessage,
@@ -18,6 +18,8 @@ type UiMessage = ChatMessage & {
 type WorkspaceViewProps = {
   status: OllamaStatus | null | 'loading'
   runtime: RuntimeInfo | null
+  shortcut: { type: 'new-thread' | 'open-project' } | null
+  onShortcutHandled: () => void
   onOpenSetup: () => void
 }
 
@@ -41,7 +43,13 @@ function projectName(projectPath: string): string {
   return projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? projectPath
 }
 
-export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewProps): React.JSX.Element {
+export function WorkspaceView({
+  status,
+  runtime,
+  shortcut,
+  onShortcutHandled,
+  onOpenSetup
+}: WorkspaceViewProps): React.JSX.Element {
   const models = status && status !== 'loading' && status.available ? status.models : []
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
   const [project, setProject] = useState<ProjectSelection | null>(null)
@@ -56,8 +64,17 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
   const [workerProfile, setWorkerProfile] = useState<WorkerProfile | null>(null)
   const [workerDraft, setWorkerDraft] = useState<WorkerProfile | null>(null)
   const [workerPanelOpen, setWorkerPanelOpen] = useState(false)
+  const [threadMenuOpen, setThreadMenuOpen] = useState(false)
   const [workerError, setWorkerError] = useState<string | null>(null)
   const [savingWorker, setSavingWorker] = useState(false)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const newThreadButtonRef = useRef<HTMLButtonElement>(null)
+  const projectSwitcherRef = useRef<HTMLButtonElement>(null)
+  const workerTriggerRef = useRef<HTMLButtonElement>(null)
+  const workerCloseRef = useRef<HTMLButtonElement>(null)
+  const workerPanelRef = useRef<HTMLElement>(null)
+  const threadMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const handledShortcutRef = useRef<typeof shortcut>(null)
 
   const effectiveModel = useMemo(() => {
     if (models.some((model) => model.name === selectedModel)) return selectedModel
@@ -110,7 +127,57 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
     return window.localAgent.onChatEvent(handleEvent)
   }, [])
 
+  useEffect(() => {
+    if (workerPanelOpen) workerCloseRef.current?.focus()
+  }, [workerPanelOpen])
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+
+      if (workerPanelOpen) {
+        event.preventDefault()
+        closeWorkerPanel()
+        return
+      }
+
+      if (threadMenuOpen) {
+        event.preventDefault()
+        setThreadMenuOpen(false)
+        threadMenuButtonRef.current?.focus()
+      }
+    }
+
+    window.addEventListener('keydown', handleEscape)
+    return () => window.removeEventListener('keydown', handleEscape)
+  }, [threadMenuOpen, workerPanelOpen])
+
+  useEffect(() => {
+    if (!shortcut || handledShortcutRef.current === shortcut) return
+    handledShortcutRef.current = shortcut
+    if (shortcut.type === 'new-thread') newThread()
+    else void chooseProject()
+    onShortcutHandled()
+  }, [shortcut])
+
+  function focusComposer(): void {
+    requestAnimationFrame(() => {
+      if (composerRef.current && !composerRef.current.disabled) composerRef.current.focus()
+      else newThreadButtonRef.current?.focus()
+    })
+  }
+
+  function closeThreadMenu(): void {
+    setThreadMenuOpen(false)
+  }
+
+  function closeWorkerPanel(): void {
+    setWorkerPanelOpen(false)
+    requestAnimationFrame(() => workerTriggerRef.current?.focus())
+  }
+
   async function chooseProject(): Promise<void> {
+    closeThreadMenu()
     const selection = await window.localAgent.selectProject()
     if (selection) {
       if (activeThreadId) newThread()
@@ -118,6 +185,9 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
       const profile = await window.localAgent.getWorkerProfile(selection.path)
       setWorkerProfile(profile)
       setWorkerDraft(profile)
+      focusComposer()
+    } else {
+      projectSwitcherRef.current?.focus()
     }
   }
 
@@ -147,11 +217,13 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
   }
 
   function newThread(): void {
+    closeThreadMenu()
     setActiveThreadId(null)
     setMessages([])
     setToolActivities([])
     setProjectReview(null)
     setReviewError(null)
+    focusComposer()
   }
 
   async function saveWorkerProfile(): Promise<void> {
@@ -170,7 +242,7 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
       })
       setWorkerProfile(saved)
       setWorkerDraft(saved)
-      setWorkerPanelOpen(false)
+      closeWorkerPanel()
     } catch (error) {
       setWorkerError(error instanceof Error ? error.message : 'Le profil worker n’a pas pu être enregistré.')
     } finally {
@@ -267,15 +339,22 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
       <nav className="app-rail" aria-label="Sections de Local Agent">
         <div className="rail-main">
           <button className="active" type="button" aria-label="Threads" title="Threads">⌁</button>
-          <button type="button" aria-label="Projets" title="Projets" onClick={() => void chooseProject()}>◇</button>
-          <button type="button" aria-label="Nouveau thread" title="Nouveau thread" onClick={newThread}>＋</button>
+          <button type="button" aria-label="Projets" aria-keyshortcuts="Control+O Meta+O" title="Projets" onClick={() => void chooseProject()}>◇</button>
+          <button type="button" aria-label="Nouveau thread" aria-keyshortcuts="Control+N Meta+N" title="Nouveau thread" onClick={newThread}>＋</button>
         </div>
-        <button type="button" aria-label="Modèles et réglages" title="Modèles et réglages" onClick={onOpenSetup}>⚙</button>
+        <button type="button" aria-label="Modèles et réglages" aria-keyshortcuts="Control+, Meta+," title="Modèles et réglages" onClick={onOpenSetup}>⚙</button>
       </nav>
 
       <aside className="workspace-sidebar">
-        <button className="project-switcher" type="button" onClick={() => void chooseProject()}>
-          <span className="project-icon">◇</span>
+        <button
+          ref={projectSwitcherRef}
+          className="project-switcher"
+          type="button"
+          aria-label={`Ouvrir un projet, sélection actuelle : ${project?.name ?? 'Tous les projets'}`}
+          aria-keyshortcuts="Control+O Meta+O"
+          onClick={() => void chooseProject()}
+        >
+          <span className="project-icon" aria-hidden="true">◇</span>
           <span>
             <small>ESPACE LOCAL</small>
             <strong>{project?.name ?? 'Tous les projets'}</strong>
@@ -283,14 +362,22 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
           <span aria-hidden="true">⌄</span>
         </button>
 
-        <button className="new-thread-button" type="button" onClick={newThread}>
-          <span>＋</span> Nouveau thread
-          <kbd>Ctrl N</kbd>
+        <button ref={newThreadButtonRef} className="new-thread-button" type="button" aria-label="Nouveau thread" aria-keyshortcuts="Control+N Meta+N" onClick={newThread}>
+          <span aria-hidden="true">＋</span> Nouveau thread
+          <kbd>Ctrl/Cmd N</kbd>
         </button>
 
         {project && workerProfile && (
-          <button className="worker-profile-summary" type="button" onClick={() => setWorkerPanelOpen(true)}>
-            <span>◇</span>
+          <button
+            ref={workerTriggerRef}
+            className="worker-profile-summary"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded={workerPanelOpen}
+            aria-label={`Configurer le profil worker de ${project.name}`}
+            onClick={() => setWorkerPanelOpen(true)}
+          >
+            <span aria-hidden="true">◇</span>
             <span><small>WORKER DU PROJET</small><strong>{workerProfile.mode === 'container' ? workerProfile.runtime : 'Direct'}</strong></span>
             <span>{workerProfile.cpuLimit} CPU · {Math.round(workerProfile.memoryMb / 1024)} Go</span>
           </button>
@@ -362,14 +449,22 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
                 <span aria-hidden="true">±</span> Changements
               </button>
             )}
-            <details className="thread-menu">
-              <summary aria-label="Options du thread">•••</summary>
-              <div className="thread-menu-popover">
-                <div><span>⌁</span><span>Accès</span><small>Privé · local</small></div>
-                <button type="button" onClick={newThread}><span>＋</span><span>Nouveau thread</span></button>
-                <button type="button" onClick={onOpenSetup}><span>⚙</span><span>Réglages du modèle</span></button>
-              </div>
-            </details>
+            <div className="thread-menu">
+              <button
+                ref={threadMenuButtonRef}
+                className="thread-menu-trigger"
+                type="button"
+                aria-label="Options du thread"
+                aria-expanded={threadMenuOpen}
+                aria-controls="thread-menu-popover"
+                onClick={() => setThreadMenuOpen((open) => !open)}
+              >•••</button>
+              {threadMenuOpen && <div id="thread-menu-popover" className="thread-menu-popover">
+                <div><span aria-hidden="true">⌁</span><span>Accès</span><small>Privé · local</small></div>
+                <button type="button" onClick={newThread}><span aria-hidden="true">＋</span><span>Nouveau thread</span></button>
+                <button type="button" onClick={onOpenSetup}><span aria-hidden="true">⚙</span><span>Réglages du modèle</span></button>
+              </div>}
+            </div>
           </div>
         </div>
 
@@ -424,6 +519,7 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
         <div className="composer-area">
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
             <textarea
+              ref={composerRef}
               aria-label="Votre demande"
               placeholder={effectiveModel ? 'Demandez à Local Agent…' : 'Installez d’abord un modèle local…'}
               value={prompt}
@@ -451,12 +547,34 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
 
       {workerPanelOpen && workerDraft && (
         <div className="worker-panel-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setWorkerPanelOpen(false)
+          if (event.target === event.currentTarget) closeWorkerPanel()
         }}>
-          <section className="worker-panel" role="dialog" aria-modal="true" aria-labelledby="worker-panel-title">
+          <section
+            ref={workerPanelRef}
+            className="worker-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="worker-panel-title"
+            onKeyDown={(event) => {
+              if (event.key !== 'Tab') return
+              const focusable = Array.from(workerPanelRef.current?.querySelectorAll<HTMLElement>(
+                'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'
+              ) ?? [])
+              const first = focusable[0]
+              const last = focusable.at(-1)
+              if (!first || !last) return
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault()
+                last.focus()
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault()
+                first.focus()
+              }
+            }}
+          >
             <header>
               <div><p className="eyebrow">PROJET · {project?.name}</p><h2 id="worker-panel-title">Profil du worker</h2></div>
-              <button type="button" aria-label="Fermer" onClick={() => setWorkerPanelOpen(false)}>×</button>
+              <button ref={workerCloseRef} type="button" aria-label="Fermer le profil du worker" onClick={closeWorkerPanel}>×</button>
             </header>
             <p>Ces limites s’appliquent aux commandes lancées par l’agent. Les fichiers restent dans le worktree Git du thread.</p>
 
@@ -512,7 +630,7 @@ export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewPro
             <div className="storage-limit-note"><span>Stockage</span><strong>Worktree sur le disque hôte</strong><small>Une limite dure arrivera avec les volumes workers gérés ; elle n’est pas simulée ici.</small></div>
             {workerError && <p className="worker-error" role="alert">{workerError}</p>}
             <footer>
-              <button className="secondary-button" type="button" onClick={() => setWorkerPanelOpen(false)}>Annuler</button>
+              <button className="secondary-button" type="button" onClick={closeWorkerPanel}>Annuler</button>
               <button type="button" disabled={savingWorker || (workerDraft.mode === 'container' && !workerDraft.runtime)} onClick={() => void saveWorkerProfile()}>
                 {savingWorker ? 'Enregistrement…' : 'Enregistrer le profil'}
               </button>

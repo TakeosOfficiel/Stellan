@@ -38,6 +38,7 @@ function compatibilityLabel(model: CatalogModel): string {
 }
 
 type AppView = 'agent' | 'setup'
+type WorkspaceShortcut = { type: 'new-thread' | 'open-project' }
 
 function TitleBar({ view, onViewChange }: {
   view: AppView
@@ -51,7 +52,12 @@ function TitleBar({ view, onViewChange }: {
       </div>
       <nav className="titlebar-nav" aria-label="Navigation principale" onDoubleClick={(event) => event.stopPropagation()}>
         <button className={view === 'agent' ? 'active' : ''} type="button" onClick={() => onViewChange('agent')}>Agent</button>
-        <button className={view === 'setup' ? 'active' : ''} type="button" onClick={() => onViewChange('setup')}>Modèles</button>
+        <button
+          className={view === 'setup' ? 'active' : ''}
+          type="button"
+          aria-keyshortcuts="Control+, Meta+,"
+          onClick={() => onViewChange('setup')}
+        >Modèles</button>
       </nav>
       <div className="window-controls" onDoubleClick={(event) => event.stopPropagation()}>
         <button type="button" aria-label="Réduire" onClick={() => void window.localAgent.minimizeWindow()}>—</button>
@@ -64,6 +70,7 @@ function TitleBar({ view, onViewChange }: {
 
 export function App(): React.JSX.Element {
   const [view, setView] = useState<AppView>('agent')
+  const [workspaceShortcut, setWorkspaceShortcut] = useState<WorkspaceShortcut | null>(null)
   const [status, setStatus] = useState<LoadState>(null)
   const [setup, setSetup] = useState<SetupInfo | null>(null)
   const [category, setCategory] = useState<ModelCategory>('code')
@@ -99,6 +106,25 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     return window.localAgent.onModelPullProgress(setPullProgress)
+  }, [])
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.repeat) return
+
+      const key = event.key.toLowerCase()
+      if (key === ',') {
+        event.preventDefault()
+        setView('setup')
+      } else if (key === 'n' || key === 'o') {
+        event.preventDefault()
+        setWorkspaceShortcut({ type: key === 'n' ? 'new-thread' : 'open-project' })
+        setView('agent')
+      }
+    }
+
+    window.addEventListener('keydown', handleShortcut)
+    return () => window.removeEventListener('keydown', handleShortcut)
   }, [])
 
   const visibleModels = useMemo(
@@ -137,7 +163,13 @@ export function App(): React.JSX.Element {
       <TitleBar view={view} onViewChange={setView} />
 
       {view === 'agent' ? (
-        <WorkspaceView status={status} runtime={setup?.runtime ?? null} onOpenSetup={() => setView('setup')} />
+        <WorkspaceView
+          status={status}
+          runtime={setup?.runtime ?? null}
+          shortcut={workspaceShortcut}
+          onShortcutHandled={() => setWorkspaceShortcut(null)}
+          onOpenSetup={() => setView('setup')}
+        />
       ) : (
       <div className="setup-view">
       <aside className="settings-sidebar">
