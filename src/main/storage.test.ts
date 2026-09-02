@@ -133,4 +133,43 @@ describe('ThreadStore', () => {
 
     expect(() => store.listThreads()).toThrow('ThreadStore is closed')
   })
+
+  it('persists and updates one worker profile per project', () => {
+    const path = temporaryDatabase()
+    const store = new ThreadStore(path)
+    try {
+      expect(store.getWorkerProfile('/project')).toBeNull()
+      const created = store.saveWorkerProfile({
+        projectPath: '/project',
+        mode: 'container',
+        runtime: 'docker',
+        cpuLimit: 2,
+        memoryMb: 4096,
+        image: 'node:22-bookworm',
+        network: 'none'
+      })
+      expect(created).toMatchObject({ projectPath: '/project', cpuLimit: 2, memoryMb: 4096 })
+      expect(store.saveWorkerProfile({
+        ...created,
+        mode: 'direct',
+        runtime: null,
+        cpuLimit: 1,
+        memoryMb: 2048
+      })).toMatchObject({ mode: 'direct', runtime: null, cpuLimit: 1, memoryMb: 2048 })
+    } finally {
+      store.close()
+    }
+
+    const reopened = new ThreadStore(path)
+    try {
+      expect(reopened.getWorkerProfile('/project')).toMatchObject({
+        mode: 'direct',
+        runtime: null,
+        cpuLimit: 1,
+        memoryMb: 2048
+      })
+    } finally {
+      reopened.close()
+    }
+  })
 })

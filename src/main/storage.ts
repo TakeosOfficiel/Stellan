@@ -43,6 +43,19 @@ export type AppendMessageInput = {
   content: string
 }
 
+export type WorkerProfile = {
+  projectPath: string
+  mode: 'direct' | 'container'
+  runtime: 'docker' | 'podman' | null
+  cpuLimit: number
+  memoryMb: number
+  image: string
+  network: 'none' | 'bridge'
+  updatedAt: string
+}
+
+export type SaveWorkerProfileInput = Omit<WorkerProfile, 'updatedAt'>
+
 type StorageRow = Record<string, SQLInputValue>
 
 const migrations = [
@@ -68,6 +81,18 @@ const migrations = [
 
     CREATE INDEX messages_thread_id_created_at
       ON messages(thread_id, created_at);
+  `,
+  `
+    CREATE TABLE project_worker_profiles (
+      project_path TEXT PRIMARY KEY,
+      mode TEXT NOT NULL CHECK (mode IN ('direct', 'container')),
+      runtime TEXT CHECK (runtime IN ('docker', 'podman') OR runtime IS NULL),
+      cpu_limit REAL NOT NULL,
+      memory_mb INTEGER NOT NULL,
+      image TEXT NOT NULL,
+      network TEXT NOT NULL CHECK (network IN ('none', 'bridge')),
+      updated_at TEXT NOT NULL
+    );
   `
 ]
 
@@ -93,6 +118,19 @@ function toMessage(row: StorageRow): Message {
     role: String(row.role) as MessageRole,
     content: String(row.content),
     createdAt: String(row.created_at)
+  }
+}
+
+function toWorkerProfile(row: StorageRow): WorkerProfile {
+  return {
+    projectPath: String(row.project_path),
+    mode: row.mode === 'container' ? 'container' : 'direct',
+    runtime: row.runtime === 'docker' || row.runtime === 'podman' ? row.runtime : null,
+    cpuLimit: Number(row.cpu_limit),
+    memoryMb: Number(row.memory_mb),
+    image: String(row.image),
+    network: row.network === 'bridge' ? 'bridge' : 'none',
+    updatedAt: String(row.updated_at)
   }
 }
 
@@ -234,6 +272,44 @@ export class ThreadStore {
       WHERE thread_id = ?
       ORDER BY created_at ASC, rowid ASC
     `).all(threadId).map(toMessage)
+  }
+
+  getWorkerProfile(projectPath: string): WorkerProfile | null {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT project_path, mode, runtime, cpu_limit, memory_mb, image, network, updated_at
+      FROM project_worker_profiles
+      WHERE project_path = ?
+    `).get(projectPath)
+    return row ? toWorkerProfile(row) : null
+  }
+
+  saveWorkerProfile(input: SaveWorkerProfileInput): WorkerProfile {
+    this.assertOpen()
+    const updatedAt = new Date().toISOString()
+    this.database.prepare(`
+      INSERT INTO project_worker_profiles (
+        project_path, mode, runtime, cpu_limit, memory_mb, image, network, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_path) DO UPDATE SET
+        mode = excluded.mode,
+        runtime = excluded.runtime,
+        cpu_limit = excluded.cpu_limit,
+        memory_mb = excluded.memory_mb,
+        image = excluded.image,
+        network = excluded.network,
+        updated_at = excluded.updated_at
+    `).run(
+      input.projectPath,
+      input.mode,
+      input.runtime,
+      input.cpuLimit,
+      input.memoryMb,
+      input.image,
+      input.network,
+      updatedAt
+    )
+    return this.getWorkerProfile(input.projectPath) as WorkerProfile
   }
 
   close(): void {

@@ -33,8 +33,21 @@ export type HardwareInfo = {
   gpus: GpuInfo[]
 }
 
+export type RuntimeToolInfo = {
+  available: boolean
+  version: string | null
+}
+
+export type RuntimeInfo = {
+  git: RuntimeToolInfo
+  docker: RuntimeToolInfo
+  podman: RuntimeToolInfo
+  recommendedContainerRuntime: 'docker' | 'podman' | null
+}
+
 export type SetupInfo = {
   hardware: HardwareInfo
+  runtime: RuntimeInfo
   models: CatalogModel[]
 }
 
@@ -75,6 +88,19 @@ export type ProjectSelection = {
   path: string
   name: string
 }
+
+export type WorkerProfile = {
+  projectPath: string
+  mode: 'direct' | 'container'
+  runtime: 'docker' | 'podman' | null
+  cpuLimit: number
+  memoryMb: number
+  image: string
+  network: 'none' | 'bridge'
+  updatedAt: string
+}
+
+export type SaveWorkerProfileRequest = Omit<WorkerProfile, 'updatedAt'>
 
 export type StoredThread = {
   id: string
@@ -129,6 +155,8 @@ export type LocalAgentApi = {
   pullModel: (model: string) => Promise<ModelPullResult>
   onModelPullProgress: (listener: (progress: ModelPullProgress) => void) => () => void
   selectProject: () => Promise<ProjectSelection | null>
+  getWorkerProfile: (projectPath: string) => Promise<WorkerProfile>
+  saveWorkerProfile: (profile: SaveWorkerProfileRequest) => Promise<WorkerProfile>
   startChat: (request: ChatRequest) => Promise<void>
   cancelChat: (requestId: string) => Promise<void>
   onChatEvent: (listener: (event: ChatEvent) => void) => () => void

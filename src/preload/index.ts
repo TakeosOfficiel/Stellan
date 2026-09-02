@@ -22,6 +22,8 @@ const api: LocalAgentApi = {
     return () => ipcRenderer.removeListener('ollama:pull-progress', handler)
   },
   selectProject: () => ipcRenderer.invoke('project:select'),
+  getWorkerProfile: (projectPath) => ipcRenderer.invoke('worker-profile:get', projectPath),
+  saveWorkerProfile: (profile) => ipcRenderer.invoke('worker-profile:save', profile),
   startChat: (request) => ipcRenderer.invoke('chat:start', request),
   cancelChat: (requestId) => ipcRenderer.invoke('chat:cancel', requestId),
   onChatEvent: (listener) => {

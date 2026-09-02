@@ -7,11 +7,14 @@ La version 0.1 fournit :
 - détecte Ollama, sa version et les modèles installés ;
 - ouvre l'installation officielle d'Ollama à la demande ;
 - détecte la RAM, le processeur et le GPU ;
+- vérifie séparément Git, Docker et Podman et recommande le runtime worker disponible ;
 - classe les modèles par usage : rapide, général, code, vision ou génération d'images ;
 - recommande les modèles adaptés tout en laissant le choix à l'utilisateur ;
 - télécharge le modèle choisi avec une progression visible ;
 - conserve les threads et messages dans une base SQLite locale ;
 - crée un Git worktree isolé par thread lorsque le projet le permet ;
+- conserve un profil worker par projet avec mode direct ou conteneur, limites CPU/RAM, image et politique réseau ;
+- exécute les commandes autorisées dans Docker ou Podman lorsque le profil conteneur est activé ;
 - demande une confirmation avant chaque écriture ou commande ;
 - permet à l'agent de lire, rechercher, modifier, tester et présenter le diff Git ;
 - borne le contexte et les sorties d'outils pour rester utilisable avec de petits modèles.

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { mkdir, stat } from 'node:fs/promises'
 import path from 'node:path'
+import type { RuntimeInfo, RuntimeToolInfo } from '../shared/contracts'
 
 export type ContainerRuntime = 'docker' | 'podman'
 
@@ -10,12 +11,15 @@ export type CommandResult = {
   stdout: string
   stderr: string
   timedOut: boolean
+  outputTruncated: boolean
 }
 
 export type CommandOptions = {
   cwd?: string
   timeoutMs?: number
   env?: NodeJS.ProcessEnv
+  signal?: AbortSignal
+  maxOutputBytes?: number
 }
 
 export type CommandRunner = (
@@ -34,6 +38,7 @@ export type ContainerExecutionOptions = {
   memoryLimit: string
   network?: string
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
@@ -44,6 +49,10 @@ const MEMORY_PATTERN = /^[1-9][0-9]*(?:[bkmgBKMG])?$/
 
 export const runCommand: CommandRunner = (executable, args, options = {}) =>
   new Promise((resolve) => {
+    if (options.signal?.aborted) {
+      resolve({ exitCode: null, signal: null, stdout: '', stderr: '', timedOut: false, outputTruncated: false })
+      return
+    }
     const child = spawn(executable, [...args], {
       cwd: options.cwd,
       env: options.env,
@@ -52,12 +61,31 @@ export const runCommand: CommandRunner = (executable, args, options = {}) =>
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let outputTruncated = false
+    let outputBytes = 0
     let settled = false
+    const maxOutputBytes = options.maxOutputBytes ?? 2_000_000
+
+    const appendOutput = (current: string, chunk: string): string => {
+      const remaining = maxOutputBytes - outputBytes
+      if (remaining <= 0) {
+        outputTruncated = true
+        return current
+      }
+      const buffer = Buffer.from(chunk)
+      const accepted = buffer.subarray(0, remaining)
+      outputBytes += accepted.byteLength
+      if (accepted.byteLength < buffer.byteLength) outputTruncated = true
+      return current + accepted.toString('utf8')
+    }
 
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
-    child.stderr.on('data', (chunk: string) => { stderr += chunk })
+    child.stdout.on('data', (chunk: string) => { stdout = appendOutput(stdout, chunk) })
+    child.stderr.on('data', (chunk: string) => { stderr = appendOutput(stderr, chunk) })
+
+    const abort = (): void => { child.kill('SIGKILL') }
+    options.signal?.addEventListener('abort', abort, { once: true })
 
     const timer = options.timeoutMs === undefined
       ? undefined
@@ -70,7 +98,8 @@ export const runCommand: CommandRunner = (executable, args, options = {}) =>
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
-      resolve({ exitCode, signal, stdout, stderr, timedOut })
+      options.signal?.removeEventListener('abort', abort)
+      resolve({ exitCode, signal, stdout, stderr, timedOut, outputTruncated })
     }
 
     child.once('error', (error) => {
@@ -120,6 +149,34 @@ export async function detectContainerRuntime(
     if (result.exitCode === 0 && !result.timedOut) return runtime
   }
   return null
+}
+
+async function inspectTool(
+  executable: string,
+  args: readonly string[],
+  runner: CommandRunner
+): Promise<RuntimeToolInfo> {
+  const result = await runner(executable, args, { timeoutMs: 5_000 })
+  if (result.exitCode !== 0 || result.timedOut) return { available: false, version: null }
+  const output = result.stdout.trim() || result.stderr.trim()
+  return { available: true, version: output ? output.slice(0, 200) : null }
+}
+
+export async function getRuntimeInfo(
+  runner: CommandRunner = runCommand
+): Promise<RuntimeInfo> {
+  const [git, docker, podman] = await Promise.all([
+    inspectTool('git', ['--version'], runner),
+    inspectTool('docker', ['info', '--format', '{{.Version}}'], runner),
+    inspectTool('podman', ['info', '--format', '{{.Version}}'], runner)
+  ])
+
+  return {
+    git,
+    docker,
+    podman,
+    recommendedContainerRuntime: docker.available ? 'docker' : podman.available ? 'podman' : null
+  }
 }
 
 export async function createThreadWorktree(
@@ -242,7 +299,11 @@ export async function executeInContainer(
   ]
 
   try {
-    return await runner(options.runtime, args, { timeoutMs: options.timeoutMs })
+    return await runner(options.runtime, args, {
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
+      maxOutputBytes: 2_000_000
+    })
   } finally {
     await runner(
       options.runtime,

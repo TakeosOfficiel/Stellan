@@ -6,6 +6,7 @@ import {
   createThreadWorktree,
   detectContainerRuntime,
   executeInContainer,
+  getRuntimeInfo,
   removeThreadWorktree,
   runCommand,
   type CommandResult,
@@ -21,6 +22,7 @@ function result(overrides: Partial<CommandResult> = {}): CommandResult {
     stdout: '',
     stderr: '',
     timedOut: false,
+    outputTruncated: false,
     ...overrides
   }
 }
@@ -60,6 +62,34 @@ describe('detectContainerRuntime', () => {
       .mockResolvedValue(result({ exitCode: 1 }))
     await expect(detectContainerRuntime(unavailableRunner)).resolves.toBeNull()
     expect(unavailableRunner).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('getRuntimeInfo', () => {
+  it('reports Git and each running container engine independently', async () => {
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result({ stdout: 'git version 2.48.0\n' }))
+      .mockResolvedValueOnce(result({ stdout: '27.5.1\n' }))
+      .mockResolvedValueOnce(result({ exitCode: null, stderr: 'not found' }))
+
+    await expect(getRuntimeInfo(runner)).resolves.toEqual({
+      git: { available: true, version: 'git version 2.48.0' },
+      docker: { available: true, version: '27.5.1' },
+      podman: { available: false, version: null },
+      recommendedContainerRuntime: 'docker'
+    })
+    expect(runner).toHaveBeenCalledTimes(3)
+  })
+
+  it('recommends Podman when Docker is unavailable', async () => {
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result({ stdout: 'git version 2.48.0' }))
+      .mockResolvedValueOnce(result({ exitCode: 1 }))
+      .mockResolvedValueOnce(result({ stdout: '5.4.0' }))
+
+    await expect(getRuntimeInfo(runner)).resolves.toMatchObject({
+      recommendedContainerRuntime: 'podman'
+    })
   })
 })
 
@@ -217,7 +247,7 @@ describe('executeInContainer', () => {
     expect(runner.mock.calls[0]).toEqual([
       'podman',
       expect.any(Array),
-      { timeoutMs: 10_000 }
+      { timeoutMs: 10_000, signal: undefined, maxOutputBytes: 2_000_000 }
     ])
     expect(runArgs).toEqual([
       'run', '--rm',
@@ -269,6 +299,31 @@ describe('executeInContainer', () => {
       ['rm', '--force', 'local-agent-networked'],
       { timeoutMs: 10_000 }
     ])
+  })
+
+  it('forwards cancellation and output limits to the container process', async () => {
+    const projectPath = await temporaryDirectory()
+    const controller = new AbortController()
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result())
+
+    await executeInContainer({
+      runtime: 'docker',
+      threadId: 'cancel-safe',
+      projectPath,
+      image: 'node:22-bookworm',
+      command: ['npm', 'test'],
+      cpuLimit: 2,
+      memoryLimit: '4g',
+      signal: controller.signal
+    }, runner)
+
+    expect(runner.mock.calls[0]?.[2]).toEqual({
+      timeoutMs: undefined,
+      signal: controller.signal,
+      maxOutputBytes: 2_000_000
+    })
   })
 
   it('validates container inputs before command execution', async () => {

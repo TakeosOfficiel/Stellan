@@ -118,6 +118,11 @@ export type CodingAgentOptions = {
   onContent: (content: string) => void
   onTool: (tool: string, status: ToolStatus) => void
   authorize: (tool: string, summary: string) => Promise<boolean>
+  runCommand?: (
+    command: string,
+    args: readonly string[],
+    options: { timeoutMs: number; signal: AbortSignal }
+  ) => Promise<unknown>
 }
 
 function compactResult(value: unknown): string {
@@ -152,7 +157,8 @@ async function executeTool(
   call: OllamaToolCall,
   tools: ProjectTools,
   authorize: CodingAgentOptions['authorize'],
-  signal: AbortSignal
+  signal: AbortSignal,
+  runCommand: CodingAgentOptions['runCommand']
 ): Promise<{ content: string; status: ToolStatus }> {
   const name = call.function.name
   const input = call.function.arguments
@@ -191,10 +197,9 @@ async function executeTool(
         return { content: 'L’utilisateur a refusé cette commande.', status: 'denied' }
       }
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
-      const result = await tools.runCommand(command, args, {
-        timeoutMs: 120_000,
-        signal
-      })
+      const result = await (runCommand
+        ? runCommand(command, args, { timeoutMs: 120_000, signal })
+        : tools.runCommand(command, args, { timeoutMs: 120_000, signal }))
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       return { content: compactResult(result), status: 'done' }
     }
@@ -238,7 +243,13 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     for (const call of result.toolCalls) {
       const tool = call.function.name
       options.onTool(tool, 'running')
-      const toolResult = await executeTool(call, options.project, options.authorize, options.signal)
+      const toolResult = await executeTool(
+        call,
+        options.project,
+        options.authorize,
+        options.signal,
+        options.runCommand
+      )
       options.onTool(tool, toolResult.status)
       conversation.push({
         role: 'tool',

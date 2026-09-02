@@ -137,7 +137,7 @@ export function App(): React.JSX.Element {
       <TitleBar view={view} onViewChange={setView} />
 
       {view === 'agent' ? (
-        <WorkspaceView status={status} onOpenSetup={() => setView('setup')} />
+        <WorkspaceView status={status} runtime={setup?.runtime ?? null} onOpenSetup={() => setView('setup')} />
       ) : (
       <div className="setup-view">
       <aside className="settings-sidebar">
@@ -222,6 +222,25 @@ export function App(): React.JSX.Element {
             )}
           </article>
         </div>
+        {setup && (
+          <div className="runtime-diagnostics" aria-label="Outils d’isolation détectés">
+            {([
+              ['Git', setup.runtime.git],
+              ['Docker', setup.runtime.docker],
+              ['Podman', setup.runtime.podman]
+            ] as const).map(([name, tool]) => (
+              <div key={name}>
+                <span className={`status-dot ${tool.available ? 'online' : 'offline'}`} />
+                <span><strong>{name}</strong><small>{tool.available ? tool.version ?? 'Disponible' : 'Indisponible'}</small></span>
+              </div>
+            ))}
+            <p>
+              {setup.runtime.recommendedContainerRuntime
+                ? `Runtime worker recommandé : ${setup.runtime.recommendedContainerRuntime}`
+                : 'Mode direct uniquement : démarrez Docker ou Podman pour les workers isolés.'}
+            </p>
+          </div>
+        )}
       </section>
 
       <section className="models-section">

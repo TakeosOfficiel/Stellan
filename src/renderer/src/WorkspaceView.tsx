@@ -5,7 +5,9 @@ import type {
   OllamaStatus,
   ProjectSelection,
   ProjectReview,
-  StoredThread
+  RuntimeInfo,
+  StoredThread,
+  WorkerProfile
 } from '../../shared/contracts'
 
 type UiMessage = ChatMessage & {
@@ -15,6 +17,7 @@ type UiMessage = ChatMessage & {
 
 type WorkspaceViewProps = {
   status: OllamaStatus | null | 'loading'
+  runtime: RuntimeInfo | null
   onOpenSetup: () => void
 }
 
@@ -38,7 +41,7 @@ function projectName(projectPath: string): string {
   return projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? projectPath
 }
 
-export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): React.JSX.Element {
+export function WorkspaceView({ status, runtime, onOpenSetup }: WorkspaceViewProps): React.JSX.Element {
   const models = status && status !== 'loading' && status.available ? status.models : []
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
   const [project, setProject] = useState<ProjectSelection | null>(null)
@@ -50,6 +53,11 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
   const [toolActivities, setToolActivities] = useState<ToolActivity[]>([])
   const [projectReview, setProjectReview] = useState<ProjectReview | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
+  const [workerProfile, setWorkerProfile] = useState<WorkerProfile | null>(null)
+  const [workerDraft, setWorkerDraft] = useState<WorkerProfile | null>(null)
+  const [workerPanelOpen, setWorkerPanelOpen] = useState(false)
+  const [workerError, setWorkerError] = useState<string | null>(null)
+  const [savingWorker, setSavingWorker] = useState(false)
 
   const effectiveModel = useMemo(() => {
     if (models.some((model) => model.name === selectedModel)) return selectedModel
@@ -107,6 +115,9 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
     if (selection) {
       if (activeThreadId) newThread()
       setProject(selection)
+      const profile = await window.localAgent.getWorkerProfile(selection.path)
+      setWorkerProfile(profile)
+      setWorkerDraft(profile)
     }
   }
 
@@ -125,6 +136,14 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
     setToolActivities([])
     setProjectReview(null)
     setReviewError(null)
+    if (thread.projectPath) {
+      const profile = await window.localAgent.getWorkerProfile(thread.projectPath)
+      setWorkerProfile(profile)
+      setWorkerDraft(profile)
+    } else {
+      setWorkerProfile(null)
+      setWorkerDraft(null)
+    }
   }
 
   function newThread(): void {
@@ -133,6 +152,30 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
     setToolActivities([])
     setProjectReview(null)
     setReviewError(null)
+  }
+
+  async function saveWorkerProfile(): Promise<void> {
+    if (!workerDraft) return
+    setSavingWorker(true)
+    setWorkerError(null)
+    try {
+      const saved = await window.localAgent.saveWorkerProfile({
+        projectPath: workerDraft.projectPath,
+        mode: workerDraft.mode,
+        runtime: workerDraft.mode === 'container' ? workerDraft.runtime : null,
+        cpuLimit: workerDraft.cpuLimit,
+        memoryMb: workerDraft.memoryMb,
+        image: workerDraft.image,
+        network: workerDraft.network
+      })
+      setWorkerProfile(saved)
+      setWorkerDraft(saved)
+      setWorkerPanelOpen(false)
+    } catch (error) {
+      setWorkerError(error instanceof Error ? error.message : 'Le profil worker n’a pas pu être enregistré.')
+    } finally {
+      setSavingWorker(false)
+    }
   }
 
   async function reviewProject(): Promise<void> {
@@ -244,6 +287,14 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
           <span>＋</span> Nouveau thread
           <kbd>Ctrl N</kbd>
         </button>
+
+        {project && workerProfile && (
+          <button className="worker-profile-summary" type="button" onClick={() => setWorkerPanelOpen(true)}>
+            <span>◇</span>
+            <span><small>WORKER DU PROJET</small><strong>{workerProfile.mode === 'container' ? workerProfile.runtime : 'Direct'}</strong></span>
+            <span>{workerProfile.cpuLimit} CPU · {Math.round(workerProfile.memoryMb / 1024)} Go</span>
+          </button>
+        )}
 
         <div className="thread-list">
           <div className="thread-group-heading">
@@ -397,6 +448,78 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
           <small>Entrée pour envoyer · Maj + Entrée pour une nouvelle ligne</small>
         </div>
       </div>
+
+      {workerPanelOpen && workerDraft && (
+        <div className="worker-panel-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setWorkerPanelOpen(false)
+        }}>
+          <section className="worker-panel" role="dialog" aria-modal="true" aria-labelledby="worker-panel-title">
+            <header>
+              <div><p className="eyebrow">PROJET · {project?.name}</p><h2 id="worker-panel-title">Profil du worker</h2></div>
+              <button type="button" aria-label="Fermer" onClick={() => setWorkerPanelOpen(false)}>×</button>
+            </header>
+            <p>Ces limites s’appliquent aux commandes lancées par l’agent. Les fichiers restent dans le worktree Git du thread.</p>
+
+            <label>Mode d’exécution
+              <select value={workerDraft.mode} onChange={(event) => {
+                const mode = event.target.value as WorkerProfile['mode']
+                setWorkerDraft({
+                  ...workerDraft,
+                  mode,
+                  runtime: mode === 'container' ? runtime?.recommendedContainerRuntime ?? null : null
+                })
+              }}>
+                <option value="direct">Direct — processus natifs</option>
+                <option value="container" disabled={!runtime?.recommendedContainerRuntime}>Conteneur isolé</option>
+              </select>
+            </label>
+
+            {workerDraft.mode === 'container' && (
+              <>
+                <label>Runtime
+                  <select value={workerDraft.runtime ?? ''} onChange={(event) => setWorkerDraft({
+                    ...workerDraft,
+                    runtime: event.target.value as 'docker' | 'podman'
+                  })}>
+                    <option value="docker" disabled={!runtime?.docker.available}>Docker</option>
+                    <option value="podman" disabled={!runtime?.podman.available}>Podman</option>
+                  </select>
+                </label>
+                <label>Image du worker
+                  <input value={workerDraft.image} onChange={(event) => setWorkerDraft({ ...workerDraft, image: event.target.value })} />
+                </label>
+              </>
+            )}
+
+            <div className="worker-resource-grid">
+              <label>CPU
+                <input type="number" min="0.5" max="128" step="0.5" value={workerDraft.cpuLimit} onChange={(event) => setWorkerDraft({ ...workerDraft, cpuLimit: Number(event.target.value) })} />
+              </label>
+              <label>RAM (Mo)
+                <input type="number" min="512" step="256" value={workerDraft.memoryMb} onChange={(event) => setWorkerDraft({ ...workerDraft, memoryMb: Number(event.target.value) })} />
+              </label>
+            </div>
+
+            {workerDraft.mode === 'container' && (
+              <label>Réseau
+                <select value={workerDraft.network} onChange={(event) => setWorkerDraft({ ...workerDraft, network: event.target.value as 'none' | 'bridge' })}>
+                  <option value="none">Désactivé</option>
+                  <option value="bridge">Autorisé</option>
+                </select>
+              </label>
+            )}
+
+            <div className="storage-limit-note"><span>Stockage</span><strong>Worktree sur le disque hôte</strong><small>Une limite dure arrivera avec les volumes workers gérés ; elle n’est pas simulée ici.</small></div>
+            {workerError && <p className="worker-error" role="alert">{workerError}</p>}
+            <footer>
+              <button className="secondary-button" type="button" onClick={() => setWorkerPanelOpen(false)}>Annuler</button>
+              <button type="button" disabled={savingWorker || (workerDraft.mode === 'container' && !workerDraft.runtime)} onClick={() => void saveWorkerProfile()}>
+                {savingWorker ? 'Enregistrement…' : 'Enregistrer le profil'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </section>
   )
 }

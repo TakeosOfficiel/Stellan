@@ -211,6 +211,8 @@ Le mode direct est présenté comme moins isolé que le mode conteneur. L'applic
 - limites de ressources et politiques réseau ;
 - suspension, reprise et nettoyage des environnements.
 
+État actuel : les worktrees sont actifs. Git, Docker et Podman sont diagnostiqués séparément. Un profil persistant par projet permet de choisir le mode direct ou conteneur, le runtime, l’image, les limites CPU/RAM et le réseau. En mode conteneur, les commandes autorisées de l’agent passent par un conteneur éphémère durci et nettoyé après l’exécution ; les opérations de fichiers restent appliquées au worktree hôte. La suspension/reprise de conteneurs et les volumes gérés avec limite dure de stockage restent à réaliser. L’interface ne prétend donc pas encore imposer une limite disque.
+
 ### Phase 4 — Fiabilité et expérience
 
 - terminal intégré ;

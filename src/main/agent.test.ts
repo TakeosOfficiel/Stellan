@@ -121,4 +121,34 @@ describe('runCodingAgent', () => {
     expect(body).toContain('message récent à conserver')
     expect(body).not.toContain('0: xxxxx')
   })
+
+  it('routes authorized commands through the configured worker executor', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const workerCommand = vi.fn().mockResolvedValue({ exitCode: 0, stdout: 'worker output' })
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'run_command', arguments: { command: 'npm', args: ['test'] } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Tests terminés.' }, done: true }])))
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Lance les tests.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      runCommand: workerCommand
+    })
+
+    expect(workerCommand).toHaveBeenCalledWith(
+      'npm',
+      ['test'],
+      expect.objectContaining({ timeoutMs: 120_000 })
+    )
+  })
 })

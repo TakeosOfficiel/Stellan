@@ -7,8 +7,9 @@ import { getModelCatalog, isCatalogModel } from './model-catalog'
 import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat } from './ollama'
 import { startOllamaServer } from './ollama-process'
 import { ProjectTools } from './project-tools'
-import { createThreadWorktree, removeThreadWorktree } from './runtime'
+import { createThreadWorktree, getRuntimeInfo, removeThreadWorktree } from './runtime'
 import { ThreadStore } from './storage'
+import { createWorkerCommandExecutor } from './worker-runtime'
 
 const OLLAMA_STATUS_CHANNEL = 'ollama:get-status'
 const OLLAMA_START_CHANNEL = 'ollama:start'
@@ -17,6 +18,8 @@ const OLLAMA_DOWNLOAD_CHANNEL = 'ollama:open-download'
 const MODEL_PULL_CHANNEL = 'ollama:pull-model'
 const MODEL_PULL_PROGRESS_CHANNEL = 'ollama:pull-progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
+const WORKER_PROFILE_GET_CHANNEL = 'worker-profile:get'
+const WORKER_PROFILE_SAVE_CHANNEL = 'worker-profile:save'
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_CANCEL_CHANNEL = 'chat:cancel'
 const CHAT_EVENT_CHANNEL = 'chat:event'
@@ -47,6 +50,22 @@ const createThreadSchema = z.object({
   projectPath: z.string().min(1).max(10_000).nullable(),
   model: z.string().min(1).max(200).nullable()
 })
+const workerProfileSchema = z.object({
+  projectPath: z.string().min(1).max(10_000),
+  mode: z.enum(['direct', 'container']),
+  runtime: z.enum(['docker', 'podman']).nullable(),
+  cpuLimit: z.number().min(0.5).max(128),
+  memoryMb: z.number().int().min(512).max(1_048_576),
+  image: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/).max(300),
+  network: z.enum(['none', 'bridge'])
+}).superRefine((profile, context) => {
+  if (profile.mode === 'container' && !profile.runtime) {
+    context.addIssue({ code: 'custom', message: 'Un runtime est requis pour le mode conteneur.' })
+  }
+  if (profile.mode === 'direct' && profile.runtime) {
+    context.addIssue({ code: 'custom', message: 'Le mode direct ne doit pas définir de runtime.' })
+  }
+})
 let activeDownload: string | null = null
 const activeChats = new Map<string, AbortController>()
 const activeThreadChats = new Map<string, string>()
@@ -57,6 +76,25 @@ let mainWindow: BrowserWindow | null = null
 function getThreadStore(): ThreadStore {
   if (!threadStore) throw new Error('Le stockage local n’est pas prêt.')
   return threadStore
+}
+
+function isApprovedProject(projectPath: string): boolean {
+  return approvedProjectPaths.has(projectPath) || getThreadStore().listThreads().some(
+    (thread) => thread.projectPath === projectPath
+  )
+}
+
+async function defaultWorkerProfile(projectPath: string) {
+  const hardware = await getHardwareInfo()
+  return {
+    projectPath,
+    mode: 'direct' as const,
+    runtime: null,
+    cpuLimit: Math.max(1, Math.min(4, Math.floor(hardware.cpuCores / 2))),
+    memoryMb: Math.max(1024, Math.min(8192, Math.floor(hardware.totalMemoryBytes / 4 / 1_000_000))),
+    image: 'node:22-bookworm',
+    network: 'none' as const
+  }
 }
 
 function handle<T extends unknown[], R>(
@@ -140,8 +178,8 @@ app.whenReady().then(() => {
     }
   })
   handle(SETUP_INFO_CHANNEL, async () => {
-    const hardware = await getHardwareInfo()
-    return { hardware, models: getModelCatalog(hardware) }
+    const [hardware, runtime] = await Promise.all([getHardwareInfo(), getRuntimeInfo()])
+    return { hardware, runtime, models: getModelCatalog(hardware) }
   })
   handle(OLLAMA_DOWNLOAD_CHANNEL, async () => {
     await shell.openExternal(OLLAMA_DOWNLOAD_URL)
@@ -182,6 +220,23 @@ app.whenReady().then(() => {
     const path = result.filePaths[0]
     approvedProjectPaths.add(path)
     return { path, name: basename(path) }
+  })
+  handle(WORKER_PROFILE_GET_CHANNEL, async (_event, input: unknown) => {
+    const projectPath = z.string().min(1).max(10_000).parse(input)
+    if (!isApprovedProject(projectPath)) throw new Error('Ce projet n’est pas autorisé.')
+    const store = getThreadStore()
+    return store.getWorkerProfile(projectPath) ?? store.saveWorkerProfile(await defaultWorkerProfile(projectPath))
+  })
+  handle(WORKER_PROFILE_SAVE_CHANNEL, async (_event, input: unknown) => {
+    const profile = workerProfileSchema.parse(input)
+    if (!isApprovedProject(profile.projectPath)) throw new Error('Ce projet n’est pas autorisé.')
+    if (profile.mode === 'container') {
+      const runtime = await getRuntimeInfo()
+      if (!profile.runtime || !runtime[profile.runtime].available) {
+        throw new Error(`Le runtime ${profile.runtime ?? 'conteneur'} n’est pas disponible.`)
+      }
+    }
+    return getThreadStore().saveWorkerProfile(profile)
   })
   handle(THREADS_LIST_CHANNEL, () => getThreadStore().listThreads())
   handle(THREADS_CREATE_CHANNEL, async (event, input: unknown) => {
@@ -310,9 +365,10 @@ app.whenReady().then(() => {
 
     try {
       let executionPath = parsed.data.projectPath
+      let thread = null
       if (parsed.data.threadId) {
         const store = getThreadStore()
-        const thread = store.getThread(parsed.data.threadId)
+        thread = store.getThread(parsed.data.threadId)
         if (!thread) throw new Error('Le thread local est introuvable.')
         executionPath = thread.workspacePath ?? thread.projectPath
         const latestUserMessage = [...parsed.data.messages].reverse().find((message) => message.role === 'user')
@@ -331,6 +387,9 @@ app.whenReady().then(() => {
           throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
         }
         const project = await ProjectTools.create(executionPath)
+        const workerProfile = thread?.projectPath
+          ? getThreadStore().getWorkerProfile(thread.projectPath)
+          : null
         await runCodingAgent({
           model: parsed.data.model,
           messages: parsed.data.messages,
@@ -338,6 +397,9 @@ app.whenReady().then(() => {
           signal: controller.signal,
           onContent,
           onTool: (tool, status) => send({ type: 'tool', tool, status }),
+          runCommand: thread
+            ? createWorkerCommandExecutor(workerProfile, thread.id, executionPath)
+            : undefined,
           authorize: async (tool, summary) => {
             const owner = BrowserWindow.fromWebContents(event.sender)
             const options = {
@@ -417,6 +479,8 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(OLLAMA_DOWNLOAD_CHANNEL)
   ipcMain.removeHandler(MODEL_PULL_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
+  ipcMain.removeHandler(WORKER_PROFILE_GET_CHANNEL)
+  ipcMain.removeHandler(WORKER_PROFILE_SAVE_CHANNEL)
   ipcMain.removeHandler(CHAT_START_CHANNEL)
   ipcMain.removeHandler(CHAT_CANCEL_CHANNEL)
   ipcMain.removeHandler(THREADS_LIST_CHANNEL)
