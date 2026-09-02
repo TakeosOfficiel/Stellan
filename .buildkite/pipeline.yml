@@ -1,0 +1,32 @@
+steps:
+  - label: ":linux: Linux checks and packages"
+    key: linux
+    agents:
+      queue: linux-x64
+    env:
+      CI: "true"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    commands:
+      - corepack enable
+      - corepack prepare pnpm@12.0.0 --activate
+      - pnpm --version
+      - pnpm install --frozen-lockfile
+      - node scripts/ci/run.cjs linux
+    artifact_paths:
+      - ci-artifacts/unsigned/linux/*
+
+  - label: ":windows: Windows checks and package"
+    key: windows
+    agents:
+      queue: windows-x64
+    env:
+      CI: "true"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    commands:
+      - corepack enable
+      - corepack prepare pnpm@12.0.0 --activate
+      - pnpm --version
+      - pnpm install --frozen-lockfile
+      - node scripts/ci/run.cjs windows
+    artifact_paths:
+      - ci-artifacts/unsigned/windows/*

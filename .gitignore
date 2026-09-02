@@ -2,6 +2,7 @@ node_modules/
 dist/
 out/
 coverage/
+ci-artifacts/
 *.log
 .DS_Store
 .amp/portals/*
