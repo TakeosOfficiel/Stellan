@@ -1,5 +1,8 @@
 import { createServer, get, request, type IncomingHttpHeaders, type Server } from 'node:http'
 import { connect, type Socket } from 'node:net'
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { StoredThread } from '../shared/contracts'
 import { assertPortalAccess, PortalManager } from './portal'
@@ -9,8 +12,10 @@ const OWNER = 7
 const servers: Server[] = []
 const serverSockets = new Map<Server, Set<Socket>>()
 const managers: PortalManager[] = []
+const temporaryDirectories: string[] = []
 const activeThread: StoredThread = {
   id: THREAD,
+  parentThreadId: null,
   title: 'Portal test',
   projectPath: '/project',
   workspacePath: '/workspace',
@@ -109,6 +114,7 @@ afterEach(async () => {
     if (!server.listening) resolve()
     else server.close(() => resolve())
   })))
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
 describe('PortalManager security', () => {
@@ -205,6 +211,44 @@ describe('PortalManager security', () => {
 })
 
 describe('PortalManager protocol and lifecycle', () => {
+  it('serves a project index in Chromium mode without an existing HTTP server', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'local-agent-portal-'))
+    temporaryDirectories.push(root)
+    await writeFile(join(root, 'index.html'), '<script src="/script.js"></script><h1>Hello</h1>')
+    await writeFile(join(root, 'script.js'), 'document.body.dataset.ready = "yes"')
+    const manager = new PortalManager()
+    managers.push(manager)
+
+    const portal = await manager.startProject(THREAD, OWNER, root, 15)
+    const index = await httpCall(portalPort(portal.url))
+    const script = await httpCall(portalPort(portal.url), { path: '/script.js' })
+
+    expect(portal.source).toBe('project')
+    expect(portal.targetPort).toBeNull()
+    expect(portal.expiresAt).not.toBeNull()
+    expect(index.headers['content-type']).toBe('text/html; charset=utf-8')
+    expect(index.body).toContain('<h1>Hello</h1>')
+    expect(script.headers['content-type']).toBe('text/javascript; charset=utf-8')
+    expect(script.body).toContain('dataset.ready')
+  })
+
+  it('keeps project preview reads inside the project root', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'local-agent-portal-'))
+    temporaryDirectories.push(parent)
+    const root = join(parent, 'project')
+    await mkdir(root)
+    await writeFile(join(root, 'index.html'), '<h1>Safe</h1>')
+    await writeFile(join(parent, 'secret.txt'), 'secret')
+    await symlink(join(parent, 'secret.txt'), join(root, 'linked-secret.txt'))
+    const manager = new PortalManager()
+    managers.push(manager)
+    const portal = await manager.startProject(THREAD, OWNER, root)
+    const port = portalPort(portal.url)
+
+    expect((await httpCall(port, { path: '/%2e%2e/secret.txt' })).status).toBe(404)
+    expect((await httpCall(port, { path: '/linked-secret.txt' })).status).toBe(404)
+  })
+
   it('proxies HTTP and WebSocket upgrade traffic through its random loopback port', async () => {
     const upstream = createServer((_req, res) => res.end('http-ok'))
     upstream.on('upgrade', (_req, socket) => {

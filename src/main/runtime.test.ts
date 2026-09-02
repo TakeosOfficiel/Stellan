@@ -5,8 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createThreadWorktree,
   detectContainerRuntime,
+  ensureWorkerContainer,
+  executeInWorkerContainer,
   executeInContainer,
   getRuntimeInfo,
+  removeWorkerContainer,
   removeThreadWorktree,
   runCommand,
   type CommandResult,
@@ -363,5 +366,94 @@ describe('executeInContainer', () => {
       memoryLimit: '1g'
     }, runner)).rejects.toThrow('threadId')
     expect(runner).not.toHaveBeenCalled()
+  })
+})
+
+describe('executeInWorkerContainer', () => {
+  it('creates one persistent resource-limited container then executes inside it', async () => {
+    const projectPath = await temporaryDirectory()
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result({ exitCode: 1, stderr: 'not found' }))
+      .mockResolvedValueOnce(result({ stdout: 'container-id' }))
+      .mockResolvedValueOnce(result({ stdout: 'v22\n' }))
+
+    await expect(executeInWorkerContainer({
+      runtime: 'docker',
+      threadId: 'persistent-123',
+      projectPath,
+      image: 'node:22-bookworm',
+      command: ['node', '--version'],
+      cpuLimit: 2,
+      memoryLimit: '4096m',
+      network: 'none'
+    }, runner)).resolves.toMatchObject({ stdout: 'v22\n' })
+
+    expect(runner.mock.calls[1]?.[1]).toEqual(expect.arrayContaining([
+      'run', '--detach', '--name', 'local-agent-worker-persistent-123',
+      '--label', expect.stringMatching(/^com\.local-agent\.worker-config=[a-f0-9]{64}$/),
+      '--cpus', '2', '--memory', '4096m', '--network', 'none',
+      '--mount', `type=bind,source=${projectPath},target=/workspace`,
+      '--mount', 'type=volume,source=local-agent-worker-data-persistent-123,target=/worker-data'
+    ]))
+    expect(runner.mock.calls[2]?.[1]).toEqual([
+      'exec', '--workdir', '/workspace', 'local-agent-worker-persistent-123', 'node', '--version'
+    ])
+  })
+
+  it('recreates a persistent container when its saved profile changed', async () => {
+    const projectPath = await temporaryDirectory()
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result({ stdout: 'true|outdated-config' }))
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result({ stdout: 'new-container' }))
+
+    await ensureWorkerContainer({
+      runtime: 'docker', threadId: 'reconfigured', projectPath,
+      image: 'node:22-bookworm', cpuLimit: 4, memoryLimit: '8192m', network: 'none'
+    }, runner)
+
+    expect(runner.mock.calls[1]).toEqual([
+      'docker', ['rm', '--force', 'local-agent-worker-reconfigured'], { timeoutMs: 30_000 }
+    ])
+    expect(runner.mock.calls[2]?.[1]).toEqual(expect.arrayContaining([
+      'run', '--detach', '--cpus', '4', '--memory', '8192m'
+    ]))
+  })
+
+  it('mounts linked-worktree Git metadata at stable container paths', async () => {
+    const root = await temporaryDirectory()
+    const projectPath = path.join(root, 'worktree')
+    const commonDirectory = path.join(root, 'repository', '.git')
+    const gitDirectory = path.join(commonDirectory, 'worktrees', 'thread-git')
+    await mkdir(projectPath, { recursive: true })
+    await mkdir(gitDirectory, { recursive: true })
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result({ exitCode: 1 }))
+      .mockResolvedValueOnce(result())
+
+    await ensureWorkerContainer({
+      runtime: 'docker', threadId: 'thread-git', projectPath,
+      image: 'node:22-bookworm', cpuLimit: 2, memoryLimit: '2048m', network: 'none',
+      gitDirectory, gitCommonDirectory: commonDirectory
+    }, runner)
+
+    expect(runner.mock.calls[1]?.[1]).toEqual(expect.arrayContaining([
+      '--mount', `type=bind,source=${gitDirectory},target=/repo-git`,
+      '--mount', `type=bind,source=${commonDirectory},target=/repo-git-common`,
+      '--env', 'GIT_DIR=/repo-git',
+      '--env', 'GIT_COMMON_DIR=/repo-git-common',
+      '--env', 'GIT_WORK_TREE=/workspace'
+    ]))
+  })
+
+  it('removes both the worker container and its private data volume', async () => {
+    const runner = vi.fn<CommandRunner>().mockResolvedValue(result())
+
+    await removeWorkerContainer('docker', 'deleted-thread', runner)
+
+    expect(runner.mock.calls).toEqual([
+      ['docker', ['rm', '--force', 'local-agent-worker-deleted-thread'], { timeoutMs: 30_000 }],
+      ['docker', ['volume', 'rm', 'local-agent-worker-data-deleted-thread'], { timeoutMs: 30_000 }]
+    ])
   })
 })

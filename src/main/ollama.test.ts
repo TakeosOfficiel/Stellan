@@ -28,7 +28,7 @@ describe('getOllamaStatus', () => {
 
     await expect(getOllamaStatus(fetcher)).resolves.toEqual({
       available: false,
-      reason: "Le service local d'Ollama ne répond pas. Démarrez Ollama puis réessayez."
+      reason: "Le service isolé d'Ollama ne répond pas. Relancez le runtime privé puis réessayez."
     })
   })
 
@@ -47,7 +47,7 @@ describe('getOllamaStatus', () => {
     })
     expect(fetcher).toHaveBeenNthCalledWith(
       2,
-      'http://localhost:11434/api/tags',
+      'http://localhost:11435/api/tags',
       expect.any(Object)
     )
   })
@@ -87,7 +87,7 @@ describe('modelSupportsTools', () => {
 
     await expect(modelSupportsTools('coder:latest', fetcher)).resolves.toBe(true)
     expect(fetcher).toHaveBeenCalledWith(
-      'http://127.0.0.1:11434/api/show',
+      'http://127.0.0.1:11435/api/show',
       expect.objectContaining({ body: JSON.stringify({ model: 'coder:latest' }) })
     )
   })
@@ -143,6 +143,41 @@ describe('streamOllamaChat', () => {
     )).resolves.toEqual({ content: 'Réponse directe', toolCalls: [] })
     expect(onContent).toHaveBeenCalledOnce()
     expect(onContent).toHaveBeenCalledWith('Réponse directe')
+  })
+
+  it('continues a response when Ollama closes the stream before the done chunk', async () => {
+    const interrupted = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"message":{"content":"Ollama peut tourner sur le PC"}}\n'))
+        controller.close()
+      }
+    })
+    const completed = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"message":{"content":" et l’agent dans Docker."},"done":true}\n'))
+        controller.close()
+      }
+    })
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(interrupted, { status: 200 }))
+      .mockResolvedValueOnce(new Response(completed, { status: 200 }))
+    const onContent = vi.fn()
+
+    await expect(streamOllamaChat(
+      'qwen3.5:4b',
+      [{ role: 'user', content: 'Est-ce possible ?' }],
+      onContent,
+      undefined,
+      fetcher
+    )).resolves.toEqual({
+      content: 'Ollama peut tourner sur le PC et l’agent dans Docker.',
+      toolCalls: []
+    })
+    expect(onContent.mock.calls.flat()).toEqual([
+      'Ollama peut tourner sur le PC',
+      ' et l’agent dans Docker.'
+    ])
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Continue exactement la réponse interrompue')
   })
 
   it('rejects an unavailable Ollama response', async () => {

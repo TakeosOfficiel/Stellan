@@ -4,6 +4,7 @@ import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { spawn, type IPty } from 'node-pty'
 import type { TerminalEvent, TerminalStartResult, WorkerProfile } from '../shared/contracts'
+import { managedContainerPtyCommand } from './wsl-runtime'
 
 export type TerminalLaunch = {
   threadId: string
@@ -49,42 +50,26 @@ function nativeShell(): { executable: string; args: string[] } {
 }
 
 function containerCommand(launch: TerminalLaunch, profile: WorkerProfile): {
-  executable: 'docker' | 'podman'
+  executable: string
   args: string[]
-  name: string
+  name: null
 } {
   if (!profile.runtime) throw new Error('Le profil conteneur n’a pas de runtime.')
-  if (launch.cwd.includes(',')) {
-    throw new Error('Le chemin du projet ne peut pas être monté dans le terminal conteneur.')
+  const projectName = path.basename(launch.cwd).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'project'
+  const args = [
+    'exec', '--interactive', '--tty',
+    '--env', `PS1=~/workspace/${projectName}$ `,
+    '--workdir', '/workspace',
+    `local-agent-worker-${launch.threadId}`,
+    '/bin/bash', '--noprofile', '--norc', '-i'
+  ]
+  if (profile.runtime === 'docker') {
+    return { ...managedContainerPtyCommand(args), name: null }
   }
-  const name = `local-agent-terminal-${launch.threadId}`
-  const identityArgs = process.platform === 'linux'
-    ? profile.runtime === 'podman'
-      ? ['--userns', 'keep-id']
-      : typeof process.getuid === 'function' && typeof process.getgid === 'function'
-        ? ['--user', `${process.getuid()}:${process.getgid()}`]
-        : []
-    : []
   return {
     executable: profile.runtime,
-    name,
-    args: [
-      'run', '--rm', '--interactive', '--tty',
-      '--name', name,
-      '--pull', 'never',
-      '--cpus', String(profile.cpuLimit),
-      '--memory', `${profile.memoryMb}m`,
-      '--network', profile.network,
-      ...identityArgs,
-      '--read-only',
-      '--security-opt', 'no-new-privileges',
-      '--cap-drop', 'ALL',
-      '--pids-limit', '256',
-      '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
-      '--mount', `type=bind,source=${launch.cwd},target=/workspace`,
-      '--workdir', '/workspace',
-      '--', profile.image, '/bin/sh'
-    ]
+    name: null,
+    args
   }
 }
 

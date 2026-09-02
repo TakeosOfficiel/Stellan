@@ -32,10 +32,10 @@ describe('getOllamaSetupState', () => {
     })
   })
 
-  it('only marks the installation missing after the start API cannot find the executable', () => {
+  it('marks the runtime missing after Docker cannot be reached', () => {
     expect(getOllamaSetupState({
       available: false,
-      reason: "L'exécutable Ollama est introuvable. Réinstallez Ollama ou ajoutez-le au PATH."
+      reason: 'WSL 2 est requis. Activez-le puis redémarrez.'
     }, 'missing')).toMatchObject({
       installed: 'incomplete',
       running: 'incomplete',
@@ -52,14 +52,28 @@ describe('getOllamaSetupState', () => {
       installed: 'complete',
       running: 'unknown',
       reachable: 'incomplete',
-      modelReady: 'incomplete'
+      modelReady: 'incomplete',
+      canOpenDownload: false
+    })
+  })
+
+  it('shows a private engine startup failure as failed instead of unknown', () => {
+    expect(getOllamaSetupState({
+      available: false,
+      reason: 'Le moteur privé ne répond pas. Consultez les journaux du runtime.'
+    }, 'detected')).toMatchObject({
+      installed: 'complete',
+      running: 'incomplete',
+      reachable: 'incomplete',
+      canStart: true,
+      canOpenDownload: false
     })
   })
 
   it('retains truthful installation evidence from the start operation', () => {
     expect(installationEvidenceFromStart({
       available: false,
-      reason: "L'exécutable Ollama est introuvable. Réinstallez Ollama ou ajoutez-le au PATH."
+      reason: 'WSL 2 est requis. Activez-le puis redémarrez.'
     })).toBe('missing')
     expect(installationEvidenceFromStart({
       available: false,

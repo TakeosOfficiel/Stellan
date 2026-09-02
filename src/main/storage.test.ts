@@ -44,6 +44,22 @@ describe('ThreadStore', () => {
     }
   })
 
+  it('persists worker chats under their parent and deletes them with it', () => {
+    const store = new ThreadStore(temporaryDatabase())
+    try {
+      const parent = store.createThread({ title: 'Main task' })
+      const worker = store.createThread({ title: 'Implement UI', parentThreadId: parent.id })
+
+      expect(worker.parentThreadId).toBe(parent.id)
+      expect(store.listThreads()).toEqual([parent, worker])
+      expect(() => store.createThread({ title: 'Orphan', parentThreadId: crypto.randomUUID() })).toThrow('Parent thread not found')
+      expect(store.deleteThread(parent.id)).toBe(true)
+      expect(store.getThread(worker.id)).toBeNull()
+    } finally {
+      store.close()
+    }
+  })
+
   it('appends messages in stable chronological order', () => {
     const store = new ThreadStore(temporaryDatabase())
 
@@ -226,6 +242,27 @@ describe('ThreadStore', () => {
     }
   })
 
+  it('interrupts queued child workers after restart instead of running them without their parent scope', () => {
+    const path = temporaryDatabase()
+    const firstStore = new ThreadStore(path)
+    const parent = firstStore.createThread({ title: 'Parent' })
+    const child = firstStore.createThread({ title: 'Child worker', parentThreadId: parent.id })
+    const childRun = firstStore.startAgentRun(child.id, crypto.randomUUID(), 'local-model', 'Scoped task')
+    firstStore.close()
+
+    const reopened = new ThreadStore(path)
+    try {
+      expect(reopened.recoverInterruptedAgentRuns()).toBe(1)
+      expect(reopened.getAgentRun(childRun.id)).toMatchObject({
+        status: 'interrupted',
+        error: 'Application fermée pendant la génération.'
+      })
+      expect(reopened.listQueuedAgentRuns()).toEqual([])
+    } finally {
+      reopened.close()
+    }
+  })
+
   it('edits, deletes, prioritizes, and bounds prompt history for queued messages', () => {
     const store = new ThreadStore(temporaryDatabase())
     try {
@@ -371,7 +408,7 @@ describe('ThreadStore', () => {
       })
       const version = new DatabaseSync(path, { readOnly: true })
       try {
-        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(8)
+        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(9)
       } finally {
         version.close()
       }

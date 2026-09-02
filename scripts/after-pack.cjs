@@ -40,4 +40,26 @@ module.exports = async function afterPack(context) {
     { recursive: true, force: true },
   )))
   await fs.rm(path.join(nodePty, 'binding.gyp'), { force: true })
+
+  const onnxBinaries = path.join(
+    context.appOutDir,
+    'resources',
+    'app.asar.unpacked',
+    'node_modules',
+    'onnxruntime-node',
+    'bin',
+    'napi-v3',
+  )
+  await fs.access(path.join(onnxBinaries, 'win32', arch, 'onnxruntime_binding.node'))
+  for (const platform of await fs.readdir(onnxBinaries, { withFileTypes: true })) {
+    if (platform.isDirectory() && platform.name !== 'win32') {
+      await fs.rm(path.join(onnxBinaries, platform.name), { recursive: true, force: true })
+    }
+  }
+  const windowsBinaries = path.join(onnxBinaries, 'win32')
+  for (const targetArch of await fs.readdir(windowsBinaries, { withFileTypes: true })) {
+    if (targetArch.isDirectory() && targetArch.name !== arch) {
+      await fs.rm(path.join(windowsBinaries, targetArch.name), { recursive: true, force: true })
+    }
+  }
 }

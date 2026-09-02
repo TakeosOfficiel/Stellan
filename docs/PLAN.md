@@ -50,6 +50,7 @@ Après l'installation d'un modèle, le cœur du produit doit rester utilisable s
 | État de l'interface | Zustand |
 | Agent | TypeScript dans un processus séparé |
 | Inférence | Ollama derrière une interface interchangeable |
+| Dictée | Whisper large-v3-turbo quantifié via Transformers.js |
 | Persistance | SQLite avec migrations |
 | Terminal | xterm.js |
 | Isolation | Docker ou Podman et Git worktrees |
@@ -125,13 +126,13 @@ Les opérations déterministes restent confiées aux outils classiques plutôt q
 
 Chaque thread peut posséder un Git worktree indépendant et, lorsque disponible, un conteneur. Le cycle de vie d'un environnement est `création`, `actif`, `suspendu`, `terminé` ou `erreur`.
 
-Trois modes sont prévus :
+Trois cibles sont prévues :
 
-1. **Direct** : travail natif, rapide et compatible avec les machines modestes.
-2. **Conteneur** : mode recommandé, via Docker sous Windows et Docker ou Podman sous Linux.
+1. **Runtime privé WSL 2** : cible principale et automatique sous Windows, sans Docker Desktop.
+2. **Podman local** : backend compatible à stabiliser après Docker.
 3. **Distant** : évolution permettant d'utiliser un autre PC ou un serveur personnel.
 
-Le conteneur ne reçoit pas le socket Docker, les secrets du système ni un montage complet du disque hôte. Son accès réseau est configurable et ses ressources sont limitées. Ollama reste sur l'hôte afin que plusieurs tâches partagent une seule copie du modèle en mémoire.
+Le conteneur worker ne reçoit pas le socket du moteur, les secrets du système ni un montage complet du disque hôte. Son accès réseau est fermé par défaut et ses ressources sont limitées. Ollama s’exécute dans un conteneur séparé et partage ses modèles entre les threads via le volume `local-agent-ollama-models`, stocké dans le disque virtuel WSL privé.
 
 ## 6. Adaptation au matériel
 
@@ -172,12 +173,11 @@ Les secrets sont placés dans le coffre sécurisé du système d'exploitation, j
 - `contextIsolation` activé et `nodeIntegration` désactivé ;
 - API preload minimale et contrats IPC validés avec Zod ;
 - restriction des opérations aux projets explicitement ouverts ;
-- confirmation pour les commandes sensibles et les écritures hors projet ;
-- journal des commandes et résultats ;
+- refus des écritures hors projet et journalisation des outils, commandes et résultats ;
 - aucun secret injecté automatiquement dans les conteneurs ;
 - processus agent séparé pour éviter qu'un calcul bloque l'interface.
 
-Le mode direct est présenté comme moins isolé que le mode conteneur. L'application ne promet pas une sécurité de machine virtuelle lorsqu'elle utilise seulement un conteneur.
+L’application ne promet pas une sécurité de machine virtuelle : le projet est monté en lecture-écriture dans le worker afin que les modifications restent visibles sur l’hôte.
 
 ## 9. Phases de réalisation
 
@@ -203,15 +203,22 @@ Le mode direct est présenté comme moins isolé que le mode conteneur. L'applic
 
 À la fin de cette phase, le produit fournit la boucle utile complète : demande, analyse, modification, tests et diff.
 
+État actuel : l’ouverture d’un projet crée immédiatement un thread et son environnement. Le chat reste au centre tandis qu’un workbench permanent à droite regroupe les changements Git, la review du diff, les portails, l’explorateur de fichiers texte et le terminal du thread actif. Sans projet, les demandes de modification sont redirigées vers l’ouverture explicite d’un dossier plutôt que simulées par un simple bloc de code dans le chat.
+
+Le coordinateur dispose aussi de `create_workers` pour déléguer automatiquement deux à quatre sous-tâches. Chaque worker possède désormais un chat enfant durable rattaché au thread principal, avec sa directive, son exécution, ses outils et sa réponse consultables séparément. Chaque worker reçoit une liste exclusive de fichiers, les commandes restent réservées au coordinateur et tout chevauchement est rejeté avant le lancement. Les résumés sont renvoyés au coordinateur après l’exécution parallèle. Des worktrees enfants et une fusion Git interactive pourront remplacer le partage contrôlé du worktree parent dans une évolution ultérieure.
+
+La dictée utilise directement le microphone du renderer avec une permission Electron limitée à l’audio de la frame principale. Le PCM borné est transmis au processus principal, où Transformers.js exécute Whisper large-v3-turbo quantifié. Les poids sont téléchargés à la demande dans le dossier utilisateur puis réutilisés hors ligne ; ils ne gonflent pas l’installeur. Une petite normalisation de commandes vocales de code reste déterministe afin de ne pas réinterpréter la demande.
+
 ### Phase 3 — Isolation locale
 
 - Git worktree par thread ;
-- runtime Docker sous Windows et Linux ;
+- runtime WSL 2 headless géré par l’application sous Windows ;
+- Docker Engine direct sous Linux ;
 - runtime Podman sous Linux ;
 - limites de ressources et politiques réseau ;
 - suspension, reprise et nettoyage des environnements.
 
-État actuel : les worktrees sont actifs. Git, Docker et Podman sont diagnostiqués séparément. Un profil persistant par projet permet de choisir le mode direct ou conteneur, le runtime, l’image, les limites CPU/RAM et le réseau. En mode conteneur, les commandes autorisées de l’agent passent par un conteneur éphémère durci et nettoyé après l’exécution ; les opérations de fichiers restent appliquées au worktree hôte. La suspension/reprise de conteneurs et les volumes gérés avec limite dure de stockage restent à réaliser. L’interface ne prétend donc pas encore imposer une limite disque.
+État actuel : les worktrees sont actifs. Sous Windows, l’application télécharge et vérifie Alpine, importe la distribution `LocalAgentRuntime`, installe Moby/Docker Engine sans interface et pilote toutes ses commandes via `wsl.exe`. Sous Linux, Docker Engine direct reste utilisé. Un profil persistant par projet configure l’image, les limites CPU/RAM, le réseau et le plafond de workers. Chaque thread possède un conteneur persistant durci ; lectures, recherches, écritures, Git, commandes et terminal y sont exécutés. Un volume `local-agent-worker-data-<thread>` conserve ses données internes et est supprimé avec le thread. Le projet reste un montage du worktree hôte. Aucune limite disque dure portable n’est annoncée.
 
 ### Phase 4 — Fiabilité et expérience
 
@@ -222,9 +229,9 @@ Le mode direct est présenté comme moins isolé que le mode conteneur. L'applic
 - gestion des téléchargements et de l'espace disque ;
 - accessibilité et raccourcis clavier.
 
-État actuel du terminal : xterm.js est relié à un PTY `node-pty` réel sous Windows et Linux. Une session unique est liée à l’identifiant d’un thread possédant un environnement projet actif ; le dossier effectif est résolu exclusivement dans le processus principal. Le terminal suit le profil worker direct ou conteneur, diffuse les sorties, accepte les entrées et redimensionnements validés, et nettoie l’arbre de processus ainsi que tout conteneur à la fermeture, à la suppression du thread ou à la fermeture de la fenêtre. L’historique du terminal et la reprise après redémarrage restent volontairement hors périmètre de cette tranche.
+État actuel du terminal : xterm.js est relié à un PTY `node-pty` qui lance `docker exec -it` dans le worker persistant du thread. Fermer le terminal arrête le shell sans supprimer le worker. Le conteneur et son volume privé sont nettoyés lors de la suppression explicite du thread. L’historique du terminal reste hors périmètre.
 
-État actuel des portails : un thread de projet actif peut créer explicitement un proxy de prévisualisation HTTP/WebSocket éphémère, lié uniquement à `127.0.0.1` sur un port aléatoire. Le renderer transmet seulement le thread et le port cible ; Electron valide le propriétaire, la frame, le thread et l’environnement, fixe l’amont à `127.0.0.1` ou `::1`, assainit les requêtes et contrôle la disponibilité à travers le proxy. L’URL peut être copiée, ouverte et arrêtée depuis le panneau **LOCAL UNIQUEMENT**. L’état n’est jamais persisté et les sockets sont nettoyés avec le thread, la fenêtre ou l’application. L’accès LAN, Cloudflare et toute promesse d’accès public restent désactivés jusqu’à l’attribution vérifiable du processus au projet et l’ajout de contrôles d’accès.
+État actuel des portails : un thread de projet actif peut servir automatiquement son `index.html` dans un aperçu Chromium intégré ou créer un proxy HTTP/WebSocket vers un serveur local déjà lancé. Les deux modes restent liés uniquement à `127.0.0.1` sur un port aléatoire. Le renderer transmet seulement le thread, la source, une durée bornée et éventuellement le port cible ; Electron valide le propriétaire, la frame, le thread et l’environnement. Le serveur statique bloque les sorties du projet, y compris par lien symbolique, tandis que le proxy fixe l’amont à `127.0.0.1` ou `::1`, assainit les requêtes et contrôle sa disponibilité. L’URL peut être copiée, ouverte, prévisualisée avec plusieurs formats d’appareil et arrêtée. L’état n’est jamais persisté et les sockets sont nettoyés avec le thread, la fenêtre, l’expiration ou l’application. L’accès LAN, Cloudflare et toute promesse d’accès public restent désactivés jusqu’à l’ajout d’un véritable tunnel et de contrôles d’accès.
 
 État actuel de la reprise agent : le processus principal journalise dans SQLite chaque exécution et les transitions ordonnées des appels d’outils avec leurs arguments et résultats. Une annulation, une erreur ou un redémarrage marque atomiquement l’exécution et les outils encore actifs comme interrompus. Le contexte envoyé au modèle est reconstruit depuis cet historique principal puis borné déterministement à 60 000 caractères en conservant les échanges récents et les paires appel/résultat ; les éléments surdimensionnés sont tronqués, sans prétendre produire un résumé sémantique. La reprise automatique d’une génération interrompue et la réduction sémantique des anciens échanges restent à réaliser.
 
@@ -236,7 +243,7 @@ Le mode direct est présenté comme moins isolé que le mode conteneur. L'applic
 - assistant de première configuration ;
 - documentation utilisateur et dépannage.
 
-État actuel : les paquets Windows et Linux et leur construction CI non signée sont configurés. Le renderer ouvre un assistant au premier lancement, conserve les choix de catégorie et de modèle, et présente séparément l’installation d’Ollama, le démarrage du service, l’accès à l’API locale et la disponibilité d’un modèle. Une vérification actualise ces états sur place sans reconstruire la page. Les actions de démarrage et de téléchargement restent explicites ; l’interface ne simule ni détection d’installation ni installation automatique. Le dépannage intégré documente le port localhost 11434 et les commandes de démarrage Windows/Linux.
+État actuel : les paquets Windows et Linux et leur construction CI non signée sont configurés. Au lancement, une fenêtre compacte affiche la progression de la première installation ou du redémarrage du runtime ; les diagnostics techniques ne surchargent plus les réglages de modèles. Local Agent crée ou redémarre en arrière-plan `local-agent-ollama`, tente le GPU NVIDIA puis le CPU, expose l’API uniquement sur `127.0.0.1:11435` et conserve les modèles dans le disque virtuel privé. Le choix et le téléchargement du modèle restent visibles dans le catalogue ; aucun Ollama natif, Docker Desktop ni terminal séparé n’est lancé.
 
 Les mises à jour automatiques signées, la signature des artefacts, les smoke tests natifs empaquetés et un diagnostic indépendant de l’installation avant toute tentative de démarrage restent à réaliser. L’état « installation inconnue » est donc volontaire lorsque l’API ne répond pas encore.
 
@@ -252,7 +259,7 @@ Première tranche réalisée pour les agents parallèles locaux : chaque profil 
 
 Tranche suivante réalisée pour la conversation en file : plusieurs messages peuvent être persistés pendant qu’un run du même thread travaille. SQLite conserve leur ordre et leur contenu ; une entrée en attente reste hors de la conversation et n’y apparaît qu’au démarrage réel de son run. Le processus principal permet de modifier ou supprimer uniquement cette entrée encore en attente, de la placer en tête avec **Envoyer maintenant**, puis d’interrompre le run courant avant de la démarrer. Le contexte de chaque run est reconstruit jusqu’à son propre message et exclut les demandes futures. L’interface affiche la file directement au-dessus du compositeur avec ses actions, tandis qu’un bouton séparé ouvre l’historique des états en cours, terminés, interrompus et en erreur.
 
-Après une fermeture ou un redémarrage, le journal marque uniquement les runs réellement actifs comme interrompus ; les entrées en attente restent durables et sont replanifiées au chargement suivant. Un profil ou runtime invalide bloque leur démarrage sans basculer vers l’hôte. Les threads en worktree sont parallélisables ; ceux qui partagent le dossier projet en mode direct sont sérialisés même si le plafond est supérieur, car les opérations de fichiers restent sur l’hôte. Le plafond ne promet pas une exécution simultanée du modèle : Ollama garde sa propre politique de concurrence et de chargement. Restent hors de ces tranches la réservation dynamique de CPU/RAM, la suspension de workers, plusieurs modèles coordonnés et l’exécution distante.
+Après une fermeture ou un redémarrage, le journal marque uniquement les runs réellement actifs comme interrompus ; les entrées en attente restent durables et sont replanifiées au chargement suivant. Un profil ou runtime invalide bloque leur démarrage sans basculer vers l'hôte. Les threads en worktree sont parallélisables ; ceux qui partagent le même dossier projet sont sérialisés. Le plafond ne promet pas une exécution simultanée du modèle : Ollama garde sa propre politique de concurrence et de chargement. Restent hors de ces tranches la réservation dynamique de ressources entre Ollama et les workers, la suspension de workers, plusieurs modèles coordonnés et l’exécution distante.
 
 ## 10. Stratégie de vérification
 

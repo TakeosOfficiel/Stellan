@@ -1,5 +1,7 @@
 import { createConnection } from 'node:net'
 import type { Duplex } from 'node:stream'
+import { realpath, stat } from 'node:fs/promises'
+import { extname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
   createServer,
   get as httpGet,
@@ -39,10 +41,10 @@ const STRIPPED_HEADERS = new Set([
 
 type PortalSession = {
   ownerId: number
-  targetHost: '127.0.0.1' | '::1'
   info: PortalInfo
   server: Server
   resources: Set<{ destroy(error?: Error): void }>
+  expirationTimer: ReturnType<typeof setTimeout> | null
 }
 
 type PortalManagerOptions = {
@@ -132,6 +134,53 @@ function rejectSocket(socket: Duplex, status: number, reason: string): void {
   socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
 }
 
+const CONTENT_TYPES: Record<string, string> = {
+  '.css': 'text/css; charset=utf-8',
+  '.gif': 'image/gif',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain; charset=utf-8',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2'
+}
+
+function expirationDate(durationMinutes: 15 | 60 | 240 | null): string | null {
+  return durationMinutes === null
+    ? null
+    : new Date(Date.now() + durationMinutes * 60_000).toISOString()
+}
+
+async function resolveStaticFile(root: string, requestUrl: string): Promise<string | null> {
+  let pathname: string
+  try {
+    pathname = decodeURIComponent(requestUrl.split('?')[0] ?? '/')
+  } catch {
+    return null
+  }
+  if (!pathname.startsWith('/') || pathname.includes('\\') || pathname.includes('\0')) return null
+  let candidate = resolve(root, `.${pathname}`)
+  const candidateRelative = relative(root, candidate)
+  if (candidateRelative.startsWith('..') || isAbsolute(candidateRelative)) return null
+  try {
+    if ((await stat(candidate)).isDirectory()) candidate = join(candidate, 'index.html')
+    if (!(await stat(candidate)).isFile()) return null
+    const canonical = await realpath(candidate)
+    const canonicalRelative = relative(root, canonical)
+    return canonicalRelative.startsWith('..') || isAbsolute(canonicalRelative) ? null : canonical
+  } catch {
+    return null
+  }
+}
+
 async function canConnect(host: '127.0.0.1' | '::1', port: number, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = createConnection({ host, port })
@@ -185,12 +234,17 @@ export class PortalManager {
     return session.info
   }
 
-  async start(threadId: string, ownerId: number, targetPort: number): Promise<PortalInfo> {
+  async start(
+    threadId: string,
+    ownerId: number,
+    targetPort: number,
+    durationMinutes: 15 | 60 | 240 | null = null
+  ): Promise<PortalInfo> {
     this.requireActiveOwner(ownerId)
     const existing = this.sessions.get(threadId)
     if (existing) {
       this.requireOwner(existing, ownerId)
-      if (existing.info.targetPort === targetPort) return existing.info
+      if (existing.info.source === 'port' && existing.info.targetPort === targetPort) return existing.info
       throw new Error('Arrêtez le portail actif avant de choisir un autre port.')
     }
 
@@ -324,15 +378,113 @@ export class PortalManager {
       this.requireActiveOwner(ownerId)
       const info: PortalInfo = {
         threadId,
+        source: 'port',
         targetPort,
         status: 'ready',
         scope: 'loopback',
-        url: `http://127.0.0.1:${portalPort}`
+        url: `http://127.0.0.1:${portalPort}`,
+        expiresAt: expirationDate(durationMinutes)
       }
-      const session: PortalSession = { ownerId, targetHost, info, server, resources }
+      const session: PortalSession = { ownerId, info, server, resources, expirationTimer: null }
       this.sessions.set(threadId, session)
       await checkThroughProxy(portalPort, this.healthTimeoutMs)
       this.requireActiveOwner(ownerId)
+      this.scheduleExpiration(session, durationMinutes)
+      return info
+    } catch (error) {
+      this.sessions.delete(threadId)
+      await this.closeServer(server, resources)
+      throw error
+    }
+  }
+
+  async startProject(
+    threadId: string,
+    ownerId: number,
+    projectRoot: string,
+    durationMinutes: 15 | 60 | 240 | null = null
+  ): Promise<PortalInfo> {
+    this.requireActiveOwner(ownerId)
+    const existing = this.sessions.get(threadId)
+    if (existing) {
+      this.requireOwner(existing, ownerId)
+      if (existing.info.source === 'project') return existing.info
+      throw new Error('Arrêtez le portail actif avant de prévisualiser le dossier.')
+    }
+
+    const root = await realpath(projectRoot)
+    const indexFile = await resolveStaticFile(root, '/index.html')
+    if (!indexFile) throw new Error('Ajoutez un fichier index.html à la racine du projet pour lancer l’aperçu.')
+
+    const resources = new Set<{ destroy(error?: Error): void }>()
+    let portalPort = 0
+    const server = createServer({ maxHeaderSize: MAX_HEADER_BYTES }, async (request, response) => {
+      const invalid = validateRequest(request, portalPort)
+      if (invalid) {
+        reject(response, request.method === 'CONNECT' ? 405 : 400, invalid)
+        return
+      }
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        reject(response, 405, 'Seules les méthodes GET et HEAD sont autorisées.')
+        return
+      }
+      const file = await resolveStaticFile(root, request.url ?? '/')
+      if (!file) {
+        reject(response, 404, 'Fichier introuvable.')
+        return
+      }
+      response.writeHead(200, {
+        'content-type': CONTENT_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff'
+      })
+      if (request.method === 'HEAD') {
+        response.end()
+        return
+      }
+      const { createReadStream } = await import('node:fs')
+      const stream = createReadStream(file)
+      resources.add(stream)
+      stream.once('close', () => resources.delete(stream))
+      stream.once('error', () => {
+        if (!response.headersSent) reject(response, 500, 'Lecture du fichier impossible.')
+        else response.destroy()
+      })
+      stream.pipe(response)
+    })
+    server.maxConnections = MAX_CONNECTIONS
+    server.maxRequestsPerSocket = MAX_REQUESTS_PER_SOCKET
+    server.headersTimeout = Math.min(10_000, this.requestTimeoutMs)
+    server.requestTimeout = this.requestTimeoutMs
+    server.keepAliveTimeout = 5_000
+    server.on('connection', (socket) => {
+      resources.add(socket)
+      socket.once('close', () => resources.delete(socket))
+    })
+
+    try {
+      portalPort = await new Promise<number>((resolvePort, rejectListen) => {
+        server.once('error', rejectListen)
+        server.listen(0, '127.0.0.1', () => {
+          server.removeListener('error', rejectListen)
+          const address = server.address()
+          if (!address || typeof address === 'string') rejectListen(new Error('Adresse de portail invalide.'))
+          else resolvePort(address.port)
+        })
+      })
+      this.requireActiveOwner(ownerId)
+      const info: PortalInfo = {
+        threadId,
+        source: 'project',
+        targetPort: null,
+        status: 'ready',
+        scope: 'loopback',
+        url: `http://127.0.0.1:${portalPort}`,
+        expiresAt: expirationDate(durationMinutes)
+      }
+      const session: PortalSession = { ownerId, info, server, resources, expirationTimer: null }
+      this.sessions.set(threadId, session)
+      this.scheduleExpiration(session, durationMinutes)
       return info
     } catch (error) {
       this.sessions.delete(threadId)
@@ -346,6 +498,7 @@ export class PortalManager {
     if (!session) return false
     this.requireOwner(session, ownerId)
     this.sessions.delete(threadId)
+    if (session.expirationTimer) clearTimeout(session.expirationTimer)
     await this.closeServer(session.server, session.resources)
     return true
   }
@@ -356,6 +509,7 @@ export class PortalManager {
       .filter(([, session]) => session.ownerId === ownerId)
       .map(async ([threadId, session]) => {
         this.sessions.delete(threadId)
+        if (session.expirationTimer) clearTimeout(session.expirationTimer)
         await this.closeServer(session.server, session.resources)
       }))
   }
@@ -364,6 +518,7 @@ export class PortalManager {
     this.shuttingDown = true
     const sessions = [...this.sessions.values()]
     this.sessions.clear()
+    for (const session of sessions) if (session.expirationTimer) clearTimeout(session.expirationTimer)
     await Promise.all(sessions.map((session) => this.closeServer(session.server, session.resources)))
   }
 
@@ -375,6 +530,17 @@ export class PortalManager {
     if (this.shuttingDown || this.closedOwners.has(ownerId)) {
       throw new Error('La fenêtre propriétaire de ce portail est fermée.')
     }
+  }
+
+  private scheduleExpiration(
+    session: PortalSession,
+    durationMinutes: 15 | 60 | 240 | null
+  ): void {
+    if (durationMinutes === null) return
+    session.expirationTimer = setTimeout(() => {
+      void this.close(session.info.threadId, session.ownerId).catch(() => undefined)
+    }, durationMinutes * 60_000)
+    session.expirationTimer.unref()
   }
 
   private async closeServer(server: Server, resources: Set<{ destroy(error?: Error): void }>): Promise<void> {

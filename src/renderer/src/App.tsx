@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type {
   CatalogModel,
+  HardwareInfo,
   ModelCategory,
   ModelPullProgress,
   OllamaStatus,
+  RuntimeProgress,
   SetupInfo
 } from '../../shared/contracts'
 import {
@@ -94,17 +96,23 @@ export function App(): React.JSX.Element {
   const [workspaceShortcut, setWorkspaceShortcut] = useState<WorkspaceShortcut | null>(null)
   const [status, setStatus] = useState<LoadState>(null)
   const [setup, setSetup] = useState<SetupInfo | null>(null)
+  const [hardwarePreview, setHardwarePreview] = useState<HardwareInfo | null>(null)
   const [category, setCategory] = useState<ModelCategory>(initialCategory)
   const [pullProgress, setPullProgress] = useState<ModelPullProgress | null>(null)
   const [pullError, setPullError] = useState<string | null>(null)
   const [downloadingModel, setDownloadingModel] = useState<string | null>(null)
   const [checkingOllama, setCheckingOllama] = useState(false)
   const [startingOllama, setStartingOllama] = useState(false)
+  const [activatingRuntime, setActivatingRuntime] = useState(false)
+  const [analyzingComputer, setAnalyzingComputer] = useState(false)
   const [installationEvidence, setInstallationEvidence] = useState<InstallationEvidence>('unknown')
   const [actionError, setActionError] = useState<string | null>(null)
+  const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null)
+  const [runtimeElapsed, setRuntimeElapsed] = useState(0)
 
   const refreshStatus = useCallback(async () => {
     setCheckingOllama(true)
+    setRuntimeProgress({ step: 'Vérification de la connexion', detail: 'Interrogation de l’API Ollama dans le runtime privé…', percent: 50 })
     setActionError(null)
     setStatus((current) => current === null ? 'loading' : current)
     try {
@@ -115,27 +123,75 @@ export function App(): React.JSX.Element {
       setActionError('La vérification a échoué. Redémarrez Local Agent puis réessayez.')
     } finally {
       setCheckingOllama(false)
+      setRuntimeProgress(null)
     }
   }, [])
 
   async function startOllama(): Promise<void> {
     setStartingOllama(true)
+    setRuntimeProgress({ step: 'Démarrage du runtime privé', detail: 'Initialisation de la vérification automatique…', percent: 1 })
     setActionError(null)
     try {
       const nextStatus = await window.localAgent.startOllama()
       setStatus(nextStatus)
       setInstallationEvidence(installationEvidenceFromStart(nextStatus))
+      if (nextStatus.available) {
+        try { setSetup(await window.localAgent.getSetupInfo()) } catch { /* Ollama is usable even if diagnostics refresh fails. */ }
+      }
     } catch {
       setActionError("Local Agent n'a pas pu lancer Ollama. Utilisez la commande adaptée ci-dessous.")
     } finally {
       setStartingOllama(false)
+      setRuntimeProgress(null)
+    }
+  }
+
+  async function activateRuntime(): Promise<void> {
+    setActivatingRuntime(true)
+    setRuntimeProgress({ step: 'Activation de WSL 2', detail: 'Préparation de la demande Windows…', percent: 1 })
+    setActionError(null)
+    try {
+      await window.localAgent.openOllamaDownload()
+      await startOllama()
+    } catch {
+      setActionError('WSL 2 n’a pas pu être activé. Acceptez la demande Windows puis redémarrez le PC si nécessaire.')
+    } finally {
+      setActivatingRuntime(false)
+      setRuntimeProgress(null)
     }
   }
 
   useEffect(() => {
-    void refreshStatus()
-    void window.localAgent.getSetupInfo().then(setSetup)
-  }, [refreshStatus])
+    void startOllama()
+  }, [])
+
+  useEffect(() => {
+    void analyzeComputer()
+  }, [])
+
+  async function analyzeComputer(): Promise<void> {
+    setAnalyzingComputer(true)
+    try {
+      setHardwarePreview(await window.localAgent.getBasicHardwareInfo())
+      setSetup(await window.localAgent.getSetupInfo())
+    } finally {
+      setAnalyzingComputer(false)
+    }
+  }
+
+  useEffect(() => window.localAgent.onRuntimeProgress(setRuntimeProgress), [])
+
+  const runtimeBusy = startingOllama || checkingOllama || activatingRuntime
+  useEffect(() => {
+    if (!runtimeBusy) {
+      setRuntimeElapsed(0)
+      return
+    }
+    const startedAt = Date.now()
+    setRuntimeElapsed(0)
+    const timer = setInterval(() => setRuntimeElapsed(Math.floor((Date.now() - startedAt) / 1_000)), 1_000)
+    return () => clearInterval(timer)
+  }, [runtimeBusy])
 
   useEffect(() => {
     return window.localAgent.onModelPullProgress(setPullProgress)
@@ -180,6 +236,28 @@ export function App(): React.JSX.Element {
   const ollamaSetup = getOllamaSetupState(resolvedStatus, installationEvidence)
   const isModelReady = ollamaSetup.modelReady === 'complete'
   const starterModel = setup?.models.find((model) => model.id === 'qwen3.5:4b')
+  const detectedHardware = setup?.hardware ?? hardwarePreview
+
+  useEffect(() => {
+    if (!firstRun || !isModelReady) return
+    localStorage.setItem(ONBOARDING_KEY, 'true')
+    setFirstRun(false)
+    setView('agent')
+  }, [firstRun, isModelReady])
+
+  const firstModelDownload = firstRun && Boolean(downloadingModel)
+  const startupVisible = runtimeBusy || isLoading || !resolvedStatus?.available || firstModelDownload
+  const startupPercent = firstModelDownload
+    ? pullProgress?.percent ?? 0
+    : runtimeProgress?.percent ?? (resolvedStatus?.available ? 100 : 2)
+  const startupStep = firstModelDownload
+    ? 'Installation du modèle'
+    : runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Local Agent')
+  const startupDetail = firstModelDownload
+    ? pullProgress?.status ?? 'Préparation du téléchargement…'
+    : runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
+      ? 'Environnement local prêt.'
+      : resolvedStatus?.reason ?? 'Préparation de l’environnement privé…')
 
   function finishOnboarding(): void {
     localStorage.setItem(ONBOARDING_KEY, 'true')
@@ -215,6 +293,29 @@ export function App(): React.JSX.Element {
     <main className="app-shell">
       <TitleBar view={view} onViewChange={setView} />
 
+      {startupVisible && (
+        <div className="startup-overlay">
+          <section className="startup-card" aria-live="polite" aria-busy={runtimeBusy || firstModelDownload}>
+            <div className="startup-card-heading">
+              <span className="agent-mark" aria-hidden="true">◒</span>
+              <div>
+                <small>{firstRun ? 'PREMIÈRE MISE EN PLACE' : 'ENVIRONNEMENT LOCAL'}</small>
+                <strong>{startupStep}</strong>
+              </div>
+              <span>{startupPercent}%</span>
+            </div>
+            <progress max="100" value={startupPercent} />
+            <p>{startupDetail}</p>
+            {!runtimeBusy && !firstModelDownload && !resolvedStatus?.available && (
+              <div className="startup-card-actions">
+                {ollamaSetup.canOpenDownload && <button type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>Activer WSL 2</button>}
+                <button type="button" disabled={checkingOllama || startingOllama} onClick={() => void refreshStatus()}>Réessayer</button>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
       {view === 'agent' ? (
         <WorkspaceView
           status={status}
@@ -243,10 +344,10 @@ export function App(): React.JSX.Element {
       <div className="settings-content">
       <header className="settings-page-header">
         <div>
-          <p className="eyebrow">{firstRun ? 'PREMIÈRE CONFIGURATION' : 'LOCAL RUNTIME'}</p>
-          <h2>{firstRun ? 'Préparer votre agent local' : 'Modèles locaux'}</h2>
+          <p className="eyebrow">MODÈLES LOCAUX</p>
+          <h2>{firstRun ? 'Choisissez votre premier modèle' : 'Modèles locaux'}</h2>
         </div>
-        <p>Vérifiez le moteur local, puis installez le modèle qui correspond à votre machine.</p>
+        <p>Installez et gérez les modèles qui correspondent à votre machine et à vos usages.</p>
       </header>
 
       <section className="runtime-panel">
@@ -269,7 +370,7 @@ export function App(): React.JSX.Element {
             <ol className="setup-checklist" aria-label="État de la configuration Ollama">
               <li className={ollamaSetup.installed}>
                 <span aria-hidden="true">{stepIcon(ollamaSetup.installed)}</span>
-                <div><strong>Application installée</strong><small>{ollamaSetup.installed === 'complete' ? 'Exécutable Ollama détecté' : ollamaSetup.installed === 'incomplete' ? 'Exécutable introuvable' : 'Non vérifié tant que le service ne répond pas'}</small></div>
+                <div><strong>Runtime privé disponible</strong><small>{ollamaSetup.installed === 'complete' ? 'Linux et conteneurs gérés par Local Agent' : ollamaSetup.installed === 'incomplete' ? 'WSL 2 doit être activé' : 'Préparation automatique du moteur isolé'}</small></div>
               </li>
               <li className={ollamaSetup.running}>
                 <span aria-hidden="true">{stepIcon(ollamaSetup.running)}</span>
@@ -277,7 +378,7 @@ export function App(): React.JSX.Element {
               </li>
               <li className={ollamaSetup.reachable}>
                 <span aria-hidden="true">{stepIcon(ollamaSetup.reachable)}</span>
-                <div><strong>API locale joignable</strong><small>{ollamaSetup.reachable === 'complete' ? `Version ${resolvedStatus?.available && resolvedStatus.version ? resolvedStatus.version : 'détectée'} sur le port 11434` : 'Aucune réponse sur 127.0.0.1 ou localhost:11434'}</small></div>
+                <div><strong>API locale joignable</strong><small>{ollamaSetup.reachable === 'complete' ? `Version ${resolvedStatus?.available && resolvedStatus.version ? resolvedStatus.version : 'détectée'} via le port privé 11435` : 'Aucune réponse du conteneur dans le runtime privé'}</small></div>
               </li>
               <li className={ollamaSetup.modelReady}>
                 <span aria-hidden="true">{stepIcon(ollamaSetup.modelReady)}</span>
@@ -286,7 +387,13 @@ export function App(): React.JSX.Element {
             </ol>
 
             <div className="runtime-message">
-              {isLoading ? <p className="muted">Première vérification en cours…</p> :
+              {runtimeBusy && runtimeProgress ? (
+                <div className="runtime-operation" role="status" aria-live="polite">
+                  <div><strong>{runtimeProgress.step}</strong><span>{runtimeProgress.percent}% · {runtimeElapsed} s</span></div>
+                  <progress max="100" value={runtimeProgress.percent} />
+                  <small>{runtimeProgress.detail}</small>
+                </div>
+              ) : isLoading ? <p className="muted">Initialisation automatique…</p> :
                 resolvedStatus?.available ? <p className={isModelReady ? 'success' : 'muted'}>{isModelReady ? 'Votre moteur local est prêt.' : 'Ollama répond. Il reste à installer un modèle.'}</p> :
                   <p className="error">{resolvedStatus?.reason}</p>}
               {actionError && <p className="error" role="alert">{actionError}</p>}
@@ -305,8 +412,8 @@ export function App(): React.JSX.Element {
                 </button>
               )}
               {!resolvedStatus?.available && ollamaSetup.canOpenDownload && (
-                <button className="secondary-button" type="button" onClick={() => void window.localAgent.openOllamaDownload()}>
-                  Télécharger / réinstaller
+                <button className="secondary-button" type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>
+                  {activatingRuntime ? 'Activation…' : 'Activer WSL 2'}
                 </button>
               )}
               {!isLoading && (
@@ -338,12 +445,8 @@ export function App(): React.JSX.Element {
             {!resolvedStatus?.available && !isLoading && (
               <details className="troubleshooting">
                 <summary>Dépannage rapide</summary>
-                <p><strong>Localhost</strong> désigne ce PC, pas Internet. Local Agent attend l’API Ollama sur le port <code>11434</code>.</p>
-                <dl>
-                  <div><dt>Windows · PowerShell</dt><dd><code>ollama serve</code></dd></div>
-                  <div><dt>Linux · terminal</dt><dd><code>ollama serve</code> ou <code>sudo systemctl start ollama</code></dd></div>
-                </dl>
-                <p>Gardez la commande ouverte, puis choisissez « Réessayer la connexion ». Si le port est utilisé, fermez l’ancien processus Ollama avant de relancer.</p>
+                <p>Local Agent crée automatiquement le conteneur <code>local-agent-ollama</code> et conserve tous les modèles dans le volume Docker <code>local-agent-ollama-models</code>.</p>
+                <p>Activez WSL 2 puis réessayez. Local Agent télécharge automatiquement son Linux minimal, le moteur de conteneurs et l’image Ollama.</p>
               </details>
             )}
           </article>
@@ -352,17 +455,23 @@ export function App(): React.JSX.Element {
             <div className="card-title-row">
               <div><span className="label">Profil détecté</span><strong>Cette machine</strong></div>
             </div>
-            {!setup ? (
-              <p className="muted">Analyse du matériel…</p>
+            {!detectedHardware ? (
+              <div className="hardware-analysis-prompt">
+                <p className="muted">{analyzingComputer ? 'Détection automatique du processeur, de la mémoire et du GPU…' : 'La détection automatique n’a pas abouti.'}</p>
+                {!analyzingComputer && <button type="button" onClick={() => void analyzeComputer()}>Relancer la détection</button>}
+              </div>
             ) : (
-              <dl>
-                <div><dt>Mémoire</dt><dd>{formatSize(setup.hardware.totalMemoryBytes)}</dd></div>
-                <div><dt>Processeur</dt><dd>{setup.hardware.cpuCores} cœurs</dd></div>
-                <div>
-                  <dt>Graphique</dt>
-                  <dd>{setup.hardware.gpus[0]?.model ?? 'Non détecté'}</dd>
-                </div>
-              </dl>
+              <>
+                <dl>
+                  <div><dt>Mémoire</dt><dd>{formatSize(detectedHardware.totalMemoryBytes)}</dd></div>
+                  <div><dt>Processeur</dt><dd>{detectedHardware.cpuCores} cœurs</dd></div>
+                  <div>
+                    <dt>Graphique</dt>
+                    <dd>{setup ? detectedHardware.gpus[0]?.model ?? 'Non détecté' : 'Détection en cours…'}</dd>
+                  </div>
+                </dl>
+                {analyzingComputer && !setup && <p className="hardware-scan-status"><span /> Analyse du GPU et des runtimes en arrière-plan…</p>}
+              </>
             )}
           </article>
         </div>
@@ -381,7 +490,7 @@ export function App(): React.JSX.Element {
             <p>
               {setup.runtime.recommendedContainerRuntime
                 ? `Runtime worker recommandé : ${setup.runtime.recommendedContainerRuntime}`
-                : 'Mode direct uniquement : démarrez Docker ou Podman pour les workers isolés.'}
+                : 'Runtime privé indisponible : activez WSL 2 pour les workers isolés.'}
             </p>
           </div>
         )}

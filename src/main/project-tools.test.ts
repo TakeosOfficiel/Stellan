@@ -24,13 +24,59 @@ describe('ProjectTools', () => {
   })
 
   it('lists, reads, writes, and searches project files', async () => {
-    await tools.writeFile('src/new.txt', 'find this needle\n')
+    await expect(tools.writeFile('src/new.txt', 'find this needle\n')).resolves.toEqual({
+      path: 'src/new.txt',
+      added: 1,
+      removed: 0
+    })
 
     expect(await tools.listFiles()).toEqual(['src/hello.txt', 'src/new.txt'])
+    expect(await tools.listDirectories()).toEqual(['src'])
     expect(await tools.readFile('src/new.txt')).toBe('find this needle\n')
     expect(await tools.search('needle')).toEqual([
       { path: 'src/new.txt', line: 1, column: 11, text: 'find this needle' },
     ])
+  })
+
+  it('counts added and removed lines for an existing file', async () => {
+    await expect(tools.writeFile(
+      'src/hello.txt',
+      'hello changed\nsecond line\nthird line\n'
+    )).resolves.toEqual({
+      path: 'src/hello.txt',
+      added: 2,
+      removed: 1
+    })
+  })
+
+  it('deletes a project file and reports its removed lines', async () => {
+    await expect(tools.deleteFile('src/hello.txt')).resolves.toEqual({
+      path: 'src/hello.txt',
+      added: 0,
+      removed: 2
+    })
+    await expect(readFile(path.join(project, 'src', 'hello.txt'), 'utf8')).rejects.toThrow()
+  })
+
+  it('returns bounded text previews and rejects binary files', async () => {
+    await writeFile(path.join(project, 'large.txt'), 'abcdef')
+    await writeFile(path.join(project, 'binary.bin'), Buffer.from([1, 0, 2]))
+
+    await expect(tools.readFilePreview('large.txt', 4)).resolves.toEqual({
+      content: 'abcd',
+      truncated: true
+    })
+    await expect(tools.readFilePreview('src/hello.txt')).resolves.toMatchObject({
+      content: 'hello world\nsecond line\n',
+      truncated: false
+    })
+    await expect(tools.readFilePreview('binary.bin')).rejects.toThrow('Binary files')
+  })
+
+  it('resolves only existing project files for external opening', async () => {
+    await expect(tools.resolveFilePath('src/hello.txt')).resolves.toBe(path.join(project, 'src', 'hello.txt'))
+    await expect(tools.resolveFilePath('src')).rejects.toThrow('project file')
+    await expect(tools.resolveFilePath('../outside.txt')).rejects.toThrow(/traversal/)
   })
 
   it('rejects traversal and paths through symlinks', async () => {
@@ -109,6 +155,16 @@ describe('ProjectTools', () => {
 
     execFileSync('git', ['add', 'src/hello.txt'], { cwd: project })
     expect(await tools.gitDiff(true)).toContain('+changed')
+  })
+
+  it('distinguishes Git repositories from ordinary folders', async () => {
+    const ordinaryFolder = await mkdtemp(path.join(tmpdir(), 'project-tools-folder-'))
+    try {
+      expect(await tools.isGitRepository()).toBe(true)
+      expect(await (await ProjectTools.create(ordinaryFolder)).isGitRepository()).toBe(false)
+    } finally {
+      await rm(ordinaryFolder, { recursive: true, force: true })
+    }
   })
 
   it.skipIf(process.platform === 'win32')('disables configured Git helpers for status and diff', async () => {

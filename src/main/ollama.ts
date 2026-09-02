@@ -46,8 +46,14 @@ const showResponseSchema = z.object({
   capabilities: z.array(z.string()).default([])
 })
 
-const OLLAMA_URLS = ['http://127.0.0.1:11434', 'http://localhost:11434'] as const
+const OLLAMA_URLS = ['http://127.0.0.1:11435', 'http://localhost:11435'] as const
 let activeOllamaUrl: string = OLLAMA_URLS[0]
+const toolSupportByModel = new Map<string, boolean>()
+
+export function configureOllamaUrl(url: string | null): void {
+  activeOllamaUrl = url ?? OLLAMA_URLS[0]
+  toolSupportByModel.clear()
+}
 
 export type OllamaToolCall = {
   function: {
@@ -70,6 +76,7 @@ export async function modelSupportsTools(
   model: string,
   fetcher: typeof fetch = fetch
 ): Promise<boolean> {
+  if (fetcher === fetch && toolSupportByModel.has(model)) return toolSupportByModel.get(model) as boolean
   const response = await fetcher(`${activeOllamaUrl}/api/show`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -79,7 +86,9 @@ export async function modelSupportsTools(
   if (!response.ok) {
     throw new Error(`Ollama n’a pas pu vérifier les capacités du modèle (statut ${response.status}).`)
   }
-  return showResponseSchema.parse(await response.json()).capabilities.includes('tools')
+  const supportsTools = showResponseSchema.parse(await response.json()).capabilities.includes('tools')
+  if (fetcher === fetch) toolSupportByModel.set(model, supportsTools)
+  return supportsTools
 }
 
 export async function getOllamaStatus(
@@ -88,7 +97,7 @@ export async function getOllamaStatus(
   let lastStatus: number | null = null
   let timedOut = false
 
-  for (const url of OLLAMA_URLS) {
+  for (const url of [...new Set([activeOllamaUrl, ...OLLAMA_URLS])]) {
     try {
       const options = { signal: AbortSignal.timeout(5_000) }
       const tagsResponse = await fetcher(`${url}/api/tags`, options)
@@ -131,8 +140,8 @@ export async function getOllamaStatus(
   return {
     available: false,
     reason: timedOut
-      ? "Ollama n'a pas répondu dans le délai prévu. Vérifiez que l'application Ollama est démarrée."
-      : "Le service local d'Ollama ne répond pas. Démarrez Ollama puis réessayez."
+      ? "Le conteneur Ollama n'a pas répondu dans le délai prévu."
+      : "Le service isolé d'Ollama ne répond pas. Relancez le runtime privé puis réessayez."
   }
 }
 
@@ -203,42 +212,61 @@ export async function streamOllamaChat(
   fetcher: typeof fetch = fetch,
   tools?: readonly unknown[]
 ): Promise<OllamaChatResult> {
-  const response = await fetcher(`${activeOllamaUrl}/api/chat`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: true, think: false, ...(tools ? { tools } : {}) }),
-    signal
-  })
-
-  if (!response.ok || !response.body) {
-    throw new Error(`Ollama n'a pas pu démarrer la réponse (statut ${response.status}).`)
-  }
-
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
   let content = ''
   const toolCalls: OllamaToolCall[] = []
+  let requestMessages = messages
 
-  while (true) {
-    const { done, value } = await reader.read()
-    buffer += decoder.decode(value, { stream: !done })
-    const lines = buffer.split('\n')
-    buffer = done ? '' : (lines.pop() ?? '')
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetcher(`${activeOllamaUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model, messages: requestMessages, stream: true, think: false, ...(tools ? { tools } : {}) }),
+      signal
+    })
 
-    for (const line of lines) {
-      if (!line.trim()) continue
-      const chunk = chatChunkSchema.parse(JSON.parse(line))
-      if (chunk.error) throw new Error(chunk.error)
-      if (chunk.message?.content) {
-        content += chunk.message.content
-        onContent(chunk.message.content)
-      }
-      if (chunk.message?.tool_calls) toolCalls.push(...chunk.message.tool_calls)
+    if (!response.ok || !response.body) {
+      throw new Error(`Ollama n'a pas pu démarrer la réponse (statut ${response.status}).`)
     }
 
-    if (done) break
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let completed = false
+
+    while (true) {
+      const { done, value } = await reader.read()
+      buffer += decoder.decode(value, { stream: !done })
+      const lines = buffer.split('\n')
+      buffer = done ? '' : (lines.pop() ?? '')
+
+      for (const line of lines) {
+        if (!line.trim()) continue
+        const chunk = chatChunkSchema.parse(JSON.parse(line))
+        if (chunk.error) throw new Error(chunk.error)
+        if (chunk.message?.content) {
+          content += chunk.message.content
+          onContent(chunk.message.content)
+        }
+        if (chunk.message?.tool_calls) toolCalls.push(...chunk.message.tool_calls)
+        if (chunk.done === true) completed = true
+      }
+
+      if (done) break
+    }
+
+    if (completed) return { content, toolCalls }
+    if (attempt === 0 && toolCalls.length === 0) {
+      requestMessages = content
+        ? [
+            ...messages,
+            { role: 'assistant', content },
+            { role: 'user', content: 'Continue exactement la réponse interrompue, sans répéter le texte déjà écrit.' }
+          ]
+        : messages
+      continue
+    }
+    throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')
   }
 
-  return { content, toolCalls }
+  throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')
 }

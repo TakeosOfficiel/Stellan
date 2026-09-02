@@ -51,6 +51,12 @@ export type SetupInfo = {
   models: CatalogModel[]
 }
 
+export type RuntimeProgress = {
+  step: string
+  detail: string
+  percent: number
+}
+
 export type ModelPullProgress = {
   model: string
   status: string
@@ -62,6 +68,12 @@ export type ModelPullProgress = {
 export type ModelPullResult =
   | { success: true }
   | { success: false; reason: string }
+
+export type DictationProgress = {
+  status: 'loading' | 'downloading' | 'transcribing'
+  file?: string
+  percent?: number
+}
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool'
 
@@ -80,6 +92,7 @@ export type ChatRequest = {
 
 export type ChatEvent =
   | { requestId: string; threadId: string; type: 'status'; status: 'queued' | 'running' }
+  | { requestId: string; threadId: string; type: 'thread-created'; child: StoredThread }
   | {
       requestId: string
       threadId: string
@@ -88,7 +101,16 @@ export type ChatEvent =
       userContent: string
     }
   | { requestId: string; threadId: string; type: 'content'; content: string }
-  | { requestId: string; threadId: string; type: 'tool'; tool: string; status: 'running' | 'done' | 'denied' | 'error' }
+  | {
+      requestId: string
+      threadId: string
+      type: 'tool'
+      callId: string
+      tool: string
+      status: 'running' | 'done' | 'denied' | 'error'
+      input: string | null
+      output: string | null
+    }
   | { requestId: string; threadId: string; type: 'done' }
   | { requestId: string; threadId: string; type: 'error'; reason: string }
 
@@ -136,6 +158,7 @@ export type SaveWorkerProfileRequest = Omit<WorkerProfile, 'updatedAt'>
 
 export type StoredThread = {
   id: string
+  parentThreadId: string | null
   title: string
   projectPath: string | null
   workspacePath: string | null
@@ -168,6 +191,23 @@ export type ProjectReview = {
   workspaceMode: 'worktree' | 'direct'
 }
 
+export type ProjectFileList = {
+  files: string[]
+  directories: string[]
+  truncated: boolean
+}
+
+export type ProjectFilePreview = {
+  path: string
+  content: string
+  truncated: boolean
+}
+
+export type ProjectFileRequest = {
+  threadId: string
+  path: string
+}
+
 export type TerminalStartRequest = {
   threadId: string
   cols: number
@@ -186,16 +226,17 @@ export type TerminalEvent =
 
 export type PortalInfo = {
   threadId: string
-  targetPort: number
+  source: 'project' | 'port'
+  targetPort: number | null
   status: 'ready'
   scope: 'loopback'
   url: string
+  expiresAt: string | null
 }
 
-export type PortalStartRequest = {
-  threadId: string
-  port: number
-}
+export type PortalStartRequest =
+  | { threadId: string; source: 'project'; durationMinutes: 15 | 60 | 240 | null }
+  | { threadId: string; source: 'port'; port: number; durationMinutes: 15 | 60 | 240 | null }
 
 export type OllamaStatus =
   | {
@@ -214,10 +255,14 @@ export type LocalAgentApi = {
   closeWindow: () => Promise<void>
   getOllamaStatus: () => Promise<OllamaStatus>
   startOllama: () => Promise<OllamaStatus>
+  getBasicHardwareInfo: () => Promise<HardwareInfo>
   getSetupInfo: () => Promise<SetupInfo>
   openOllamaDownload: () => Promise<void>
+  onRuntimeProgress: (listener: (progress: RuntimeProgress) => void) => () => void
   pullModel: (model: string) => Promise<ModelPullResult>
   onModelPullProgress: (listener: (progress: ModelPullProgress) => void) => () => void
+  transcribeDictation: (audio: ArrayBuffer) => Promise<string>
+  onDictationProgress: (listener: (progress: DictationProgress) => void) => () => void
   selectProject: () => Promise<ProjectSelection | null>
   getWorkerProfile: (projectPath: string) => Promise<WorkerProfile>
   saveWorkerProfile: (profile: SaveWorkerProfileRequest) => Promise<WorkerProfile>
@@ -235,6 +280,9 @@ export type LocalAgentApi = {
   loadThreadMessages: (threadId: string) => Promise<StoredMessage[]>
   deleteThread: (threadId: string) => Promise<boolean>
   reviewThreadProject: (threadId: string) => Promise<ProjectReview | null>
+  listProjectFiles: (threadId: string) => Promise<ProjectFileList>
+  readProjectFile: (request: ProjectFileRequest) => Promise<ProjectFilePreview>
+  openProjectFile: (request: ProjectFileRequest) => Promise<void>
   startTerminal: (request: TerminalStartRequest) => Promise<TerminalStartResult>
   writeTerminal: (threadId: string, data: string) => Promise<void>
   resizeTerminal: (threadId: string, cols: number, rows: number) => Promise<void>

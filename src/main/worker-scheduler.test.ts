@@ -75,4 +75,32 @@ describe('WorkerScheduler', () => {
     await vi.waitFor(() => expect(starts).toEqual(['first', 'third']))
     third.resolve()
   })
+
+  it('globally bounds child workers per project and removes an aborted queued child', async () => {
+    const scheduler = new WorkerScheduler()
+    const first = deferred()
+    const second = deferred()
+    const starts: string[] = []
+    const firstRun = scheduler.runChild('project', 2, new AbortController().signal, () => {
+      starts.push('first')
+      return first.promise
+    })
+    const secondRun = scheduler.runChild('project', 2, new AbortController().signal, () => {
+      starts.push('second')
+      return second.promise
+    })
+    const thirdController = new AbortController()
+    const thirdRun = scheduler.runChild('project', 2, thirdController.signal, async () => {
+      starts.push('third')
+    })
+
+    expect(starts).toEqual(['first', 'second'])
+    const rejected = expect(thirdRun).rejects.toBe('cancelled')
+    thirdController.abort('cancelled')
+    await rejected
+    first.resolve()
+    second.resolve()
+    await Promise.all([firstRun, secondRun])
+    expect(starts).toEqual(['first', 'second'])
+  })
 })

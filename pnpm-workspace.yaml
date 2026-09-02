@@ -6,6 +6,9 @@ allowBuilds:
   electron: true
   esbuild: true
   node-pty: true
+  onnxruntime-node: true
+  protobufjs: false
+  sharp: false
 
 supportedArchitectures:
   os:

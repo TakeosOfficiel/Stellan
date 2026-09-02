@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { RuntimeInfo, RuntimeToolInfo } from '../shared/contracts'
@@ -20,6 +21,7 @@ export type CommandOptions = {
   env?: NodeJS.ProcessEnv
   signal?: AbortSignal
   maxOutputBytes?: number
+  input?: string
 }
 
 export type CommandRunner = (
@@ -39,15 +41,21 @@ export type ContainerExecutionOptions = {
   network?: string
   timeoutMs?: number
   signal?: AbortSignal
+  input?: string
+  gitDirectory?: string
+  gitCommonDirectory?: string
 }
+
+export type PersistentContainerOptions = Omit<ContainerExecutionOptions, 'command' | 'timeoutMs' | 'signal' | 'input'>
 
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
 const IMAGE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/
 const NETWORK_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
 const MEMORY_PATTERN = /^[1-9][0-9]*(?:[bkmgBKMG])?$/
+const workerContainerStarts = new Map<string, Promise<string>>()
 
-export const runCommand: CommandRunner = (executable, args, options = {}) =>
+export const runHostCommand: CommandRunner = (executable, args, options = {}) =>
   new Promise((resolve) => {
     if (options.signal?.aborted) {
       resolve({ exitCode: null, signal: null, stdout: '', stderr: '', timedOut: false, outputTruncated: false })
@@ -56,7 +64,7 @@ export const runCommand: CommandRunner = (executable, args, options = {}) =>
     const child = spawn(executable, [...args], {
       cwd: options.cwd,
       env: options.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       shell: false,
       windowsHide: true
     })
@@ -67,6 +75,12 @@ export const runCommand: CommandRunner = (executable, args, options = {}) =>
     let outputBytes = 0
     let settled = false
     const maxOutputBytes = options.maxOutputBytes ?? 2_000_000
+
+    if (!child.stdout || !child.stderr || (options.input !== undefined && !child.stdin)) {
+      child.kill()
+      resolve({ exitCode: null, signal: null, stdout: '', stderr: 'Unable to open process streams', timedOut: false, outputTruncated: false })
+      return
+    }
 
     const appendOutput = (current: string, chunk: string): string => {
       const remaining = maxOutputBytes - outputBytes
@@ -85,6 +99,7 @@ export const runCommand: CommandRunner = (executable, args, options = {}) =>
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => { stdout = appendOutput(stdout, chunk) })
     child.stderr.on('data', (chunk: string) => { stderr = appendOutput(stderr, chunk) })
+    if (options.input !== undefined) child.stdin?.end(options.input)
 
     const abort = (): void => { child.kill('SIGKILL') }
     options.signal?.addEventListener('abort', abort, { once: true })
@@ -110,6 +125,17 @@ export const runCommand: CommandRunner = (executable, args, options = {}) =>
     })
     child.once('close', finish)
   })
+
+let managedDockerRunner: CommandRunner | null = null
+
+export function configureManagedDockerRunner(runner: CommandRunner | null): void {
+  managedDockerRunner = runner
+}
+
+export const runCommand: CommandRunner = (executable, args, options) =>
+  executable === 'docker' && managedDockerRunner
+    ? managedDockerRunner(executable, args, options)
+    : runHostCommand(executable, args, options)
 
 function validateIdentifier(value: string, label: string): void {
   if (!IDENTIFIER_PATTERN.test(value)) {
@@ -342,6 +368,164 @@ export async function executeInContainer(
       }, 'Container cleanup')
     }
   }
+}
+
+export function workerContainerName(threadId: string): string {
+  validateIdentifier(threadId, 'threadId')
+  return `local-agent-worker-${threadId}`
+}
+
+export function workerDataVolumeName(threadId: string): string {
+  validateIdentifier(threadId, 'threadId')
+  return `local-agent-worker-data-${threadId}`
+}
+
+function workerContainerConfig(options: PersistentContainerOptions, projectPath: string): string {
+  return createHash('sha256').update(JSON.stringify({
+    projectPath,
+    image: options.image,
+    cpuLimit: options.cpuLimit,
+    memoryLimit: options.memoryLimit,
+    network: options.network ?? 'none',
+    gitDirectory: options.gitDirectory,
+    gitCommonDirectory: options.gitCommonDirectory
+  })).digest('hex')
+}
+
+async function ensureWorkerContainerUnlocked(
+  options: PersistentContainerOptions,
+  runner: CommandRunner
+): Promise<string> {
+  const projectPath = validateAbsolutePath(options.projectPath, 'projectPath')
+  await requireDirectory(projectPath, 'projectPath')
+  if (projectPath.includes(',')) throw new Error('projectPath must not contain commas for container mounts')
+  if (!IMAGE_PATTERN.test(options.image)) throw new Error('image is not a valid container image')
+  if (!Number.isFinite(options.cpuLimit) || options.cpuLimit <= 0) throw new Error('cpuLimit must be positive')
+  if (!MEMORY_PATTERN.test(options.memoryLimit)) throw new Error('memoryLimit is invalid')
+  const network = options.network ?? 'none'
+  if (!NETWORK_PATTERN.test(network)) throw new Error('network is not valid')
+  const gitDirectory = options.gitDirectory
+    ? validateAbsolutePath(options.gitDirectory, 'gitDirectory')
+    : null
+  const gitCommonDirectory = options.gitCommonDirectory
+    ? validateAbsolutePath(options.gitCommonDirectory, 'gitCommonDirectory')
+    : null
+  if (Boolean(gitDirectory) !== Boolean(gitCommonDirectory)) {
+    throw new Error('gitDirectory and gitCommonDirectory must be provided together')
+  }
+  if (gitDirectory) await requireDirectory(gitDirectory, 'gitDirectory')
+  if (gitCommonDirectory && gitCommonDirectory !== gitDirectory) {
+    await requireDirectory(gitCommonDirectory, 'gitCommonDirectory')
+  }
+  if (gitDirectory?.includes(',') || gitCommonDirectory?.includes(',')) {
+    throw new Error('Git paths must not contain commas for container mounts')
+  }
+
+  const name = workerContainerName(options.threadId)
+  const config = workerContainerConfig(options, projectPath)
+  const inspected = await runner(options.runtime, [
+    'inspect', '--format', '{{.State.Running}}|{{index .Config.Labels "com.local-agent.worker-config"}}', name
+  ], {
+    timeoutMs: 15_000
+  })
+  if (inspected.exitCode === 0) {
+    const [running, existingConfig] = inspected.stdout.trim().split('|')
+    if (existingConfig === config) {
+      if (running === 'true') return name
+      const started = await runner(options.runtime, ['start', name], { timeoutMs: 60_000 })
+      requireSuccess(started, 'Persistent worker container start')
+      return name
+    }
+    const removed = await runner(options.runtime, ['rm', '--force', name], { timeoutMs: 30_000 })
+    requireSuccess(removed, 'Outdated worker container removal')
+  }
+
+  const identityArgs = process.platform === 'linux'
+    ? options.runtime === 'podman'
+      ? ['--userns', 'keep-id']
+      : typeof process.getuid === 'function' && typeof process.getgid === 'function'
+        ? ['--user', `${process.getuid()}:${process.getgid()}`]
+        : []
+    : []
+  const created = await runner(options.runtime, [
+    'run', '--detach',
+    '--name', name,
+    '--label', `com.local-agent.worker-config=${config}`,
+    '--pull', 'missing',
+    '--cpus', String(options.cpuLimit),
+    '--memory', options.memoryLimit,
+    '--network', network,
+    ...identityArgs,
+    '--read-only',
+    '--security-opt', 'no-new-privileges',
+    '--cap-drop', 'ALL',
+    '--pids-limit', '256',
+    '--tmpfs', '/tmp:rw,noexec,nosuid,size=256m',
+    '--mount', `type=bind,source=${projectPath},target=/workspace`,
+    ...(gitDirectory ? [
+      '--mount', `type=bind,source=${gitDirectory},target=/repo-git`,
+      ...(gitCommonDirectory !== gitDirectory
+        ? ['--mount', `type=bind,source=${gitCommonDirectory},target=/repo-git-common`]
+        : []),
+      '--env', 'GIT_DIR=/repo-git',
+      '--env', `GIT_COMMON_DIR=${gitCommonDirectory === gitDirectory ? '/repo-git' : '/repo-git-common'}`,
+      '--env', 'GIT_WORK_TREE=/workspace'
+    ] : []),
+    '--mount', `type=volume,source=${workerDataVolumeName(options.threadId)},target=/worker-data`,
+    '--workdir', '/workspace',
+    '--', options.image,
+    'tail', '-f', '/dev/null'
+  ], { timeoutMs: 600_000, maxOutputBytes: 100_000 })
+  requireSuccess(created, 'Persistent worker container creation')
+  return name
+}
+
+export function ensureWorkerContainer(
+  options: PersistentContainerOptions,
+  runner: CommandRunner = runCommand
+): Promise<string> {
+  const key = `${options.runtime}:${workerContainerName(options.threadId)}`
+  const active = workerContainerStarts.get(key)
+  if (active) return active
+  const started = ensureWorkerContainerUnlocked(options, runner)
+  workerContainerStarts.set(key, started)
+  void started.finally(() => {
+    if (workerContainerStarts.get(key) === started) workerContainerStarts.delete(key)
+  }).catch(() => undefined)
+  return started
+}
+
+export async function executeInWorkerContainer(
+  options: ContainerExecutionOptions,
+  runner: CommandRunner = runCommand
+): Promise<CommandResult> {
+  if (options.command.length === 0 || options.command.some((part) => part.includes('\0'))) {
+    throw new Error('command must contain at least one argument and no NUL bytes')
+  }
+  const name = await ensureWorkerContainer(options, runner)
+  return runner(options.runtime, [
+    'exec', ...(options.input === undefined ? [] : ['--interactive']),
+    '--workdir', '/workspace', name, ...options.command
+  ], {
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
+    maxOutputBytes: 2_000_000,
+    input: options.input
+  })
+}
+
+export async function removeWorkerContainer(
+  runtime: ContainerRuntime,
+  threadId: string,
+  runner: CommandRunner = runCommand
+): Promise<void> {
+  const result = await runner(runtime, ['rm', '--force', workerContainerName(threadId)], { timeoutMs: 30_000 })
+  if (!containerIsAlreadyRemoved(result) || result.timedOut) requireSuccess(result, 'Worker container removal')
+  const volume = await runner(runtime, ['volume', 'rm', workerDataVolumeName(threadId)], { timeoutMs: 30_000 })
+  if (
+    volume.exitCode !== 0
+    && !/no such volume|does not exist|not found/i.test(`${volume.stderr}\n${volume.stdout}`)
+  ) requireSuccess(volume, 'Worker data volume removal')
 }
 
 function sanitizedGitEnvironment(): NodeJS.ProcessEnv {

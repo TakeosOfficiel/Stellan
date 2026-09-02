@@ -14,10 +14,12 @@ describe('applyPortalEvent', () => {
       type: 'ready',
       portal: {
         threadId,
+        source: 'port',
         targetPort: 3000,
         status: 'ready',
         scope: 'loopback',
-        url: 'http://127.0.0.1:45678'
+        url: 'http://127.0.0.1:45678',
+        expiresAt: null
       }
     })
     expect(state[threadId]).toMatchObject({ status: 'ready', error: null })

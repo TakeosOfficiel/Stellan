@@ -26,7 +26,7 @@ describe('createWorkerCommandExecutor', () => {
     }
     const container = vi.fn().mockResolvedValue(result)
     const signal = new AbortController().signal
-    const execute = createWorkerCommandExecutor(profile, 'thread-123', '/workspace', container)
+    const execute = createWorkerCommandExecutor(profile, 'thread-123', '/workspace', null, container)
 
     await expect(execute?.('pnpm', ['test'], { timeoutMs: 120_000, signal })).resolves.toEqual(result)
     expect(container).toHaveBeenCalledWith({

@@ -12,8 +12,8 @@ export type OllamaSetupState = {
   canOpenDownload: boolean
 }
 
-const EXECUTABLE_MISSING = "L'exécutable Ollama est introuvable"
-const START_FAILED = "Ollama n'a pas pu démarrer"
+const RUNTIME_MISSING = 'WSL 2 est requis'
+const START_FAILED = /^(?:Le conteneur Ollama n’a pas pu|Le moteur privé ne répond pas|Le runtime Linux privé ne répond pas)/
 
 export function getOllamaSetupState(
   status: OllamaStatus | null,
@@ -45,11 +45,11 @@ export function getOllamaSetupState(
   if (installation === 'detected') {
     return {
       installed: 'complete',
-      running: reason.startsWith(START_FAILED) ? 'incomplete' : 'unknown',
+      running: START_FAILED.test(reason) ? 'incomplete' : 'unknown',
       reachable: 'incomplete',
       modelReady: 'incomplete',
       canStart: true,
-      canOpenDownload: true
+      canOpenDownload: false
     }
   }
 
@@ -64,5 +64,5 @@ export function getOllamaSetupState(
 }
 
 export function installationEvidenceFromStart(status: OllamaStatus): InstallationEvidence {
-  return !status.available && status.reason.startsWith(EXECUTABLE_MISSING) ? 'missing' : 'detected'
+  return !status.available && status.reason.startsWith(RUNTIME_MISSING) ? 'missing' : 'detected'
 }

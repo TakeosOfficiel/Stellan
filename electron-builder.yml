@@ -9,6 +9,7 @@ artifactName: Local-Agent-${version}-${os}-${arch}.${ext}
 asar: true
 asarUnpack:
   - node_modules/node-pty/**/*
+  - node_modules/onnxruntime-node/**/*
 afterPack: scripts/after-pack.cjs
 files:
   - out/**/*

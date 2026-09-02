@@ -10,6 +10,7 @@ type GraphicsController = {
 
 const VIRTUAL_ADAPTER_PATTERN = /parsec|virtual|remote display|indirect display|microsoft basic|vmware|virtualbox|citrix|hyper-v/i
 const DISCRETE_GPU_PATTERN = /nvidia|geforce|quadro|rtx|gtx|amd|radeon|arc\b/i
+let hardwarePromise: Promise<HardwareInfo> | null = null
 
 function getPlatform(): HardwareInfo['platform'] {
   if (process.platform === 'win32') return 'windows'
@@ -36,23 +37,31 @@ export function selectGpus(controllers: GraphicsController[]): HardwareInfo['gpu
     })
 }
 
-export async function getHardwareInfo(): Promise<HardwareInfo> {
-  let gpus: HardwareInfo['gpus'] = []
-
-  try {
-    const graphics = await systeminformation.graphics()
-    gpus = selectGpus(graphics.controllers)
-  } catch {
-    // GPU detection is best-effort; RAM recommendations remain available.
-  }
-
+export function getBasicHardwareInfo(): HardwareInfo {
   const cpus = os.cpus()
-
   return {
     platform: getPlatform(),
     cpuModel: cpus[0]?.model.trim() || 'Processeur inconnu',
     cpuCores: cpus.length,
     totalMemoryBytes: os.totalmem(),
-    gpus
+    gpus: []
   }
+}
+
+export function getHardwareInfo(): Promise<HardwareInfo> {
+  if (hardwarePromise) return hardwarePromise
+  hardwarePromise = (async () => {
+    let gpus: HardwareInfo['gpus'] = []
+    try {
+      const graphics = await Promise.race([
+        systeminformation.graphics(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 8_000))
+      ])
+      if (graphics) gpus = selectGpus(graphics.controllers)
+    } catch {
+      // GPU detection is best-effort; RAM recommendations remain available.
+    }
+    return { ...getBasicHardwareInfo(), gpus }
+  })()
+  return hardwarePromise
 }

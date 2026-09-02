@@ -4,76 +4,71 @@ Local Agent est une application de développement assistée par une IA locale. E
 
 La version 0.1 fournit :
 
-- guide la première configuration sans bloquer l’accès aux threads ;
-- distingue l’installation d’Ollama, son service, son API locale et la présence d’un modèle ;
+- affiche la première installation et les redémarrages du runtime dans une fenêtre de progression compacte, séparée des réglages ;
+- crée et démarre automatiquement Ollama dans Docker, sans fenêtre de terminal ;
 - détecte la version d’Ollama et les modèles installés lorsque son API locale répond ;
-- ouvre l'installation officielle d'Ollama à la demande ;
+- active WSL 2 à la demande lorsque le composant Windows manque ;
 - détecte la RAM, le processeur et le GPU ;
 - vérifie séparément Git, Docker et Podman et recommande le runtime worker disponible ;
 - classe les modèles par usage : rapide, général, code, vision ou génération d'images ;
 - recommande les modèles adaptés tout en laissant le choix à l'utilisateur ;
 - télécharge le modèle choisi avec une progression visible ;
+- propose une dictée privée au microphone avec Whisper large-v3-turbo, téléchargé à la première utilisation puis conservé dans le cache local ;
 - conserve les threads et messages dans une base SQLite locale ;
 - crée un Git worktree isolé par thread lorsque le projet le permet ;
-- conserve un profil worker par projet avec mode direct ou conteneur, limites CPU/RAM, image et politique réseau ;
+- conserve un profil worker conteneurisé par projet avec limites CPU/RAM, image et politique réseau ;
 - permet de choisir, par projet, un nombre maximal de workers simultanés avec une valeur initiale prudente calculée depuis le CPU et la RAM ;
+- permet au coordinateur de créer automatiquement 2 à 4 chats workers persistants et visibles sous leur thread parent, avec des fichiers exclusifs et une détection des chevauchements avant exécution ;
 - planifie les générations dans le processus principal, affiche leur état en cours ou en attente et laisse changer de thread sans les arrêter ;
 - accepte plusieurs messages par thread pendant une génération, avec file persistante, édition, suppression, priorité immédiate et historique des états ;
-- exécute les commandes autorisées dans Docker ou Podman lorsque le profil conteneur est activé ;
-- ouvre un vrai terminal PTY par thread dans son worktree actif, en mode direct ou dans le conteneur du profil worker ;
+- exécute les lectures, recherches, écritures, opérations Git et commandes de l’agent dans un conteneur persistant par thread ;
+- ouvre un vrai terminal PTY directement dans le conteneur persistant du thread ;
 - crée sur demande un portail de prévisualisation HTTP/WebSocket lié au thread, accessible uniquement via une URL loopback temporaire ;
-- demande une confirmation avant chaque écriture ou commande ;
 - permet à l'agent de lire, rechercher, modifier, tester et présenter le diff Git ;
+- affiche en permanence à droite un espace projet avec Changements, Review, Portails, Fichiers et Terminal ;
 - borne le contexte et les sorties d'outils pour rester utilisable avec de petits modèles.
 
-Ollama n'est pas obligatoire pour ouvrir l'interface. Aucun logiciel ni modèle n'est installé sans une action explicite de l'utilisateur.
+Sous Windows, Docker Desktop et Podman Desktop ne sont pas nécessaires. Local Agent crée une distribution WSL 2 privée nommée `LocalAgentRuntime`, y installe un moteur de conteneurs sans interface et télécharge automatiquement les images nécessaires. Le téléchargement d’un modèle reste déclenché depuis le catalogue afin que l’utilisateur choisisse sa taille.
 
 ## Première configuration et Ollama
 
-Au premier lancement, l’écran **Modèles** vérifie `127.0.0.1:11434` puis `localhost:11434`. Ces adresses désignent uniquement le PC courant : un échec ne signifie pas que la connexion Internet est coupée, mais que l’API locale d’Ollama ne répond pas. L’application ne prétend pas savoir si Ollama est installé tant qu’elle n’a pas joint son API ou recherché explicitement son exécutable via l’action **Rechercher et démarrer**.
+Au démarrage, Local Agent détecte automatiquement le CPU, la RAM, le GPU et WSL 2. Au premier lancement, il télécharge un Alpine Linux minimal dont la somme SHA-256 est contrôlée, l’importe dans son dossier privé puis installe le moteur headless. Il crée ensuite en arrière-plan le conteneur `local-agent-ollama`, lié uniquement à `127.0.0.1:11435`. Aucun `ollama serve` ne doit être lancé manuellement et aucune console n’est ouverte.
 
-Si Ollama est installé mais reste injoignable :
+Les modèles sont conservés dans le volume nommé `local-agent-ollama-models`, à l’intérieur du disque virtuel privé WSL, pas dans le dossier utilisateur `.ollama`. Ils occupent néanmoins de l’espace sur le disque du PC. Le premier démarrage télécharge l’image `ollama/ollama`; avec un GPU NVIDIA détecté, Local Agent tente automatiquement l’accès GPU puis revient au CPU si le passthrough GPU n’est pas disponible.
 
-```powershell
-# Windows — dans PowerShell ; garder cette fenêtre ouverte
-ollama serve
-```
-
-```bash
-# Linux — dans un terminal ; garder cette commande ouverte
-ollama serve
-
-# Ou, pour une installation enregistrée comme service système
-sudo systemctl start ollama
-```
-
-Revenir ensuite dans **Modèles** et choisir **Réessayer la connexion**. Si `ollama` est introuvable, utiliser **Télécharger / réinstaller** et l’installateur officiel, puis ouvrir un nouveau terminal afin que le `PATH` mis à jour soit pris en compte. Si le port 11434 est déjà utilisé, fermer l’ancien processus Ollama avant de relancer le service.
+Si WSL 2 manque, **Activer WSL 2** lance la commande officielle Windows avec une demande UAC. Un redémarrage du PC peut être nécessaire. Local Agent reprend ensuite automatiquement la création de son runtime privé.
 
 Une API joignable sans modèle n’est pas encore prête pour une conversation. Installer explicitement un modèle du catalogue ; les recommandations décrivent la mémoire détectée mais ne remplacent jamais le choix de l’utilisateur. La catégorie de catalogue et le modèle sélectionné sont conservés lors des nouvelles vérifications.
 
 ## Tester toute la version 0.1
 
-1. Lancer `pnpm dev` et suivre la première configuration. Installer Ollama depuis l’application ou son site officiel uniquement si nécessaire.
-2. Dans **Modèles**, vérifier séparément le service et l’API locale, puis installer le modèle de démarrage ou un modèle de code compatible avec les outils.
-3. Dans **Agent**, ouvrir un dépôt Git, envoyer une demande de modification, contrôler les confirmations natives, puis utiliser **Voir les changements**.
-4. Dans un thread de projet actif, ouvrir **Terminal**, vérifier les programmes interactifs et le redimensionnement, puis fermer le panneau pour arrêter tout l’arbre de processus.
-5. Lancer un serveur HTTP dans le projet, ouvrir **Portail local**, saisir son port, puis vérifier l’URL, la copie, l’ouverture, le rechargement à chaud et l’arrêt. L’URL `127.0.0.1` reste accessible uniquement depuis le même ordinateur et n’est jamais restaurée au redémarrage.
+1. Lancer `pnpm dev` et laisser Local Agent préparer WSL 2, son moteur privé et Ollama automatiquement.
+2. Dans **Modèles**, vérifier l’API locale sur le port 11435, puis installer le modèle de démarrage ou un modèle de code compatible avec les outils.
+3. Dans **Agent**, ouvrir un dépôt Git : l’application crée immédiatement un thread de projet et le panneau droit doit afficher ses vrais fichiers. Envoyer une demande de modification, puis consulter **Changes** et **Review**.
+4. Dans le panneau droit du thread actif, ouvrir **Terminal**, vérifier les programmes interactifs et le redimensionnement, puis fermer le terminal ; le worker doit rester disponible pour les outils suivants.
+5. Ajouter un `index.html`, ouvrir **Portals**, puis vérifier l’aperçu Chromium, l’URL, la copie, l’ouverture, le mode appareil, le rechargement et l’arrêt. L’URL loopback reste accessible uniquement depuis le même ordinateur et n’est jamais restaurée au redémarrage.
 6. Régler **Workers simultanés** à 2, lancer deux threads du même projet, passer de l’un à l’autre et vérifier leurs indicateurs indépendants. Avec des worktrees, les deux peuvent progresser ; avec deux threads qui partagent le dossier direct, le second reste volontairement en attente.
 7. Pendant une génération, vérifier que la réponse apparaît progressivement et que le bouton des nouveaux messages ramène en bas après un défilement manuel. Envoyer ensuite plusieurs messages : ils doivent rester dans la file visible au-dessus du compositeur, sans apparaître dans la conversation. Modifier puis supprimer une entrée, utiliser **Envoyer maintenant**, et ouvrir le bouton d’historique séparé. Fermer puis rouvrir l’application : la génération active devient interrompue, tandis que les messages encore en attente sont conservés et reprennent dans l’ordre. Une confirmation supplémentaire protège les changements non enregistrés lors de la suppression du thread.
 
 Pour un dossier qui ne permet pas de créer un worktree Git, l'application explique que l'isolation est indisponible et exige une confirmation avant d'utiliser le dossier original en mode direct.
 
-La limite est appliquée par projet dans le processus principal, pas par l’interface. Une seule génération reste permise par thread. Les threads dotés de worktrees distincts peuvent occuper plusieurs slots ; deux threads qui résolvent vers le même dossier direct sont toujours sérialisés, y compris avec un profil conteneur, car les outils de fichiers modifient encore l’hôte. Ces slots décrivent la concurrence des agents et de leurs outils locaux, pas la capacité d’inférence : Ollama peut encore sérialiser les requêtes ou charger/décharger le modèle selon sa propre configuration et le matériel disponible.
+Sans projet ouvert, le chat est verrouillé et demande d’ouvrir ou créer un dossier. Il ne présente donc pas un bloc de code comme un changement réellement appliqué. Les aperçus du panneau **Fichiers** sont des lectures bornées de fichiers texte appartenant au thread actif ; les fichiers binaires sont refusés.
+
+Dans l’application Agent, un projet est désormais obligatoire : le compositeur reste verrouillé tant qu’un dépôt Git ou un dossier vierge n’a pas été choisi. Le sélecteur natif permet de créer ce dossier. Lorsqu’une demande se découpe en fichiers indépendants, le coordinateur peut lancer automatiquement `create_workers`. Chaque worker devient un chat enfant persistant, visible sous le thread principal avec sa directive, ses outils et sa réponse. Les workers enfants n’exécutent pas de commandes et ne peuvent écrire que leurs fichiers déclarés. Un même fichier attribué deux fois fait échouer le plan avant toute modification. Leurs résumés reviennent au coordinateur, qui reprend ensuite la main pour relire et tester l’ensemble ; une erreur interrompt les autres workers du lot.
+
+Le bouton microphone du compositeur enregistre au maximum une minute, convertit le son en mono 16 kHz et le transcrit localement. Le modèle quantifié Whisper large-v3-turbo représente environ 750 Mo à télécharger lors de la première dictée ; il n’est pas inclus dans l’installeur. Les usages suivants fonctionnent depuis le cache sans connexion. Une normalisation déterministe comprend notamment « nouvelle ligne », « ouvre accolade » et « point-virgule », sans confier le texte dicté à un service cloud ni à un second LLM susceptible d’en changer le sens.
+
+La limite est appliquée par projet dans le processus principal, pas par l’interface. Une seule génération reste permise par thread. Les threads dotés de worktrees distincts peuvent occuper plusieurs slots ; deux threads qui partagent le même dossier projet sont sérialisés pour éviter des écritures concurrentes. Tous les outils de l’agent s’exécutent dans le worker persistant. Le worktree reste monté depuis l’hôte afin que les modifications soient visibles dans l’application et dans Git.
 
 La file d’un thread appartient également au processus principal et à SQLite, pas au renderer. Chaque message est persisté avant confirmation, mais reste séparé de la conversation tant que son exécution n’a pas réellement commencé. Un seul message de ce thread peut être exécuté à la fois et les demandes futures ne sont jamais injectées dans le contexte du message courant. **Envoyer maintenant** place l’entrée choisie en tête, interrompt proprement la génération courante, puis la démarre ; les autres entrées gardent leur ordre. À la fermeture, seul le run réellement actif est marqué interrompu et les entrées en attente restent reprises au prochain lancement.
 
-Le renderer ne choisit jamais le dossier du terminal : il transmet uniquement l’identifiant du thread explicitement marqué actif, et le processus principal résout le worktree enregistré. Les entrées et dimensions sont bornées et validées, le PTY est limité à une session par thread et tous les appels IPC exigent la frame principale autorisée. Le mode direct lance `cmd.exe` sous Windows et Bash (ou `sh`) sous Linux avec un tableau d’arguments, sans interpolation de commande. Le mode conteneur reprend l’image, le réseau et les limites du profil worker et détruit explicitement son conteneur à la fermeture. L’historique du terminal n’est pas persisté et un terminal fermé ne peut pas être repris.
+Le renderer ne choisit jamais le dossier du terminal : il transmet uniquement l’identifiant du thread actif, et le processus principal résout le worktree enregistré. Le PTY exécute `docker exec` dans le worker du thread ; fermer l’onglet termine seulement la session du shell, pas le conteneur persistant. Le conteneur et son volume privé sont supprimés avec le thread.
 
-Le renderer ne choisit pas non plus l’hôte d’un portail : il fournit uniquement le thread actif et un port numérique. Electron fixe la cible à `127.0.0.1` ou `::1`, démarre un proxy aléatoire lié à `127.0.0.1`, filtre les requêtes et vérifie le serveur à travers le proxy avant d’afficher l’état prêt. Le portail est éphémère et nettoyé à l’arrêt, à la suppression du thread et à la fermeture. Les accès LAN et public restent désactivés tant que le processus serveur ne peut pas être attribué au projet et que des contrôles d’accès adaptés ne sont pas disponibles ; voir [`docs/PORTALS.md`](docs/PORTALS.md).
+Le portail propose deux sources privées : il peut servir directement le `index.html` du projet dans l’aperçu Chromium intégré, ou se connecter à un serveur déjà lancé sur un port numérique. Dans ce second mode, Electron fixe la cible à `127.0.0.1` ou `::1`, démarre un proxy aléatoire lié à `127.0.0.1`, filtre les requêtes et vérifie le serveur à travers le proxy avant d’afficher l’état prêt. Le portail est éphémère, peut expirer après une durée choisie et est nettoyé à l’arrêt, à la suppression du thread et à la fermeture. Les accès LAN et public restent désactivés sans véritable tunnel et contrôles d’accès ; voir [`docs/PORTALS.md`](docs/PORTALS.md).
 
 ## Développement
 
-Prérequis : Node.js récent, pnpm 12 et Git. Ollama peut être installé séparément pour tester sa détection.
+Prérequis de développement : Node.js récent, pnpm 12 et Git. Sous Windows, WSL 2 doit être disponible pour tester le runtime privé ; sous Linux, Docker Engine reste utilisé directement.
 
 ```bash
 pnpm install

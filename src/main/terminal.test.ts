@@ -73,7 +73,7 @@ describe('TerminalManager', () => {
     expect(() => manager.start({ ...directLaunch, ownerId: 8 })).toThrow('autre fenêtre')
   })
 
-  it('uses fixed Docker argv for container profiles and force-removes the container', async () => {
+  it('opens a shell in the persistent worker container without removing it', async () => {
     const fake = fakePty()
     const factory = vi.fn<PtyFactory>(() => fake.pty)
     const remove = vi.fn(async () => {})
@@ -95,15 +95,21 @@ describe('TerminalManager', () => {
 
     expect(manager.start(launch).mode).toBe('container')
     const args = factory.mock.calls[0]?.[1] ?? []
-    expect(factory.mock.calls[0]?.[0]).toBe('docker')
+    expect(factory.mock.calls[0]?.[0]).toBe(process.platform === 'win32' ? 'wsl.exe' : 'docker')
+    if (process.platform === 'win32') {
+      expect(args).toEqual(expect.arrayContaining([
+        '--distribution', 'LocalAgentRuntime', '--user', 'root', '--exec', 'docker'
+      ]))
+    }
     expect(args).toContain('--interactive')
     expect(args).toContain('--tty')
-    expect(args).toContain(`type=bind,source=${launch.cwd},target=/workspace`)
-    expect(args.slice(-3)).toEqual(['--', 'node:22-bookworm', '/bin/sh'])
+    expect(args).toContain('PS1=~/workspace/worktree$ ')
+    expect(args).toContain(`local-agent-worker-${launch.threadId}`)
+    expect(args.slice(-4)).toEqual(['/bin/bash', '--noprofile', '--norc', '-i'])
     expect(args.join(' ')).not.toContain('docker.sock')
 
     await manager.close(launch.threadId, launch.ownerId)
-    expect(remove).toHaveBeenCalledWith('docker', `local-agent-terminal-${launch.threadId}`)
+    expect(remove).not.toHaveBeenCalled()
   })
 
   it('cleans process trees and reports natural exits', async () => {
@@ -124,7 +130,7 @@ describe('TerminalManager', () => {
     await expect(manager.close(directLaunch.threadId, 7)).resolves.toBe(false)
   })
 
-  it('surfaces container cleanup failures instead of reporting a silent close', async () => {
+  it('leaves the persistent container alive when its terminal closes', async () => {
     const fake = fakePty()
     const manager = new TerminalManager(
       () => {},
@@ -147,7 +153,7 @@ describe('TerminalManager', () => {
       }
     })
 
-    await expect(manager.close(directLaunch.threadId, directLaunch.ownerId)).rejects.toThrow('cleanup failed')
+    await expect(manager.close(directLaunch.threadId, directLaunch.ownerId)).resolves.toBe(true)
   })
 })
 

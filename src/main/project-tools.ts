@@ -1,9 +1,10 @@
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, realpath, stat } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, realpath, stat, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 import spawn from 'cross-spawn'
 import { rgPath } from '@vscode/ripgrep'
+import { diffLines } from 'diff'
 
 const RIPGREP_PATH = process.resourcesPath
   ? path.join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'rg.exe' : 'rg')
@@ -14,6 +15,12 @@ export interface SearchResult {
   line: number
   column: number
   text: string
+}
+
+export type FileWriteResult = {
+  path: string
+  added: number
+  removed: number
 }
 
 export interface CommandOptions {
@@ -28,6 +35,11 @@ export interface CommandResult {
   stderr: string
   timedOut: boolean
   outputTruncated: boolean
+}
+
+export interface FilePreview {
+  content: string
+  truncated: boolean
 }
 
 export class ProjectTools {
@@ -57,6 +69,16 @@ export class ProjectTools {
       .filter(Boolean)
       .map((file) => path.relative(this.root, file).split(path.sep).join('/'))
       .sort()
+  }
+
+  async listDirectories(relativePath = '.'): Promise<string[]> {
+    const directory = await this.safePath(relativePath)
+    if (!(await stat(directory)).isDirectory()) throw new Error('List path must be a directory')
+    const entries = await readdir(directory, { withFileTypes: true })
+    return entries
+      .filter((entry) => entry.isDirectory() && entry.name !== '.git')
+      .map((entry) => path.relative(this.root, path.join(directory, entry.name)).split(path.sep).join('/'))
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
   }
 
   async search(query: string, relativePath = '.'): Promise<SearchResult[]> {
@@ -113,8 +135,48 @@ export class ProjectTools {
     }
   }
 
-  async writeFile(relativePath: string, content: string): Promise<void> {
+  async readFilePreview(relativePath: string, maxBytes = 200_000): Promise<FilePreview> {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 1_000_000) {
+      throw new Error('File preview limit is invalid')
+    }
+    const handle = await open(
+      await this.safePath(relativePath),
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
+    )
+    try {
+      const buffer = Buffer.alloc(maxBytes + 1)
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+      const content = buffer.subarray(0, Math.min(bytesRead, maxBytes))
+      if (content.includes(0)) throw new Error('Binary files cannot be previewed')
+      return {
+        content: new TextDecoder().decode(content),
+        truncated: bytesRead > maxBytes
+      }
+    } finally {
+      await handle.close()
+    }
+  }
+
+  async resolveFilePath(relativePath: string): Promise<string> {
+    const target = await this.safePath(relativePath)
+    if (!(await stat(target)).isFile()) throw new Error('Path must reference a project file')
+    return target
+  }
+
+  async writeFile(relativePath: string, content: string): Promise<FileWriteResult> {
     const target = await this.safePath(relativePath, true)
+    let previous = ''
+    try {
+      previous = await this.readFile(relativePath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    let added = 0
+    let removed = 0
+    for (const change of diffLines(previous, content)) {
+      if (change.added) added += change.count ?? 0
+      if (change.removed) removed += change.count ?? 0
+    }
     await mkdir(path.dirname(target), { recursive: true })
     await this.safePath(path.dirname(relativePath) || '.')
     const handle = await open(
@@ -127,6 +189,20 @@ export class ProjectTools {
     } finally {
       await handle.close()
     }
+    return { path: relativePath, added, removed }
+  }
+
+  async deleteFile(relativePath: string): Promise<FileWriteResult> {
+    const previous = await this.readFile(relativePath)
+    const target = await this.safePath(relativePath)
+    const info = await stat(target)
+    if (!info.isFile()) throw new Error('Path must reference a project file')
+    let removed = 0
+    for (const change of diffLines(previous, '')) {
+      if (change.removed) removed += change.count ?? 0
+    }
+    await unlink(target)
+    return { path: relativePath, added: 0, removed }
   }
 
   async gitStatus(): Promise<string> {
@@ -137,6 +213,14 @@ export class ProjectTools {
     if (result.outputTruncated) throw new Error('Git status exceeded the output limit')
     if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Unable to read Git status')
     return result.stdout
+  }
+
+  async isGitRepository(): Promise<boolean> {
+    const result = await this.run('git', [
+      '-c', 'core.fsmonitor=false',
+      'rev-parse', '--is-inside-work-tree'
+    ], {}, sanitizedGitEnvironment())
+    return result.exitCode === 0 && result.stdout.trim() === 'true'
   }
 
   async gitDiff(staged = false): Promise<string> {

@@ -4,6 +4,7 @@ import type { OllamaMessage, OllamaToolCall } from './ollama'
 
 export type Thread = {
   id: string
+  parentThreadId: string | null
   title: string
   projectPath: string | null
   workspacePath: string | null
@@ -20,6 +21,7 @@ export type EnvironmentStatus = 'creating' | 'active' | 'error' | 'terminated'
 
 export type CreateThreadInput = {
   title: string
+  parentThreadId?: string | null
   projectPath?: string | null
   workspacePath?: string | null
   workspaceMode?: Thread['workspaceMode']
@@ -273,12 +275,19 @@ const migrations = [
       LIMIT 1
     )
     WHERE status IN ('completed', 'interrupted', 'error');
+  `,
+  `
+    ALTER TABLE threads ADD COLUMN parent_thread_id TEXT REFERENCES threads(id) ON DELETE CASCADE;
+    CREATE INDEX threads_parent_thread_id ON threads(parent_thread_id, created_at);
   `
 ]
 
 function toThread(row: StorageRow): Thread {
   return {
     id: String(row.id),
+    parentThreadId: row.parent_thread_id === null || row.parent_thread_id === undefined
+      ? null
+      : String(row.parent_thread_id),
     title: String(row.title),
     projectPath: row.project_path === null ? null : String(row.project_path),
     workspacePath: row.workspace_path === null ? null : String(row.workspace_path),
@@ -390,8 +399,13 @@ export class ThreadStore {
   createThread(input: CreateThreadInput): Thread {
     this.assertOpen()
 
+    if (input.parentThreadId && !this.getThread(input.parentThreadId)) {
+      throw new Error(`Parent thread not found: ${input.parentThreadId}`)
+    }
+
     const thread: Thread = {
       id: randomUUID(),
+      parentThreadId: input.parentThreadId ?? null,
       title: input.title,
       projectPath: input.projectPath ?? null,
       workspacePath: input.workspacePath ?? null,
@@ -405,12 +419,13 @@ export class ThreadStore {
     }
     this.database.prepare(`
       INSERT INTO threads (
-        id, title, project_path, workspace_path, workspace_mode,
+        id, parent_thread_id, title, project_path, workspace_path, workspace_mode,
         environment_status, environment_error, environment_updated_at,
         model, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       thread.id,
+      thread.parentThreadId,
       thread.title,
       thread.projectPath,
       thread.workspacePath,
@@ -430,7 +445,7 @@ export class ThreadStore {
     this.assertOpen()
 
     return this.database.prepare(`
-      SELECT id, title, project_path, workspace_path, workspace_mode,
+      SELECT id, parent_thread_id, title, project_path, workspace_path, workspace_mode,
              environment_status, environment_error, environment_updated_at,
              model, created_at, updated_at
       FROM threads
@@ -442,7 +457,7 @@ export class ThreadStore {
     this.assertOpen()
 
     const row = this.database.prepare(`
-      SELECT id, title, project_path, workspace_path, workspace_mode,
+      SELECT id, parent_thread_id, title, project_path, workspace_path, workspace_mode,
              environment_status, environment_error, environment_updated_at,
              model, created_at, updated_at
       FROM threads
@@ -822,19 +837,27 @@ export class ThreadStore {
   recoverInterruptedAgentRuns(): number {
     this.assertOpen()
     const runs = this.database.prepare(`
-      SELECT id FROM agent_runs WHERE status = 'running' ORDER BY started_at ASC, rowid ASC
+      SELECT runs.id
+      FROM agent_runs runs
+      JOIN threads ON threads.id = runs.thread_id
+      WHERE runs.status = 'running'
+         OR (runs.status = 'queued' AND threads.parent_thread_id IS NOT NULL)
+      ORDER BY runs.started_at ASC, runs.rowid ASC
     `).all()
     if (runs.length === 0) return 0
     const finishedAt = new Date().toISOString()
 
     this.database.exec('BEGIN')
     try {
-      for (const row of runs) this.interruptOpenToolCalls(String(row.id), finishedAt)
-      this.database.prepare(`
+      const interrupt = this.database.prepare(`
         UPDATE agent_runs
         SET status = 'interrupted', error = 'Application fermée pendant la génération.', finished_at = ?
-        WHERE status = 'running'
-      `).run(finishedAt)
+        WHERE id = ? AND status IN ('queued', 'running')
+      `)
+      for (const row of runs) {
+        this.interruptOpenToolCalls(String(row.id), finishedAt)
+        interrupt.run(finishedAt, String(row.id))
+      }
       this.database.exec('COMMIT')
     } catch (error) {
       this.database.exec('ROLLBACK')
