@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   ChatEvent,
   LocalAgentApi,
-  ModelPullProgress
+  ModelPullProgress,
+  TerminalEvent
 } from '../shared/contracts'
 
 const api: LocalAgentApi = {
@@ -34,10 +35,22 @@ const api: LocalAgentApi = {
     return () => ipcRenderer.removeListener('chat:event', handler)
   },
   listThreads: () => ipcRenderer.invoke('threads:list'),
+  setActiveThread: (threadId) => ipcRenderer.invoke('threads:set-active', threadId),
   createThread: (request) => ipcRenderer.invoke('threads:create', request),
   loadThreadMessages: (threadId) => ipcRenderer.invoke('threads:messages', threadId),
   deleteThread: (threadId) => ipcRenderer.invoke('threads:delete', threadId),
-  reviewThreadProject: (threadId) => ipcRenderer.invoke('threads:review-project', threadId)
+  reviewThreadProject: (threadId) => ipcRenderer.invoke('threads:review-project', threadId),
+  startTerminal: (request) => ipcRenderer.invoke('terminal:start', request),
+  writeTerminal: (threadId, data) => ipcRenderer.invoke('terminal:write', { threadId, data }),
+  resizeTerminal: (threadId, cols, rows) => ipcRenderer.invoke('terminal:resize', { threadId, cols, rows }),
+  closeTerminal: (threadId) => ipcRenderer.invoke('terminal:close', threadId),
+  onTerminalEvent: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, terminalEvent: TerminalEvent): void => {
+      listener(terminalEvent)
+    }
+    ipcRenderer.on('terminal:event', handler)
+    return () => ipcRenderer.removeListener('terminal:event', handler)
+  }
 }
 
 contextBridge.exposeInMainWorld('localAgent', api)

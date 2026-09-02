@@ -222,6 +222,8 @@ Le mode direct est présenté comme moins isolé que le mode conteneur. L'applic
 - gestion des téléchargements et de l'espace disque ;
 - accessibilité et raccourcis clavier.
 
+État actuel du terminal : xterm.js est relié à un PTY `node-pty` réel sous Windows et Linux. Une session unique est liée à l’identifiant d’un thread possédant un environnement projet actif ; le dossier effectif est résolu exclusivement dans le processus principal. Le terminal suit le profil worker direct ou conteneur, diffuse les sorties, accepte les entrées et redimensionnements validés, et nettoie l’arbre de processus ainsi que tout conteneur à la fermeture, à la suppression du thread ou à la fermeture de la fenêtre. L’historique du terminal et la reprise après redémarrage restent volontairement hors périmètre de cette tranche.
+
 ### Phase 5 — Distribution
 
 - installateurs Windows et Linux ;

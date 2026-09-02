@@ -136,6 +136,22 @@ export type ProjectReview = {
   workspaceMode: 'worktree' | 'direct'
 }
 
+export type TerminalStartRequest = {
+  threadId: string
+  cols: number
+  rows: number
+}
+
+export type TerminalStartResult = {
+  threadId: string
+  mode: 'direct' | 'container'
+  reused: boolean
+}
+
+export type TerminalEvent =
+  | { threadId: string; type: 'data'; data: string }
+  | { threadId: string; type: 'exit'; exitCode: number; signal: number | null }
+
 export type OllamaStatus =
   | {
       available: true
@@ -164,8 +180,14 @@ export type LocalAgentApi = {
   cancelChat: (requestId: string) => Promise<void>
   onChatEvent: (listener: (event: ChatEvent) => void) => () => void
   listThreads: () => Promise<StoredThread[]>
+  setActiveThread: (threadId: string | null) => Promise<void>
   createThread: (request: CreateThreadRequest) => Promise<StoredThread>
   loadThreadMessages: (threadId: string) => Promise<StoredMessage[]>
   deleteThread: (threadId: string) => Promise<boolean>
   reviewThreadProject: (threadId: string) => Promise<ProjectReview | null>
+  startTerminal: (request: TerminalStartRequest) => Promise<TerminalStartResult>
+  writeTerminal: (threadId: string, data: string) => Promise<void>
+  resizeTerminal: (threadId: string, cols: number, rows: number) => Promise<void>
+  closeTerminal: (threadId: string) => Promise<boolean>
+  onTerminalEvent: (listener: (event: TerminalEvent) => void) => () => void
 }

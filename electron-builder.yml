@@ -7,6 +7,9 @@ directories:
 
 artifactName: Local-Agent-${version}-${os}-${arch}.${ext}
 asar: true
+asarUnpack:
+  - node_modules/node-pty/**/*
+afterPack: scripts/after-pack.cjs
 files:
   - out/**/*
   - package.json

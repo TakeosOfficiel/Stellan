@@ -15,6 +15,7 @@ La version 0.1 fournit :
 - crée un Git worktree isolé par thread lorsque le projet le permet ;
 - conserve un profil worker par projet avec mode direct ou conteneur, limites CPU/RAM, image et politique réseau ;
 - exécute les commandes autorisées dans Docker ou Podman lorsque le profil conteneur est activé ;
+- ouvre un vrai terminal PTY par thread dans son worktree actif, en mode direct ou dans le conteneur du profil worker ;
 - demande une confirmation avant chaque écriture ou commande ;
 - permet à l'agent de lire, rechercher, modifier, tester et présenter le diff Git ;
 - borne le contexte et les sorties d'outils pour rester utilisable avec de petits modèles.
@@ -26,9 +27,12 @@ Ollama n'est pas obligatoire pour ouvrir l'interface. Aucun logiciel ni modèle 
 1. Installer Ollama depuis le bouton de l'application ou depuis son site officiel.
 2. Lancer `pnpm dev`, ouvrir l'onglet **Modèles**, puis installer le modèle de démarrage ou un modèle de code compatible avec les outils.
 3. Dans **Agent**, ouvrir un dépôt Git, envoyer une demande de modification, contrôler les confirmations natives, puis utiliser **Voir les changements**.
-4. Arrêter une génération pour vérifier l'annulation, fermer puis rouvrir l'application pour vérifier la persistance, et supprimer le thread. Une confirmation supplémentaire protège les changements non enregistrés.
+4. Dans un thread de projet actif, ouvrir **Terminal**, vérifier les programmes interactifs et le redimensionnement, puis fermer le panneau pour arrêter tout l’arbre de processus.
+5. Arrêter une génération pour vérifier l'annulation, fermer puis rouvrir l'application pour vérifier la persistance, et supprimer le thread. Une confirmation supplémentaire protège les changements non enregistrés.
 
 Pour un dossier qui ne permet pas de créer un worktree Git, l'application explique que l'isolation est indisponible et exige une confirmation avant d'utiliser le dossier original en mode direct.
+
+Le renderer ne choisit jamais le dossier du terminal : il transmet uniquement l’identifiant du thread explicitement marqué actif, et le processus principal résout le worktree enregistré. Les entrées et dimensions sont bornées et validées, le PTY est limité à une session par thread et tous les appels IPC exigent la frame principale autorisée. Le mode direct lance `cmd.exe` sous Windows et Bash (ou `sh`) sous Linux avec un tableau d’arguments, sans interpolation de commande. Le mode conteneur reprend l’image, le réseau et les limites du profil worker et détruit explicitement son conteneur à la fermeture. L’historique du terminal n’est pas persisté et un terminal fermé ne peut pas être repris.
 
 ## Développement
 

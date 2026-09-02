@@ -9,6 +9,7 @@ import type {
   StoredThread,
   WorkerProfile
 } from '../../shared/contracts'
+import { TerminalPanel } from './TerminalPanel'
 
 type UiMessage = ChatMessage & {
   id: string
@@ -67,6 +68,8 @@ export function WorkspaceView({
   const [threadMenuOpen, setThreadMenuOpen] = useState(false)
   const [workerError, setWorkerError] = useState<string | null>(null)
   const [savingWorker, setSavingWorker] = useState(false)
+  const [terminalThreadId, setTerminalThreadId] = useState<string | null>(null)
+  const [terminalError, setTerminalError] = useState<string | null>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const newThreadButtonRef = useRef<HTMLButtonElement>(null)
   const projectSwitcherRef = useRef<HTMLButtonElement>(null)
@@ -88,6 +91,10 @@ export function WorkspaceView({
   useEffect(() => {
     if (effectiveModel) localStorage.setItem('local-agent:model', effectiveModel)
   }, [effectiveModel])
+
+  useEffect(() => () => {
+    if (terminalThreadId) void window.localAgent.closeTerminal(terminalThreadId)
+  }, [terminalThreadId])
 
   useEffect(() => {
     const handleEvent = (event: ChatEvent): void => {
@@ -180,7 +187,7 @@ export function WorkspaceView({
     closeThreadMenu()
     const selection = await window.localAgent.selectProject()
     if (selection) {
-      if (activeThreadId) newThread()
+      if (activeThreadId) await newThread()
       setProject(selection)
       const profile = await window.localAgent.getWorkerProfile(selection.path)
       setWorkerProfile(profile)
@@ -192,7 +199,9 @@ export function WorkspaceView({
   }
 
   async function openThread(thread: StoredThread): Promise<void> {
+    await closeTerminal()
     const storedMessages = await window.localAgent.loadThreadMessages(thread.id)
+    await window.localAgent.setActiveThread(thread.id)
     setActiveThreadId(thread.id)
     setMessages(storedMessages.map((message) => ({
       id: message.id,
@@ -216,8 +225,23 @@ export function WorkspaceView({
     }
   }
 
-  function newThread(): void {
+  async function closeTerminal(): Promise<void> {
+    const threadId = terminalThreadId
+    setTerminalThreadId(null)
+    if (!threadId) return
+    try {
+      await window.localAgent.closeTerminal(threadId)
+    } catch (error) {
+      setTerminalError(error instanceof Error
+        ? `Le nettoyage du terminal a échoué : ${error.message}`
+        : 'Le nettoyage du terminal a échoué.')
+    }
+  }
+
+  async function newThread(): Promise<void> {
     closeThreadMenu()
+    await closeTerminal()
+    await window.localAgent.setActiveThread(null)
     setActiveThreadId(null)
     setMessages([])
     setToolActivities([])
@@ -263,9 +287,10 @@ export function WorkspaceView({
 
   async function removeThread(threadId: string): Promise<void> {
     try {
+      if (terminalThreadId === threadId) await closeTerminal()
       if (!await window.localAgent.deleteThread(threadId)) return
       setThreads((current) => current.filter((thread) => thread.id !== threadId))
-      if (activeThreadId === threadId) newThread()
+      if (activeThreadId === threadId) await newThread()
     } catch {
       setReviewError('Impossible de supprimer ce thread pendant son utilisation.')
     }
@@ -284,6 +309,7 @@ export function WorkspaceView({
           model: effectiveModel
         })
         threadId = thread.id
+        await window.localAgent.setActiveThread(thread.id)
         setActiveThreadId(thread.id)
         setThreads((current) => [...current, thread])
       } catch {
@@ -436,7 +462,7 @@ export function WorkspaceView({
         </div>
       </aside>
 
-      <div className="chat-panel">
+      <div className={`chat-panel ${terminalThreadId ? 'terminal-open' : ''}`}>
         <div className="chat-header">
           <div className="thread-identity">
             <span>{project?.name ?? 'Local'}</span>
@@ -444,6 +470,22 @@ export function WorkspaceView({
             <h3>{activeThread?.title ?? 'Nouveau thread'}</h3>
           </div>
           <div className="chat-header-actions">
+            {activeThread?.projectPath && activeThread.environmentStatus === 'active' && (
+              <button
+                className="ghost-button"
+                type="button"
+                aria-pressed={terminalThreadId === activeThread.id}
+                onClick={() => {
+                  if (terminalThreadId === activeThread.id) void closeTerminal()
+                  else {
+                    setTerminalError(null)
+                    setTerminalThreadId(activeThread.id)
+                  }
+                }}
+              >
+                <span aria-hidden="true">›_</span> Terminal
+              </button>
+            )}
             {activeThread?.projectPath && !activeRequest && (
               <button className="ghost-button" type="button" onClick={() => void reviewProject()}>
                 <span aria-hidden="true">±</span> Changements
@@ -470,6 +512,12 @@ export function WorkspaceView({
 
         <div className="messages" aria-live="polite">
           <div className="conversation-column">
+            {terminalError && (
+              <div className="terminal-error" role="alert">
+                <span>{terminalError}</span>
+                <button type="button" aria-label="Fermer l’erreur du terminal" onClick={() => setTerminalError(null)}>×</button>
+              </div>
+            )}
             {(projectReview || reviewError) && (
               <article className="project-review">
                 <div>
@@ -515,6 +563,14 @@ export function WorkspaceView({
             )}
           </div>
         </div>
+
+        {terminalThreadId && activeThread?.id === terminalThreadId && activeThread.projectPath && (
+          <TerminalPanel
+            threadId={terminalThreadId}
+            projectName={projectName(activeThread.projectPath)}
+            onClose={() => void closeTerminal()}
+          />
+        )}
 
         <div className="composer-area">
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>

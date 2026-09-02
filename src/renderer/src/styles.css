@@ -327,6 +327,8 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
   color: #aeb7b1; background: #171c19; font-size: 9px;
 }
 .chat-panel { grid-template-rows: 47px minmax(0, 1fr) auto; background: #0b0e0d; }
+.chat-panel.terminal-open { grid-template-rows: 47px minmax(120px, 1fr) minmax(190px, 36vh) auto; }
+.chat-panel.terminal-open .empty-chat { height: 100%; min-height: 0; }
 .chat-header { padding: 0 14px 0 18px; border-color: #242a26; background: #0f1311; }
 .thread-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .thread-identity > span { color: #59635d; font-size: 10px; }
@@ -381,6 +383,28 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .composer-toolbar > span { color: #667069; font-size: 9px; }
 .composer-toolbar button { display: grid; place-items: center; min-width: 0; width: 27px; height: 27px; padding: 0; border-radius: 7px; }
 .composer-toolbar .stop-button { width: auto; padding: 0 9px; }
+.terminal-panel {
+  display: grid; grid-template-rows: 34px minmax(0, 1fr); min-height: 0;
+  border-top: 1px solid #303832; border-bottom: 1px solid #202622; background: #090c0a;
+}
+.terminal-panel > header {
+  display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px;
+  border-bottom: 1px solid #202622; color: #9da79f; background: #101512;
+}
+.terminal-panel > header > div { display: flex; align-items: center; gap: 8px; }
+.terminal-panel > header strong { color: #c7cec9; font-size: 10px; }
+.terminal-panel > header small { color: #667069; font-size: 8px; }
+.terminal-panel > header button { height: 25px; padding: 0 8px; color: #8f9892; background: transparent; font-size: 9px; }
+.terminal-panel > header button:last-child { width: 25px; padding: 0; font-size: 15px; }
+.terminal-panel > p { z-index: 1; margin: 8px 12px -30px; color: #f1a0a0; font-size: 10px; }
+.terminal-host { min-width: 0; min-height: 0; padding: 7px 9px; overflow: hidden; }
+.terminal-host .xterm { height: 100%; }
+.terminal-host .xterm-viewport { scrollbar-color: #3a403d transparent; }
+.terminal-error {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0;
+  padding: 9px 11px; border: 1px solid #6b3939; border-radius: 7px; color: #efb2b2; background: #241414; font-size: 10px;
+}
+.terminal-error button { width: 24px; height: 24px; padding: 0; color: #efb2b2; background: transparent; }
 .worker-panel-backdrop {
   position: fixed; z-index: 50; inset: 42px 0 0; display: flex; justify-content: flex-end;
   background: rgba(2, 5, 3, 0.55); backdrop-filter: blur(2px);

@@ -9,6 +9,7 @@ import { startOllamaServer } from './ollama-process'
 import { ProjectTools } from './project-tools'
 import { createThreadWorktree, getRuntimeInfo, removeThreadWorktree } from './runtime'
 import { ThreadStore } from './storage'
+import { TerminalManager } from './terminal'
 import { createWorkerCommandExecutor } from './worker-runtime'
 
 const OLLAMA_STATUS_CHANNEL = 'ollama:get-status'
@@ -24,10 +25,16 @@ const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_CANCEL_CHANNEL = 'chat:cancel'
 const CHAT_EVENT_CHANNEL = 'chat:event'
 const THREADS_LIST_CHANNEL = 'threads:list'
+const THREADS_SET_ACTIVE_CHANNEL = 'threads:set-active'
 const THREADS_CREATE_CHANNEL = 'threads:create'
 const THREADS_MESSAGES_CHANNEL = 'threads:messages'
 const THREADS_DELETE_CHANNEL = 'threads:delete'
 const THREADS_REVIEW_PROJECT_CHANNEL = 'threads:review-project'
+const TERMINAL_START_CHANNEL = 'terminal:start'
+const TERMINAL_WRITE_CHANNEL = 'terminal:write'
+const TERMINAL_RESIZE_CHANNEL = 'terminal:resize'
+const TERMINAL_CLOSE_CHANNEL = 'terminal:close'
+const TERMINAL_EVENT_CHANNEL = 'terminal:event'
 const WINDOW_MINIMIZE_CHANNEL = 'window:minimize'
 const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'window:toggle-maximize'
 const WINDOW_CLOSE_CHANNEL = 'window:close'
@@ -45,6 +52,16 @@ const chatRequestSchema = z.object({
   })).min(1).max(200)
 })
 const requestIdSchema = z.uuid()
+const terminalStartSchema = z.object({
+  threadId: z.uuid(),
+  cols: z.number().int().min(2).max(500),
+  rows: z.number().int().min(1).max(200)
+})
+const terminalWriteSchema = z.object({
+  threadId: z.uuid(),
+  data: z.string().max(65_536)
+})
+const terminalResizeSchema = terminalStartSchema
 const createThreadSchema = z.object({
   title: z.string().trim().min(1).max(200),
   projectPath: z.string().min(1).max(10_000).nullable(),
@@ -69,9 +86,17 @@ const workerProfileSchema = z.object({
 let activeDownload: string | null = null
 const activeChats = new Map<string, AbortController>()
 const activeThreadChats = new Map<string, string>()
+const activeThreadOwners = new Map<number, string>()
 const approvedProjectPaths = new Set<string>()
 let threadStore: ThreadStore | null = null
 let mainWindow: BrowserWindow | null = null
+let windowTerminalCleanup: Promise<void> | null = null
+const terminalManager = new TerminalManager((ownerId, terminalEvent) => {
+  const contents = mainWindow?.webContents
+  if (contents && !contents.isDestroyed() && contents.id === ownerId) {
+    contents.send(TERMINAL_EVENT_CHANNEL, terminalEvent)
+  }
+})
 
 function getThreadStore(): ThreadStore {
   if (!threadStore) throw new Error('Le stockage local n’est pas prêt.')
@@ -150,7 +175,10 @@ function createWindow(): void {
     }
   })
   mainWindow = window
+  const ownerId = window.webContents.id
   window.once('closed', () => {
+    activeThreadOwners.delete(ownerId)
+    windowTerminalCleanup = terminalManager.closeOwner(ownerId)
     if (mainWindow === window) mainWindow = null
   })
 
@@ -259,6 +287,18 @@ app.whenReady().then(() => {
     return getThreadStore().saveWorkerProfile(profile)
   })
   handle(THREADS_LIST_CHANNEL, () => getThreadStore().listThreads())
+  handle(THREADS_SET_ACTIVE_CHANNEL, async (event, input: unknown) => {
+    const threadId = z.uuid().nullable().parse(input)
+    if (threadId && !getThreadStore().getThread(threadId)) {
+      throw new Error('Le thread local est introuvable.')
+    }
+    const previousThreadId = activeThreadOwners.get(event.sender.id)
+    if (previousThreadId && previousThreadId !== threadId) {
+      await terminalManager.close(previousThreadId, event.sender.id)
+    }
+    if (threadId) activeThreadOwners.set(event.sender.id, threadId)
+    else activeThreadOwners.delete(event.sender.id)
+  })
   handle(THREADS_CREATE_CHANNEL, async (event, input: unknown) => {
     const parsed = createThreadSchema.parse(input)
     const store = getThreadStore()
@@ -314,6 +354,7 @@ app.whenReady().then(() => {
     if (activeThreadChats.has(threadId)) {
       throw new Error('Arrêtez la génération avant de supprimer ce thread.')
     }
+    await terminalManager.close(threadId, event.sender.id)
     if (thread.environmentStatus === 'terminated') return store.deleteThread(threadId)
     if (thread.projectPath && thread.workspacePath) {
       const project = thread.environmentStatus === 'active'
@@ -371,6 +412,46 @@ app.whenReady().then(() => {
       diff,
       workspaceMode: thread.workspaceMode === 'worktree' ? 'worktree' as const : 'direct' as const
     }
+  })
+  handle(TERMINAL_START_CHANNEL, async (event, input: unknown) => {
+    const request = terminalStartSchema.parse(input)
+    if (activeThreadOwners.get(event.sender.id) !== request.threadId) {
+      throw new Error('Le terminal doit appartenir au thread actuellement sélectionné.')
+    }
+    const store = getThreadStore()
+    const thread = store.getThread(request.threadId)
+    if (!thread) throw new Error('Le thread local est introuvable.')
+    await openThreadProject(thread.id)
+    const cwd = thread.workspacePath ?? thread.projectPath
+    if (!cwd || !thread.projectPath) {
+      throw new Error('Un projet actif est requis pour ouvrir le terminal.')
+    }
+    const profile = store.getWorkerProfile(thread.projectPath)
+      ?? store.saveWorkerProfile(await defaultWorkerProfile(thread.projectPath))
+    return terminalManager.start({
+      ...request,
+      ownerId: event.sender.id,
+      cwd,
+      profile
+    })
+  })
+  handle(TERMINAL_WRITE_CHANNEL, (event, input: unknown) => {
+    const request = terminalWriteSchema.parse(input)
+    if (activeThreadOwners.get(event.sender.id) !== request.threadId) {
+      throw new Error('Ce terminal n’appartient plus au thread sélectionné.')
+    }
+    terminalManager.write(request.threadId, event.sender.id, request.data)
+  })
+  handle(TERMINAL_RESIZE_CHANNEL, (event, input: unknown) => {
+    const request = terminalResizeSchema.parse(input)
+    if (activeThreadOwners.get(event.sender.id) !== request.threadId) {
+      throw new Error('Ce terminal n’appartient plus au thread sélectionné.')
+    }
+    terminalManager.resize(request.threadId, event.sender.id, request.cols, request.rows)
+  })
+  handle(TERMINAL_CLOSE_CHANNEL, (event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    return terminalManager.close(threadId, event.sender.id)
   })
   handle(CHAT_START_CHANNEL, async (event, input: unknown) => {
     const parsed = chatRequestSchema.safeParse(input)
@@ -501,7 +582,15 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  if (process.platform !== 'darwin') {
+    const cleanup = windowTerminalCleanup ?? terminalManager.closeAll()
+    void cleanup
+      .catch((error: unknown) => console.error(
+        'Terminal cleanup failed during shutdown:',
+        error instanceof Error ? error.message : 'unknown error'
+      ))
+      .finally(() => app.quit())
+  }
 })
 
 app.on('will-quit', () => {
@@ -519,10 +608,15 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(CHAT_START_CHANNEL)
   ipcMain.removeHandler(CHAT_CANCEL_CHANNEL)
   ipcMain.removeHandler(THREADS_LIST_CHANNEL)
+  ipcMain.removeHandler(THREADS_SET_ACTIVE_CHANNEL)
   ipcMain.removeHandler(THREADS_CREATE_CHANNEL)
   ipcMain.removeHandler(THREADS_MESSAGES_CHANNEL)
   ipcMain.removeHandler(THREADS_DELETE_CHANNEL)
   ipcMain.removeHandler(THREADS_REVIEW_PROJECT_CHANNEL)
+  ipcMain.removeHandler(TERMINAL_START_CHANNEL)
+  ipcMain.removeHandler(TERMINAL_WRITE_CHANNEL)
+  ipcMain.removeHandler(TERMINAL_RESIZE_CHANNEL)
+  ipcMain.removeHandler(TERMINAL_CLOSE_CHANNEL)
   for (const controller of activeChats.values()) controller.abort()
   activeChats.clear()
   threadStore?.close()

@@ -19,6 +19,29 @@ const artifactDirectory = path.resolve('ci-artifacts', 'unsigned', target)
 
 fs.mkdirSync(artifactDirectory, { recursive: true })
 
+if (target === 'windows') {
+  const nodePty = path.resolve(
+    'dist',
+    'win-unpacked',
+    'resources',
+    'app.asar.unpacked',
+    'node_modules',
+    'node-pty',
+  )
+  if (fs.existsSync(path.join(nodePty, 'build'))) {
+    console.error('The Windows package contains a host node-pty build that can shadow its Windows prebuilds.')
+    process.exit(1)
+  }
+  for (const name of ['conpty.node', 'pty.node']) {
+    const nativeModule = path.join(nodePty, 'prebuilds', 'win32-x64', name)
+    const signature = fs.readFileSync(nativeModule).subarray(0, 2).toString('ascii')
+    if (signature !== 'MZ') {
+      console.error(`The Windows node-pty module is not a PE binary: ${nativeModule}`)
+      process.exit(1)
+    }
+  }
+}
+
 for (const name of expectedNames) {
   const source = path.resolve('dist', name)
   let stats
