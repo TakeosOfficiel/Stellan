@@ -114,6 +114,23 @@ const migrations = [
           ELSE NULL
         END,
         environment_updated_at = updated_at;
+  `,
+  `
+    CREATE TRIGGER project_worker_profiles_validate_insert
+    BEFORE INSERT ON project_worker_profiles
+    WHEN (NEW.mode = 'direct' AND NEW.runtime IS NOT NULL)
+      OR (NEW.mode = 'container' AND NEW.runtime IS NULL)
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid worker profile mode/runtime');
+    END;
+
+    CREATE TRIGGER project_worker_profiles_validate_update
+    BEFORE UPDATE ON project_worker_profiles
+    WHEN (NEW.mode = 'direct' AND NEW.runtime IS NOT NULL)
+      OR (NEW.mode = 'container' AND NEW.runtime IS NULL)
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid worker profile mode/runtime');
+    END;
   `
 ]
 
@@ -146,10 +163,15 @@ function toMessage(row: StorageRow): Message {
 }
 
 function toWorkerProfile(row: StorageRow): WorkerProfile {
+  const mode = row.mode === 'direct' || row.mode === 'container' ? row.mode : null
+  const runtime = row.runtime === 'docker' || row.runtime === 'podman' ? row.runtime : null
+  if (!mode || (mode === 'container' && !runtime) || (mode === 'direct' && runtime)) {
+    throw new Error(`Invalid persisted worker profile for ${String(row.project_path)}`)
+  }
   return {
     projectPath: String(row.project_path),
-    mode: row.mode === 'container' ? 'container' : 'direct',
-    runtime: row.runtime === 'docker' || row.runtime === 'podman' ? row.runtime : null,
+    mode,
+    runtime,
     cpuLimit: Number(row.cpu_limit),
     memoryMb: Number(row.memory_mb),
     image: String(row.image),

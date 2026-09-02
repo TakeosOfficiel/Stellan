@@ -9,7 +9,8 @@ export function createWorkerCommandExecutor(
   projectPath: string,
   executor: ContainerExecutor = executeInContainer
 ) {
-  if (profile?.mode !== 'container' || !profile.runtime) return undefined
+  if (!profile || profile.mode === 'direct') return undefined
+  if (!profile.runtime) throw new Error('Le profil conteneur est invalide : aucun runtime n’est défini.')
 
   return (command: string, args: readonly string[], options: {
     timeoutMs: number

@@ -139,6 +139,12 @@ function requireSuccess(result: CommandResult, operation: string): void {
   }
 }
 
+function containerIsAlreadyRemoved(result: CommandResult): boolean {
+  return result.exitCode === 0 || /no such container|no container with name|does not exist/i.test(
+    `${result.stderr}\n${result.stdout}`
+  )
+}
+
 export async function detectContainerRuntime(
   runner: CommandRunner = runCommand
 ): Promise<ContainerRuntime | null> {
@@ -281,12 +287,21 @@ export async function executeInContainer(
   if (!NETWORK_PATTERN.test(network)) throw new Error('network is not a valid container network')
 
   const containerName = `local-agent-${options.threadId}`
+  const identityArgs = process.platform === 'linux'
+    ? options.runtime === 'podman'
+      ? ['--userns', 'keep-id']
+      : typeof process.getuid === 'function' && typeof process.getgid === 'function'
+        ? ['--user', `${process.getuid()}:${process.getgid()}`]
+        : []
+    : []
   const args = [
     'run', '--rm',
     '--name', containerName,
+    '--pull', 'never',
     '--cpus', String(options.cpuLimit),
     '--memory', options.memoryLimit,
     '--network', network,
+    ...identityArgs,
     '--read-only',
     '--security-opt', 'no-new-privileges',
     '--cap-drop', 'ALL',
@@ -305,11 +320,25 @@ export async function executeInContainer(
       maxOutputBytes: 2_000_000
     })
   } finally {
-    await runner(
-      options.runtime,
-      ['rm', '--force', containerName],
-      { timeoutMs: 10_000 }
-    )
+    let cleanupResult: CommandResult | null = null
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      cleanupResult = await runner(
+        options.runtime,
+        ['rm', '--force', containerName],
+        { timeoutMs: 10_000 }
+      )
+      if (containerIsAlreadyRemoved(cleanupResult) && !cleanupResult.timedOut) break
+    }
+    if (!cleanupResult || !containerIsAlreadyRemoved(cleanupResult) || cleanupResult.timedOut) {
+      requireSuccess(cleanupResult ?? {
+        exitCode: null,
+        signal: null,
+        stdout: '',
+        stderr: 'container cleanup did not run',
+        timedOut: false,
+        outputTruncated: false
+      }, 'Container cleanup')
+    }
   }
 }
 

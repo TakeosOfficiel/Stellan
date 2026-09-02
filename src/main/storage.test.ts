@@ -197,6 +197,16 @@ describe('ThreadStore', () => {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE project_worker_profiles (
+        project_path TEXT PRIMARY KEY,
+        mode TEXT NOT NULL CHECK (mode IN ('direct', 'container')),
+        runtime TEXT CHECK (runtime IN ('docker', 'podman') OR runtime IS NULL),
+        cpu_limit REAL NOT NULL,
+        memory_mb INTEGER NOT NULL,
+        image TEXT NOT NULL,
+        network TEXT NOT NULL CHECK (network IN ('none', 'bridge')),
+        updated_at TEXT NOT NULL
+      );
       INSERT INTO threads VALUES
         ('worktree', 'Worktree', '/project', '/workspace', 'worktree', NULL, '2026-01-01', '2026-01-02'),
         ('direct', 'Direct', '/project', NULL, 'direct', NULL, '2026-01-01', '2026-01-02'),
@@ -281,6 +291,23 @@ describe('ThreadStore', () => {
       })
     } finally {
       reopened.close()
+    }
+  })
+
+  it('rejects inconsistent worker mode and runtime at the database boundary', () => {
+    const store = new ThreadStore(temporaryDatabase())
+    try {
+      expect(() => store.saveWorkerProfile({
+        projectPath: '/invalid',
+        mode: 'container',
+        runtime: null,
+        cpuLimit: 1,
+        memoryMb: 1024,
+        image: 'node:22-bookworm',
+        network: 'none'
+      })).toThrow('invalid worker profile mode/runtime')
+    } finally {
+      store.close()
     }
   })
 })

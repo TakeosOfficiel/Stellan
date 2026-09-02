@@ -230,7 +230,7 @@ describe('executeInContainer', () => {
     const projectPath = await temporaryDirectory()
     const runner = vi.fn<CommandRunner>()
       .mockResolvedValueOnce(result({ stdout: 'done\n' }))
-      .mockResolvedValueOnce(result({ exitCode: 1 }))
+      .mockResolvedValueOnce(result({ exitCode: 1, stderr: 'no such container' }))
 
     await expect(executeInContainer({
       runtime: 'podman',
@@ -252,9 +252,11 @@ describe('executeInContainer', () => {
     expect(runArgs).toEqual([
       'run', '--rm',
       '--name', 'local-agent-thread-123',
+      '--pull', 'never',
       '--cpus', '1.5',
       '--memory', '512m',
       '--network', 'none',
+      '--userns', 'keep-id',
       '--read-only',
       '--security-opt', 'no-new-privileges',
       '--cap-drop', 'ALL',
@@ -267,6 +269,7 @@ describe('executeInContainer', () => {
     ])
     expect(runArgs?.filter((argument) => argument === '--mount')).toHaveLength(1)
     expect(runArgs?.join(' ')).not.toContain('docker.sock')
+    expect(runArgs).toContain('never')
     expect(runner.mock.calls[1]).toEqual([
       'podman',
       ['rm', '--force', 'local-agent-thread-123'],
@@ -324,6 +327,26 @@ describe('executeInContainer', () => {
       signal: controller.signal,
       maxOutputBytes: 2_000_000
     })
+  })
+
+  it('retries cleanup and fails closed when the container cannot be removed', async () => {
+    const projectPath = await temporaryDirectory()
+    const cleanupFailure = result({ exitCode: 1, stderr: 'daemon unavailable' })
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(cleanupFailure)
+      .mockResolvedValueOnce(cleanupFailure)
+
+    await expect(executeInContainer({
+      runtime: 'docker',
+      threadId: 'cleanup-failure',
+      projectPath,
+      image: 'node:22-bookworm',
+      command: ['node', '--version'],
+      cpuLimit: 1,
+      memoryLimit: '1g'
+    }, runner)).rejects.toThrow('Container cleanup failed: daemon unavailable')
+    expect(runner).toHaveBeenCalledTimes(3)
   })
 
   it('validates container inputs before command execution', async () => {

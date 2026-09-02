@@ -102,8 +102,8 @@ const writeSchema = z.object({
   content: z.string().max(2_000_000)
 })
 const commandSchema = z.object({
-  command: z.string().min(1).max(500),
-  args: z.array(z.string().max(10_000)).max(100).default([])
+  command: z.string().min(1).max(500).refine((value) => !/[\u0000-\u001f\u007f]/.test(value)),
+  args: z.array(z.string().max(10_000).refine((value) => !/[\u0000-\u001f\u007f]/.test(value))).max(100).default([])
 })
 
 type ToolStatus = 'running' | 'done' | 'denied' | 'error'
