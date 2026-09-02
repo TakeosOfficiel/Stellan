@@ -309,7 +309,6 @@ export function App(): React.JSX.Element {
       {view === 'agent' ? (
         <WorkspaceView
           status={status}
-          runtime={setup?.runtime ?? null}
           shortcut={workspaceShortcut}
           onShortcutHandled={() => setWorkspaceShortcut(null)}
           onOpenSetup={() => setView('setup')}

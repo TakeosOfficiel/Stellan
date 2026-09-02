@@ -8,9 +8,7 @@ import type {
   DictationProgress,
   OllamaStatus,
   ProjectSelection,
-  RuntimeInfo,
-  StoredThread,
-  WorkerProfile
+  StoredThread
 } from '../../shared/contracts'
 import { prepareWhisperAudio } from './dictation-audio'
 import { WorkbenchPanel } from './WorkbenchPanel'
@@ -23,7 +21,6 @@ import {
 
 type WorkspaceViewProps = {
   status: OllamaStatus | null | 'loading'
-  runtime: RuntimeInfo | null
   shortcut: { type: 'new-thread' | 'open-project' } | null
   onShortcutHandled: () => void
   onOpenSetup: () => void
@@ -173,7 +170,6 @@ type DictationCapture = {
 
 export function WorkspaceView({
   status,
-  runtime,
   shortcut,
   onShortcutHandled,
   onOpenSetup
@@ -193,13 +189,8 @@ export function WorkspaceView({
   const [editingContent, setEditingContent] = useState('')
   const [toolsByThread, setToolsByThread] = useState<Record<string, ToolActivity[]>>({})
   const [fileReveal, setFileReveal] = useState<{ threadId: string; path: string; nonce: number } | null>(null)
-  const [workerProfile, setWorkerProfile] = useState<WorkerProfile | null>(null)
-  const [workerDraft, setWorkerDraft] = useState<WorkerProfile | null>(null)
-  const [workerPanelOpen, setWorkerPanelOpen] = useState(false)
   const [threadMenuOpen, setThreadMenuOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [workerError, setWorkerError] = useState<string | null>(null)
-  const [savingWorker, setSavingWorker] = useState(false)
   const [dictationState, setDictationState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
   const [dictationProgress, setDictationProgress] = useState<DictationProgress | null>(null)
   const [dictationError, setDictationError] = useState<string | null>(null)
@@ -207,9 +198,6 @@ export function WorkspaceView({
   const dictationCaptureRef = useRef<DictationCapture | null>(null)
   const newThreadButtonRef = useRef<HTMLButtonElement>(null)
   const projectSwitcherRef = useRef<HTMLButtonElement>(null)
-  const workerTriggerRef = useRef<HTMLButtonElement>(null)
-  const workerCloseRef = useRef<HTMLButtonElement>(null)
-  const workerPanelRef = useRef<HTMLElement>(null)
   const threadMenuButtonRef = useRef<HTMLButtonElement>(null)
   const runHistoryTriggerRef = useRef<HTMLButtonElement>(null)
   const messagesScrollRef = useRef<HTMLDivElement>(null)
@@ -374,18 +362,8 @@ export function WorkspaceView({
   }, [])
 
   useEffect(() => {
-    if (workerPanelOpen) workerCloseRef.current?.focus()
-  }, [workerPanelOpen])
-
-  useEffect(() => {
     const handleEscape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-
-      if (workerPanelOpen) {
-        event.preventDefault()
-        closeWorkerPanel()
-        return
-      }
 
       if (threadMenuOpen) {
         event.preventDefault()
@@ -403,7 +381,7 @@ export function WorkspaceView({
 
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [runHistoryOpen, threadMenuOpen, workerPanelOpen])
+  }, [runHistoryOpen, threadMenuOpen])
 
   useEffect(() => {
     if (!shortcut || handledShortcutRef.current === shortcut) return
@@ -422,11 +400,6 @@ export function WorkspaceView({
 
   function closeThreadMenu(): void {
     setThreadMenuOpen(false)
-  }
-
-  function closeWorkerPanel(): void {
-    setWorkerPanelOpen(false)
-    requestAnimationFrame(() => workerTriggerRef.current?.focus())
   }
 
   function storeRunHistory(threadId: string, runs: AgentRunSummary[]): void {
@@ -468,9 +441,6 @@ export function WorkspaceView({
     closeThreadMenu()
     const selection = await window.localAgent.selectProject()
     if (selection) {
-      const profile = await window.localAgent.getWorkerProfile(selection.path)
-      setWorkerProfile(profile)
-      setWorkerDraft(profile)
       await createProjectThread(selection)
       setProject(selection)
       focusComposer()
@@ -528,14 +498,6 @@ export function WorkspaceView({
       : null)
     if (thread.model) setSelectedModel(thread.model)
     setToolsByThread((current) => ({ ...current, [thread.id]: current[thread.id] ?? [] }))
-    if (thread.projectPath) {
-      const profile = await window.localAgent.getWorkerProfile(thread.projectPath)
-      setWorkerProfile(profile)
-      setWorkerDraft(profile)
-    } else {
-      setWorkerProfile(null)
-      setWorkerDraft(null)
-    }
   }
 
   async function newThread(): Promise<void> {
@@ -555,39 +517,12 @@ export function WorkspaceView({
     focusComposer()
   }
 
-  async function saveWorkerProfile(): Promise<void> {
-    if (!workerDraft) return
-    setSavingWorker(true)
-    setWorkerError(null)
-    try {
-      const saved = await window.localAgent.saveWorkerProfile({
-        projectPath: workerDraft.projectPath,
-        mode: workerDraft.mode,
-        runtime: workerDraft.mode === 'container' ? workerDraft.runtime : null,
-        cpuLimit: workerDraft.cpuLimit,
-        memoryMb: workerDraft.memoryMb,
-        image: workerDraft.image,
-        network: workerDraft.network,
-        maxConcurrentWorkers: workerDraft.maxConcurrentWorkers
-      })
-      setWorkerProfile(saved)
-      setWorkerDraft(saved)
-      closeWorkerPanel()
-    } catch (error) {
-      setWorkerError(error instanceof Error ? error.message : 'Le profil worker n’a pas pu être enregistré.')
-    } finally {
-      setSavingWorker(false)
-    }
-  }
-
   async function removeThread(threadId: string): Promise<void> {
     try {
       if (!await window.localAgent.deleteThread(threadId)) return
       setThreads((current) => current.filter((thread) => thread.id !== threadId && thread.parentThreadId !== threadId))
       if (activeThreadId === threadId || threads.find((thread) => thread.id === activeThreadId)?.parentThreadId === threadId) await newThread()
-    } catch {
-      setWorkerError('Impossible de supprimer ce thread pendant son utilisation.')
-    }
+    } catch { /* Le thread actif reste affiché. */ }
   }
 
   async function sendMessage(): Promise<void> {
@@ -859,22 +794,6 @@ export function WorkspaceView({
           <kbd>Ctrl/Cmd N</kbd>
         </button>
 
-        {project && workerProfile && (
-          <button
-            ref={workerTriggerRef}
-            className="worker-profile-summary"
-            type="button"
-            aria-haspopup="dialog"
-            aria-expanded={workerPanelOpen}
-            aria-label={`Configurer le profil worker de ${project.name}`}
-            onClick={() => setWorkerPanelOpen(true)}
-          >
-            <span aria-hidden="true">◇</span>
-            <span><small>WORKER DU PROJET</small><strong>{workerProfile.mode === 'container' ? workerProfile.runtime : 'Direct'}</strong></span>
-            <span>{workerProfile.maxConcurrentWorkers}× · {workerProfile.cpuLimit} CPU · {Math.round(workerProfile.memoryMb / 1024)} Go</span>
-          </button>
-        )}
-
         <div className="thread-list">
           <div className="thread-group-heading">
             <span className="agent-mark">◒</span>
@@ -1137,99 +1056,6 @@ export function WorkspaceView({
         revealFile={fileReveal}
         onChooseProject={() => void chooseProject()}
       />
-
-      {workerPanelOpen && workerDraft && (
-        <div className="worker-panel-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) closeWorkerPanel()
-        }}>
-          <section
-            ref={workerPanelRef}
-            className="worker-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="worker-panel-title"
-            onKeyDown={(event) => {
-              if (event.key !== 'Tab') return
-              const focusable = Array.from(workerPanelRef.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'
-              ) ?? [])
-              const first = focusable[0]
-              const last = focusable.at(-1)
-              if (!first || !last) return
-              if (event.shiftKey && document.activeElement === first) {
-                event.preventDefault()
-                last.focus()
-              } else if (!event.shiftKey && document.activeElement === last) {
-                event.preventDefault()
-                first.focus()
-              }
-            }}
-          >
-            <header>
-              <div><p className="eyebrow">PROJET · {project?.name}</p><h2 id="worker-panel-title">Profil du worker</h2></div>
-              <button ref={workerCloseRef} type="button" aria-label="Fermer le profil du worker" onClick={closeWorkerPanel}>×</button>
-            </header>
-            <p>Tous les outils de l’agent — lecture, écriture, recherche, Git et commandes — s’exécutent dans le conteneur persistant de ce thread.</p>
-
-            <div className="storage-limit-note">
-              <span>Mode d’exécution</span>
-              <strong>{workerDraft.mode === 'container' ? 'Conteneur isolé' : 'Runtime privé indisponible'}</strong>
-              <small>Le mode natif n’est pas proposé : activez WSL 2 pour créer le worker privé.</small>
-            </div>
-
-            {workerDraft.mode === 'container' && (
-              <>
-                <label>Runtime
-                  <select value={workerDraft.runtime ?? ''} onChange={(event) => setWorkerDraft({
-                    ...workerDraft,
-                    runtime: event.target.value as 'docker' | 'podman'
-                  })}>
-                    <option value="docker" disabled={!runtime?.docker.available}>Docker</option>
-                    <option value="podman" disabled={!runtime?.podman.available}>Podman</option>
-                  </select>
-                </label>
-                <label>Image du worker
-                  <input value={workerDraft.image} onChange={(event) => setWorkerDraft({ ...workerDraft, image: event.target.value })} />
-                </label>
-              </>
-            )}
-
-            <div className="worker-resource-grid">
-              <label>CPU
-                <input type="number" min="0.5" max="128" step="0.5" value={workerDraft.cpuLimit} onChange={(event) => setWorkerDraft({ ...workerDraft, cpuLimit: Number(event.target.value) })} />
-              </label>
-              <label>RAM (Mo)
-                <input type="number" min="512" step="256" value={workerDraft.memoryMb} onChange={(event) => setWorkerDraft({ ...workerDraft, memoryMb: Number(event.target.value) })} />
-              </label>
-              <label>Workers simultanés
-                <input type="number" min="1" max="32" step="1" value={workerDraft.maxConcurrentWorkers} onChange={(event) => setWorkerDraft({ ...workerDraft, maxConcurrentWorkers: Number(event.target.value) })} />
-              </label>
-            </div>
-
-            {activeThread?.workspaceMode === 'direct' && workerDraft.maxConcurrentWorkers > 1 && (
-              <p className="worker-warning">Ce thread partage le dossier du projet : les workers qui utilisent ce même dossier restent sérialisés pour éviter des écritures concurrentes.</p>
-            )}
-
-            {workerDraft.mode === 'container' && (
-              <label>Réseau
-                <select value={workerDraft.network} onChange={(event) => setWorkerDraft({ ...workerDraft, network: event.target.value as 'none' | 'bridge' })}>
-                  <option value="none">Désactivé</option>
-                  <option value="bridge">Autorisé</option>
-                </select>
-              </label>
-            )}
-
-            <div className="storage-limit-note"><span>Stockage</span><strong>Volume worker dédié + projet monté</strong><small>Les données internes utilisent un volume Docker par thread. Le projet reste monté depuis le worktree afin que ses modifications soient visibles sur le PC ; aucune limite disque dure n’est simulée.</small></div>
-            {workerError && <p className="worker-error" role="alert">{workerError}</p>}
-            <footer>
-              <button className="secondary-button" type="button" onClick={closeWorkerPanel}>Annuler</button>
-              <button type="button" disabled={savingWorker || workerDraft.mode !== 'container' || !workerDraft.runtime} onClick={() => void saveWorkerProfile()}>
-                {savingWorker ? 'Enregistrement…' : 'Enregistrer le profil'}
-              </button>
-            </footer>
-          </section>
-        </div>
-      )}
     </section>
   )
 }
