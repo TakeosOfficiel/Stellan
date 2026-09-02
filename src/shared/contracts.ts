@@ -79,10 +79,11 @@ export type ChatRequest = {
 }
 
 export type ChatEvent =
-  | { requestId: string; type: 'content'; content: string }
-  | { requestId: string; type: 'tool'; tool: string; status: 'running' | 'done' | 'denied' | 'error' }
-  | { requestId: string; type: 'done' }
-  | { requestId: string; type: 'error'; reason: string }
+  | { requestId: string; threadId: string; type: 'status'; status: 'queued' | 'running' }
+  | { requestId: string; threadId: string; type: 'content'; content: string }
+  | { requestId: string; threadId: string; type: 'tool'; tool: string; status: 'running' | 'done' | 'denied' | 'error' }
+  | { requestId: string; threadId: string; type: 'done' }
+  | { requestId: string; threadId: string; type: 'error'; reason: string }
 
 export type ProjectSelection = {
   path: string
@@ -97,7 +98,14 @@ export type WorkerProfile = {
   memoryMb: number
   image: string
   network: 'none' | 'bridge'
+  maxConcurrentWorkers: number
   updatedAt: string
+}
+
+export type ActiveRun = {
+  requestId: string
+  threadId: string
+  status: 'queued' | 'running'
 }
 
 export type SaveWorkerProfileRequest = Omit<WorkerProfile, 'updatedAt'>
@@ -178,6 +186,7 @@ export type LocalAgentApi = {
   saveWorkerProfile: (profile: SaveWorkerProfileRequest) => Promise<WorkerProfile>
   startChat: (request: ChatRequest) => Promise<void>
   cancelChat: (requestId: string) => Promise<void>
+  listActiveRuns: () => Promise<ActiveRun[]>
   onChatEvent: (listener: (event: ChatEvent) => void) => () => void
   listThreads: () => Promise<StoredThread[]>
   setActiveThread: (threadId: string | null) => Promise<void>

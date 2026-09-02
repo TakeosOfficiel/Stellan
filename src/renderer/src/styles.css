@@ -345,6 +345,8 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .thread-row.active { background: #242c27; }
 .thread-row .branch { color: #465049; font: 11px ui-monospace, monospace; }
 .thread-agent { color: #aeb765; font-size: 8px; }
+.thread-agent.running { color: #67d6a5; animation: pulse 1s ease-in-out infinite alternate; }
+.thread-agent.queued { color: #e7b64f; }
 .thread-row button { padding: 6px 3px; color: #a1aaa4; font-size: 9px; }
 .thread-row.active button:first-of-type { color: #dde3df; }
 .thread-row .thread-delete { width: 20px; padding: 3px; opacity: 0; text-align: center; }
@@ -454,6 +456,7 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 }
 .worker-panel input:focus, .worker-panel select:focus { border-color: #69796e; }
 .worker-resource-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.worker-warning { margin: 0 0 15px !important; padding: 10px; border-radius: 6px; color: #e7c57f !important; background: #292316; }
 .storage-limit-note { display: grid; gap: 4px; margin: 4px 0 18px; padding: 12px; border: 1px solid #29312c; border-radius: 7px; background: #151a17; }
 .storage-limit-note span { color: #69736d; font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
 .storage-limit-note strong { color: #b8c1ba; font-size: 10px; }

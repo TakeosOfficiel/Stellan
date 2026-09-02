@@ -27,6 +27,7 @@ const api: LocalAgentApi = {
   saveWorkerProfile: (profile) => ipcRenderer.invoke('worker-profile:save', profile),
   startChat: (request) => ipcRenderer.invoke('chat:start', request),
   cancelChat: (requestId) => ipcRenderer.invoke('chat:cancel', requestId),
+  listActiveRuns: () => ipcRenderer.invoke('chat:list-active'),
   onChatEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, chatEvent: ChatEvent): void => {
       listener(chatEvent)

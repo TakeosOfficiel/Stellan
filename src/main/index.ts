@@ -11,6 +11,7 @@ import { createThreadWorktree, getRuntimeInfo, removeThreadWorktree } from './ru
 import { ThreadStore } from './storage'
 import { TerminalManager } from './terminal'
 import { createWorkerCommandExecutor } from './worker-runtime'
+import { WorkerScheduler } from './worker-scheduler'
 
 const OLLAMA_STATUS_CHANNEL = 'ollama:get-status'
 const OLLAMA_START_CHANNEL = 'ollama:start'
@@ -23,6 +24,7 @@ const WORKER_PROFILE_GET_CHANNEL = 'worker-profile:get'
 const WORKER_PROFILE_SAVE_CHANNEL = 'worker-profile:save'
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_CANCEL_CHANNEL = 'chat:cancel'
+const CHAT_LIST_ACTIVE_CHANNEL = 'chat:list-active'
 const CHAT_EVENT_CHANNEL = 'chat:event'
 const THREADS_LIST_CHANNEL = 'threads:list'
 const THREADS_SET_ACTIVE_CHANNEL = 'threads:set-active'
@@ -74,7 +76,8 @@ const workerProfileSchema = z.object({
   cpuLimit: z.number().min(0.5).max(128),
   memoryMb: z.number().int().min(512).max(1_048_576),
   image: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/).max(300),
-  network: z.enum(['none', 'bridge'])
+  network: z.enum(['none', 'bridge']),
+  maxConcurrentWorkers: z.number().int().min(1).max(32)
 }).superRefine((profile, context) => {
   if (profile.mode === 'container' && !profile.runtime) {
     context.addIssue({ code: 'custom', message: 'Un runtime est requis pour le mode conteneur.' })
@@ -86,6 +89,7 @@ const workerProfileSchema = z.object({
 let activeDownload: string | null = null
 const activeChats = new Map<string, AbortController>()
 const activeThreadChats = new Map<string, string>()
+const workerScheduler = new WorkerScheduler()
 const activeThreadOwners = new Map<number, string>()
 const approvedProjectPaths = new Set<string>()
 let threadStore: ThreadStore | null = null
@@ -130,14 +134,21 @@ async function openThreadProject(threadId: string): Promise<ProjectTools> {
 
 async function defaultWorkerProfile(projectPath: string) {
   const hardware = await getHardwareInfo()
+  const cpuLimit = Math.max(1, Math.min(4, Math.floor(hardware.cpuCores / 2)))
+  const memoryMb = Math.max(1024, Math.min(8192, Math.floor(hardware.totalMemoryBytes / 4 / 1_000_000)))
   return {
     projectPath,
     mode: 'direct' as const,
     runtime: null,
-    cpuLimit: Math.max(1, Math.min(4, Math.floor(hardware.cpuCores / 2))),
-    memoryMb: Math.max(1024, Math.min(8192, Math.floor(hardware.totalMemoryBytes / 4 / 1_000_000))),
+    cpuLimit,
+    memoryMb,
     image: 'node:22-bookworm',
-    network: 'none' as const
+    network: 'none' as const,
+    maxConcurrentWorkers: Math.max(1, Math.min(
+      2,
+      Math.floor(hardware.cpuCores / cpuLimit),
+      Math.floor(hardware.totalMemoryBytes / 1_000_000 / memoryMb)
+    ))
   }
 }
 
@@ -285,7 +296,9 @@ app.whenReady().then(() => {
         throw new Error(`Le runtime ${profile.runtime ?? 'conteneur'} n’est pas disponible.`)
       }
     }
-    return getThreadStore().saveWorkerProfile(profile)
+    const saved = getThreadStore().saveWorkerProfile(profile)
+    workerScheduler.updateProjectLimit(profile.projectPath, profile.maxConcurrentWorkers)
+    return saved
   })
   handle(THREADS_LIST_CHANNEL, () => getThreadStore().listThreads())
   handle(THREADS_SET_ACTIVE_CHANNEL, async (event, input: unknown) => {
@@ -352,7 +365,7 @@ app.whenReady().then(() => {
     const store = getThreadStore()
     const thread = store.getThread(threadId)
     if (!thread) return false
-    if (activeThreadChats.has(threadId)) {
+    if (workerScheduler.hasThread(threadId)) {
       throw new Error('Arrêtez la génération avant de supprimer ce thread.')
     }
     await terminalManager.close(threadId, event.sender.id)
@@ -466,148 +479,158 @@ app.whenReady().then(() => {
       throw new Error('Ce thread exécute déjà une génération.')
     }
 
-    const controller = new AbortController()
-    activeChats.set(parsed.data.requestId, controller)
-    if (parsed.data.threadId) {
-      activeThreadChats.set(parsed.data.threadId, parsed.data.requestId)
+    const store = getThreadStore()
+    const thread = store.getThread(parsed.data.threadId)
+    if (!thread) throw new Error('Le thread local est introuvable.')
+    if (thread.environmentStatus !== 'active' && thread.projectPath) {
+      throw new Error(thread.environmentError ?? 'L’environnement de ce thread n’est pas actif.')
     }
-    let assistantContent = ''
-    let toolAssistantCharacters = 0
-    let runId: string | null = null
+    const profile = thread.projectPath
+      ? store.getWorkerProfile(thread.projectPath) ?? store.saveWorkerProfile(await defaultWorkerProfile(thread.projectPath))
+      : null
+    if (thread.projectPath && !profile) throw new Error('Le profil worker du projet est invalide.')
+    if (profile?.mode === 'container') {
+      const runtime = await getRuntimeInfo()
+      if (!profile.runtime || !runtime[profile.runtime].available) {
+        throw new Error(`Le runtime ${profile.runtime ?? 'conteneur'} n’est pas disponible.`)
+      }
+    }
+    const latestUserMessage = [...parsed.data.messages].reverse().find((message) => message.role === 'user')
+    if (!latestUserMessage) throw new Error('La demande ne contient aucun nouveau message utilisateur.')
+    const run = store.startAgentRun(thread.id, parsed.data.requestId, parsed.data.model, latestUserMessage.content)
+    const controller = new AbortController()
+    activeThreadChats.set(thread.id, parsed.data.requestId)
     const send = (payload: object): void => {
       if (!event.sender.isDestroyed()) {
-        event.sender.send(CHAT_EVENT_CHANNEL, { requestId: parsed.data.requestId, ...payload })
+        event.sender.send(CHAT_EVENT_CHANNEL, { requestId: parsed.data.requestId, threadId: thread.id, ...payload })
       }
     }
+    send({ type: 'status', status: 'queued' })
 
-    try {
-      let executionPath = parsed.data.projectPath
-      let thread = null
-      let promptMessages = parsed.data.messages
-      if (parsed.data.threadId) {
-        const store = getThreadStore()
-        thread = store.getThread(parsed.data.threadId)
-        if (!thread) throw new Error('Le thread local est introuvable.')
-        executionPath = thread.workspacePath ?? thread.projectPath
-        const latestUserMessage = [...parsed.data.messages].reverse().find((message) => message.role === 'user')
-        if (!latestUserMessage) throw new Error('La demande ne contient aucun nouveau message utilisateur.')
-        const run = store.startAgentRun(
-          parsed.data.threadId,
-          parsed.data.requestId,
-          parsed.data.model,
-          latestUserMessage.content
-        )
-        runId = run.id
-        promptMessages = store.listPromptMessages(parsed.data.threadId)
-      }
+    workerScheduler.enqueue({
+      requestId: parsed.data.requestId,
+      threadId: thread.id,
+      projectKey: thread.projectPath ?? '__local-chat__',
+      isolationKey: thread.workspaceMode === 'direct' ? thread.projectPath : null,
+      maxConcurrentWorkers: profile?.maxConcurrentWorkers ?? 1,
+      cancelQueued: () => {
+        store.finishAgentRun(run.id, 'interrupted', '', 'Génération annulée dans la file d’attente.')
+        activeThreadChats.delete(thread.id)
+        send({ type: 'error', reason: 'Génération annulée dans la file d’attente.' })
+      },
+      run: async () => {
+        activeChats.set(parsed.data.requestId, controller)
+        store.markAgentRunRunning(run.id)
+        send({ type: 'status', status: 'running' })
+        let assistantContent = ''
+        let toolAssistantCharacters = 0
+        try {
+          const executionPath = thread.workspacePath ?? thread.projectPath
+          const promptMessages = store.listPromptMessages(thread.id)
 
-      const onContent = (content: string): void => {
-        assistantContent += content
-        send({ type: 'content', content })
-      }
-      if (executionPath) {
-        if (!await modelSupportsTools(parsed.data.model)) {
-          throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
-        }
-        const project = thread
-          ? await openThreadProject(thread.id)
-          : await ProjectTools.create(executionPath)
-        const workerProfile = thread?.projectPath
-          ? getThreadStore().getWorkerProfile(thread.projectPath)
-          : null
-        await runCodingAgent({
-          model: parsed.data.model,
-          messages: promptMessages,
-          project,
-          signal: controller.signal,
-          onContent,
-          onTool: (tool, status) => send({ type: 'tool', tool, status }),
-          onToolEvent: runId
-            ? async (toolEvent: AgentToolLifecycleEvent) => {
+          const onContent = (content: string): void => {
+            assistantContent += content
+            send({ type: 'content', content })
+          }
+          if (executionPath) {
+            if (!await modelSupportsTools(parsed.data.model)) {
+              throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
+            }
+            const project = await openThreadProject(thread.id)
+            await runCodingAgent({
+              model: parsed.data.model,
+              messages: promptMessages,
+              project,
+              signal: controller.signal,
+              onContent,
+              onTool: (tool, status) => send({ type: 'tool', tool, status }),
+              onToolEvent: async (toolEvent: AgentToolLifecycleEvent) => {
                 const store = getThreadStore()
                 if (toolEvent.type === 'started') {
-                  store.recordToolStarted(runId as string, toolEvent)
+                  store.recordToolStarted(run.id, toolEvent)
                   if (toolEvent.callIndex === 0) {
                     toolAssistantCharacters += toolEvent.assistantContent.length
                   }
                 } else {
                   store.recordToolFinished(
-                    runId as string,
+                    run.id,
                     toolEvent.callId,
                     toolEvent.status,
                     toolEvent.result
                   )
                 }
+              },
+              runCommand: createWorkerCommandExecutor(profile, thread.id, executionPath),
+              authorize: async (tool, summary) => {
+                const owner = BrowserWindow.fromWebContents(event.sender)
+                const options = {
+                  type: 'warning' as const,
+                  title: 'Autoriser une action',
+                  message: tool === 'write_file'
+                    ? 'Autoriser la modification du projet ?'
+                    : 'Autoriser cette commande ?',
+                  detail: summary,
+                  buttons: ['Refuser', 'Autoriser'],
+                  defaultId: 0,
+                  cancelId: 0,
+                  noLink: true
+                }
+                const result = owner
+                  ? await dialog.showMessageBox(owner, options)
+                  : await dialog.showMessageBox(options)
+                if (controller.signal.aborted) return false
+                return result.response === 1
               }
-            : undefined,
-          runCommand: thread
-            ? createWorkerCommandExecutor(workerProfile, thread.id, executionPath)
-            : undefined,
-          authorize: async (tool, summary) => {
-            const owner = BrowserWindow.fromWebContents(event.sender)
-            const options = {
-              type: 'warning' as const,
-              title: 'Autoriser une action',
-              message: tool === 'write_file'
-                ? 'Autoriser la modification du projet ?'
-                : 'Autoriser cette commande ?',
-              detail: summary,
-              buttons: ['Refuser', 'Autoriser'],
-              defaultId: 0,
-              cancelId: 0,
-              noLink: true
-            }
-            const result = owner
-              ? await dialog.showMessageBox(owner, options)
-              : await dialog.showMessageBox(options)
-            if (controller.signal.aborted) return false
-            return result.response === 1
+            })
+          } else {
+            await streamOllamaChat(
+              parsed.data.model,
+              compactConversation([
+                { role: 'system', content: 'Tu es un assistant local utile, précis et concis.' },
+                ...promptMessages.filter((message) => message.role !== 'system')
+              ]),
+              onContent,
+              controller.signal
+            )
           }
-        })
-      } else {
-        await streamOllamaChat(
-          parsed.data.model,
-          compactConversation([
-            { role: 'system', content: 'Tu es un assistant local utile, précis et concis.' },
-            ...promptMessages.filter((message) => message.role !== 'system')
-          ]),
-          onContent,
-          controller.signal
-        )
+          getThreadStore().finishAgentRun(
+            run.id,
+            'completed',
+            assistantContent.slice(toolAssistantCharacters)
+          )
+          send({ type: 'done' })
+        } catch (error) {
+          const reason = controller.signal.aborted
+            ? 'Génération interrompue.'
+            : error instanceof Error ? error.message : 'La génération a échoué.'
+          const finalContent = assistantContent.slice(toolAssistantCharacters)
+          getThreadStore().finishAgentRun(
+            run.id,
+            controller.signal.aborted ? 'interrupted' : 'error',
+            finalContent
+              ? `${finalContent}\n\n${controller.signal.aborted ? '[Réponse interrompue]' : '[Réponse incomplète]'}`
+              : '',
+            reason
+          )
+          send({ type: 'error', reason })
+        } finally {
+          activeChats.delete(parsed.data.requestId)
+          activeThreadChats.delete(thread.id)
+        }
       }
-      if (runId) {
-        getThreadStore().finishAgentRun(
-          runId,
-          'completed',
-          assistantContent.slice(toolAssistantCharacters)
-        )
-      }
-      send({ type: 'done' })
-    } catch (error) {
-      const reason = controller.signal.aborted
-        ? 'Génération interrompue.'
-        : error instanceof Error ? error.message : 'La génération a échoué.'
-      if (runId) {
-        const finalContent = assistantContent.slice(toolAssistantCharacters)
-        getThreadStore().finishAgentRun(
-          runId,
-          controller.signal.aborted ? 'interrupted' : 'error',
-          finalContent
-            ? `${finalContent}\n\n${controller.signal.aborted ? '[Réponse interrompue]' : '[Réponse incomplète]'}`
-            : '',
-          reason
-        )
-      }
-      send({ type: 'error', reason })
-    } finally {
-      activeChats.delete(parsed.data.requestId)
-      if (parsed.data.threadId) activeThreadChats.delete(parsed.data.threadId)
-    }
+    })
   })
   handle(CHAT_CANCEL_CHANNEL, (_event, input: unknown) => {
     const parsed = requestIdSchema.safeParse(input)
-    if (parsed.success) activeChats.get(parsed.data)?.abort()
+    if (!parsed.success) return
+    const state = workerScheduler.cancel(parsed.data)
+    if (state === 'running') activeChats.get(parsed.data)?.abort()
   })
+  handle(CHAT_LIST_ACTIVE_CHANNEL, () => getThreadStore().listActiveAgentRuns().map((run) => ({
+    requestId: run.requestId,
+    threadId: run.threadId,
+    status: run.status as 'queued' | 'running'
+  })))
   createWindow()
 
   app.on('activate', () => {
@@ -641,6 +664,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(WORKER_PROFILE_SAVE_CHANNEL)
   ipcMain.removeHandler(CHAT_START_CHANNEL)
   ipcMain.removeHandler(CHAT_CANCEL_CHANNEL)
+  ipcMain.removeHandler(CHAT_LIST_ACTIVE_CHANNEL)
   ipcMain.removeHandler(THREADS_LIST_CHANNEL)
   ipcMain.removeHandler(THREADS_SET_ACTIVE_CHANNEL)
   ipcMain.removeHandler(THREADS_CREATE_CHANNEL)
@@ -651,6 +675,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(TERMINAL_WRITE_CHANNEL)
   ipcMain.removeHandler(TERMINAL_RESIZE_CHANNEL)
   ipcMain.removeHandler(TERMINAL_CLOSE_CHANNEL)
+  workerScheduler.shutdown()
   for (const controller of activeChats.values()) controller.abort()
   activeChats.clear()
   threadStore?.recoverInterruptedAgentRuns()

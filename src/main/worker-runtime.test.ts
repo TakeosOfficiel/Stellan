@@ -10,6 +10,7 @@ const profile: WorkerProfile = {
   memoryMb: 4096,
   image: 'node:22-bookworm',
   network: 'none',
+  maxConcurrentWorkers: 2,
   updatedAt: '2026-01-01'
 }
 

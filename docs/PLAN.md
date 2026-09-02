@@ -246,6 +246,10 @@ Les mises à jour automatiques signées, la signature des artefacts, les smoke t
 - plugins avec permissions déclaratives ;
 - contrôle à distance et partage de threads.
 
+Première tranche réalisée pour les agents parallèles locaux : chaque profil projet persiste un plafond de workers simultanés, initialisé prudemment depuis les cœurs CPU et la RAM détectés. Un ordonnanceur FIFO par projet dans le processus principal applique ce plafond et conserve l’invariant d’une génération par thread. Les événements IPC portent l’identifiant du thread et de la requête ; le renderer conserve donc séparément les états `queued`/`running`, les sorties partielles et l’activité des outils pendant les changements de thread. L’annulation retire une entrée de file ou interrompt son worker, et la suppression d’un thread refuse de nettoyer son environnement tant que l’un de ces états existe.
+
+Le journal SQLite distingue maintenant les runs en attente des runs actifs et marque les deux comme interrompus après une fermeture ou un redémarrage. Un profil ou runtime invalide bloque le démarrage. Les threads en worktree sont parallélisables ; ceux qui partagent le dossier projet en mode direct sont sérialisés même si le plafond est supérieur, car les opérations de fichiers restent sur l’hôte. Le plafond ne promet pas une exécution simultanée du modèle : Ollama garde sa propre politique de concurrence et de chargement. Restent hors de cette tranche la reprise automatique d’une file après redémarrage, la réservation dynamique de CPU/RAM, la suspension de workers, plusieurs modèles coordonnés et l’exécution distante.
+
 ## 10. Stratégie de vérification
 
 - tests unitaires des contrats, politiques et transitions de l'agent ;

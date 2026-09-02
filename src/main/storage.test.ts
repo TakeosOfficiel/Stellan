@@ -80,6 +80,7 @@ describe('ThreadStore', () => {
     const firstStore = new ThreadStore(path)
     const thread = firstStore.createThread({ title: 'Durable agent' })
     const run = firstStore.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Inspecte le projet')
+    firstStore.markAgentRunRunning(run.id)
     firstStore.recordToolStarted(run.id, {
       callId: '0:0',
       step: 0,
@@ -141,6 +142,7 @@ describe('ThreadStore', () => {
     try {
       const thread = store.createThread({ title: 'Canceled agent' })
       const run = store.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Lance la commande')
+      store.markAgentRunRunning(run.id)
       store.recordToolStarted(run.id, {
         callId: '0:0',
         step: 0,
@@ -175,6 +177,7 @@ describe('ThreadStore', () => {
     const firstStore = new ThreadStore(path)
     const thread = firstStore.createThread({ title: 'Restarted agent' })
     const run = firstStore.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Continue')
+    firstStore.markAgentRunRunning(run.id)
     firstStore.recordToolStarted(run.id, {
       callId: '0:0',
       step: 0,
@@ -197,6 +200,26 @@ describe('ThreadStore', () => {
         'interrupted'
       ])
       expect(reopened.recoverInterruptedAgentRuns()).toBe(0)
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('journals queued runs and marks them interrupted after restart', () => {
+    const path = temporaryDatabase()
+    const firstStore = new ThreadStore(path)
+    const thread = firstStore.createThread({ title: 'Queued agent' })
+    const run = firstStore.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Wait')
+    expect(firstStore.listActiveAgentRuns()).toEqual([run])
+    firstStore.close()
+
+    const reopened = new ThreadStore(path)
+    try {
+      expect(reopened.recoverInterruptedAgentRuns()).toBe(1)
+      expect(reopened.getAgentRun(run.id)).toMatchObject({
+        status: 'interrupted',
+        error: 'Application fermée pendant la génération.'
+      })
     } finally {
       reopened.close()
     }
@@ -307,7 +330,7 @@ describe('ThreadStore', () => {
       })
       const version = new DatabaseSync(path, { readOnly: true })
       try {
-        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(5)
+        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(6)
       } finally {
         version.close()
       }
@@ -400,15 +423,19 @@ describe('ThreadStore', () => {
         cpuLimit: 2,
         memoryMb: 4096,
         image: 'node:22-bookworm',
-        network: 'none'
+        network: 'none',
+        maxConcurrentWorkers: 2
       })
-      expect(created).toMatchObject({ projectPath: '/project', cpuLimit: 2, memoryMb: 4096 })
+      expect(created).toMatchObject({
+        projectPath: '/project', cpuLimit: 2, memoryMb: 4096, maxConcurrentWorkers: 2
+      })
       expect(store.saveWorkerProfile({
         ...created,
         mode: 'direct',
         runtime: null,
         cpuLimit: 1,
-        memoryMb: 2048
+        memoryMb: 2048,
+        maxConcurrentWorkers: 3
       })).toMatchObject({ mode: 'direct', runtime: null, cpuLimit: 1, memoryMb: 2048 })
     } finally {
       store.close()
@@ -420,7 +447,8 @@ describe('ThreadStore', () => {
         mode: 'direct',
         runtime: null,
         cpuLimit: 1,
-        memoryMb: 2048
+        memoryMb: 2048,
+        maxConcurrentWorkers: 3
       })
     } finally {
       reopened.close()
@@ -437,8 +465,19 @@ describe('ThreadStore', () => {
         cpuLimit: 1,
         memoryMb: 1024,
         image: 'node:22-bookworm',
-        network: 'none'
+        network: 'none',
+        maxConcurrentWorkers: 1
       })).toThrow('invalid worker profile mode/runtime')
+      expect(() => store.saveWorkerProfile({
+        projectPath: '/invalid-resources',
+        mode: 'direct',
+        runtime: null,
+        cpuLimit: 1,
+        memoryMb: 1024,
+        image: 'node:22-bookworm',
+        network: 'none',
+        maxConcurrentWorkers: 0
+      })).toThrow('invalid worker profile resources')
     } finally {
       store.close()
     }

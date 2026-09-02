@@ -46,7 +46,7 @@ export type AppendMessageInput = {
   content: string
 }
 
-export type AgentRunStatus = 'running' | 'completed' | 'interrupted' | 'error'
+export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'interrupted' | 'error'
 
 export type AgentRun = {
   id: string
@@ -85,6 +85,7 @@ export type WorkerProfile = {
   memoryMb: number
   image: string
   network: 'none' | 'bridge'
+  maxConcurrentWorkers: number
   updatedAt: string
 }
 
@@ -197,6 +198,54 @@ const migrations = [
       ON agent_runs(thread_id, started_at);
     CREATE INDEX agent_tool_events_run_id_sequence
       ON agent_tool_events(run_id, sequence);
+  `,
+  `
+    ALTER TABLE project_worker_profiles
+      ADD COLUMN max_concurrent_workers INTEGER NOT NULL DEFAULT 1;
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE agent_runs_new (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      request_id TEXT NOT NULL UNIQUE,
+      user_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      model TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'interrupted', 'error')),
+      error TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+    INSERT INTO agent_runs_new SELECT * FROM agent_runs;
+
+    CREATE TABLE agent_tool_events_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL REFERENCES agent_runs_new(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL,
+      call_id TEXT NOT NULL,
+      step INTEGER NOT NULL,
+      call_index INTEGER NOT NULL,
+      tool TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('running', 'done', 'denied', 'error', 'interrupted')),
+      arguments_json TEXT,
+      result TEXT,
+      assistant_content TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (run_id, sequence)
+    );
+    INSERT INTO agent_tool_events_new SELECT * FROM agent_tool_events;
+    DROP TABLE agent_tool_events;
+    DROP TABLE agent_runs;
+    ALTER TABLE agent_runs_new RENAME TO agent_runs;
+    ALTER TABLE agent_tool_events_new RENAME TO agent_tool_events;
+    CREATE INDEX agent_runs_thread_id_started_at ON agent_runs(thread_id, started_at);
+    CREATE INDEX agent_tool_events_run_id_sequence ON agent_tool_events(run_id, sequence);
   `
 ]
 
@@ -231,17 +280,27 @@ function toMessage(row: StorageRow): Message {
 function toWorkerProfile(row: StorageRow): WorkerProfile {
   const mode = row.mode === 'direct' || row.mode === 'container' ? row.mode : null
   const runtime = row.runtime === 'docker' || row.runtime === 'podman' ? row.runtime : null
-  if (!mode || (mode === 'container' && !runtime) || (mode === 'direct' && runtime)) {
+  const cpuLimit = Number(row.cpu_limit)
+  const memoryMb = Number(row.memory_mb)
+  const maxConcurrentWorkers = Number(row.max_concurrent_workers)
+  if (
+    !mode || (mode === 'container' && !runtime) || (mode === 'direct' && runtime) ||
+    !Number.isFinite(cpuLimit) || cpuLimit < 0.5 ||
+    !Number.isInteger(memoryMb) || memoryMb < 512 ||
+    !Number.isInteger(maxConcurrentWorkers) || maxConcurrentWorkers < 1 || maxConcurrentWorkers > 32 ||
+    (row.network !== 'none' && row.network !== 'bridge')
+  ) {
     throw new Error(`Invalid persisted worker profile for ${String(row.project_path)}`)
   }
   return {
     projectPath: String(row.project_path),
     mode,
     runtime,
-    cpuLimit: Number(row.cpu_limit),
-    memoryMb: Number(row.memory_mb),
+    cpuLimit,
+    memoryMb,
     image: String(row.image),
-    network: row.network === 'bridge' ? 'bridge' : 'none',
+    network: row.network,
+    maxConcurrentWorkers,
     updatedAt: String(row.updated_at)
   }
 }
@@ -491,7 +550,7 @@ export class ThreadStore {
       this.database.prepare(`
         INSERT INTO agent_runs (
           id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL)
+        ) VALUES (?, ?, ?, ?, ?, 'queued', NULL, ?, NULL)
       `).run(runId, threadId, requestId, userMessage.id, model, startedAt)
       this.database.prepare('UPDATE threads SET model = ?, updated_at = ? WHERE id = ?')
         .run(model, startedAt, threadId)
@@ -502,6 +561,23 @@ export class ThreadStore {
     }
 
     return this.getAgentRun(runId) as AgentRun
+  }
+
+  markAgentRunRunning(runId: string): AgentRun {
+    this.assertOpen()
+    const result = this.database.prepare(`
+      UPDATE agent_runs SET status = 'running' WHERE id = ? AND status = 'queued'
+    `).run(runId)
+    if (result.changes === 0) throw new Error(`Agent run is not queued: ${runId}`)
+    return this.getAgentRun(runId) as AgentRun
+  }
+
+  listActiveAgentRuns(): AgentRun[] {
+    this.assertOpen()
+    return this.database.prepare(`
+      SELECT id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
+      FROM agent_runs WHERE status IN ('queued', 'running') ORDER BY started_at ASC, rowid ASC
+    `).all().map(toAgentRun)
   }
 
   getAgentRun(id: string): AgentRun | null {
@@ -615,14 +691,14 @@ export class ThreadStore {
 
   finishAgentRun(
     runId: string,
-    status: Exclude<AgentRunStatus, 'running'>,
+    status: Exclude<AgentRunStatus, 'queued' | 'running'>,
     assistantContent: string,
     error?: string
   ): AgentRun {
     this.assertOpen()
     const run = this.getAgentRun(runId)
     if (!run) throw new Error(`Agent run not found: ${runId}`)
-    if (run.status !== 'running') return run
+    if (run.status !== 'running' && run.status !== 'queued') return run
     const finishedAt = new Date().toISOString()
 
     this.database.exec('BEGIN')
@@ -634,7 +710,7 @@ export class ThreadStore {
       this.database.prepare(`
         UPDATE agent_runs
         SET status = ?, error = ?, finished_at = ?
-        WHERE id = ? AND status = 'running'
+        WHERE id = ? AND status IN ('queued', 'running')
       `).run(status, error?.trim() || null, finishedAt, runId)
       this.database.exec('COMMIT')
     } catch (caught) {
@@ -647,7 +723,7 @@ export class ThreadStore {
   recoverInterruptedAgentRuns(): number {
     this.assertOpen()
     const runs = this.database.prepare(`
-      SELECT id FROM agent_runs WHERE status = 'running' ORDER BY started_at ASC, rowid ASC
+      SELECT id FROM agent_runs WHERE status IN ('queued', 'running') ORDER BY started_at ASC, rowid ASC
     `).all()
     if (runs.length === 0) return 0
     const finishedAt = new Date().toISOString()
@@ -658,7 +734,7 @@ export class ThreadStore {
       this.database.prepare(`
         UPDATE agent_runs
         SET status = 'interrupted', error = 'Application fermée pendant la génération.', finished_at = ?
-        WHERE status = 'running'
+        WHERE status IN ('queued', 'running')
       `).run(finishedAt)
       this.database.exec('COMMIT')
     } catch (error) {
@@ -717,7 +793,8 @@ export class ThreadStore {
   getWorkerProfile(projectPath: string): WorkerProfile | null {
     this.assertOpen()
     const row = this.database.prepare(`
-      SELECT project_path, mode, runtime, cpu_limit, memory_mb, image, network, updated_at
+      SELECT project_path, mode, runtime, cpu_limit, memory_mb, image, network,
+             max_concurrent_workers, updated_at
       FROM project_worker_profiles
       WHERE project_path = ?
     `).get(projectPath)
@@ -726,11 +803,22 @@ export class ThreadStore {
 
   saveWorkerProfile(input: SaveWorkerProfileInput): WorkerProfile {
     this.assertOpen()
+    if (
+      !Number.isFinite(input.cpuLimit) || input.cpuLimit < 0.5 || input.cpuLimit > 128 ||
+      !Number.isInteger(input.memoryMb) || input.memoryMb < 512 || input.memoryMb > 1_048_576 ||
+      !Number.isInteger(input.maxConcurrentWorkers) ||
+      input.maxConcurrentWorkers < 1 || input.maxConcurrentWorkers > 32 ||
+      !/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/.test(input.image) || input.image.length > 300 ||
+      (input.network !== 'none' && input.network !== 'bridge')
+    ) {
+      throw new Error('invalid worker profile resources')
+    }
     const updatedAt = new Date().toISOString()
     this.database.prepare(`
       INSERT INTO project_worker_profiles (
-        project_path, mode, runtime, cpu_limit, memory_mb, image, network, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        project_path, mode, runtime, cpu_limit, memory_mb, image, network,
+        max_concurrent_workers, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_path) DO UPDATE SET
         mode = excluded.mode,
         runtime = excluded.runtime,
@@ -738,6 +826,7 @@ export class ThreadStore {
         memory_mb = excluded.memory_mb,
         image = excluded.image,
         network = excluded.network,
+        max_concurrent_workers = excluded.max_concurrent_workers,
         updated_at = excluded.updated_at
     `).run(
       input.projectPath,
@@ -747,6 +836,7 @@ export class ThreadStore {
       input.memoryMb,
       input.image,
       input.network,
+      input.maxConcurrentWorkers,
       updatedAt
     )
     return this.getWorkerProfile(input.projectPath) as WorkerProfile

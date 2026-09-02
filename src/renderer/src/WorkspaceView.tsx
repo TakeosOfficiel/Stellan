@@ -10,11 +10,12 @@ import type {
   WorkerProfile
 } from '../../shared/contracts'
 import { TerminalPanel } from './TerminalPanel'
-
-type UiMessage = ChatMessage & {
-  id: string
-  failed?: boolean
-}
+import {
+  applyMessageEvent,
+  applyRunEvent,
+  type ChatUiMessage as UiMessage,
+  type ThreadRunState
+} from './worker-state'
 
 type WorkspaceViewProps = {
   status: OllamaStatus | null | 'loading'
@@ -56,10 +57,10 @@ export function WorkspaceView({
   const [project, setProject] = useState<ProjectSelection | null>(null)
   const [threads, setThreads] = useState<StoredThread[]>([])
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
-  const [messages, setMessages] = useState<UiMessage[]>([])
+  const [messagesByThread, setMessagesByThread] = useState<Record<string, UiMessage[]>>({})
   const [prompt, setPrompt] = useState('')
-  const [activeRequest, setActiveRequest] = useState<string | null>(null)
-  const [toolActivities, setToolActivities] = useState<ToolActivity[]>([])
+  const [runsByThread, setRunsByThread] = useState<ThreadRunState>({})
+  const [toolsByThread, setToolsByThread] = useState<Record<string, ToolActivity[]>>({})
   const [projectReview, setProjectReview] = useState<ProjectReview | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [workerProfile, setWorkerProfile] = useState<WorkerProfile | null>(null)
@@ -78,6 +79,11 @@ export function WorkspaceView({
   const workerPanelRef = useRef<HTMLElement>(null)
   const threadMenuButtonRef = useRef<HTMLButtonElement>(null)
   const handledShortcutRef = useRef<typeof shortcut>(null)
+  const messageKey = activeThreadId ?? '__draft__'
+  const messages = messagesByThread[messageKey] ?? []
+  const activeRun = activeThreadId ? runsByThread[activeThreadId] : undefined
+  const activeRequest = activeRun?.requestId ?? null
+  const toolActivities = activeThreadId ? toolsByThread[activeThreadId] ?? [] : []
 
   const effectiveModel = useMemo(() => {
     if (models.some((model) => model.name === selectedModel)) return selectedModel
@@ -85,7 +91,13 @@ export function WorkspaceView({
   }, [models, selectedModel])
 
   useEffect(() => {
-    void window.localAgent.listThreads().then(setThreads)
+    void Promise.all([window.localAgent.listThreads(), window.localAgent.listActiveRuns()]).then(([storedThreads, runs]) => {
+      setThreads(storedThreads)
+      setRunsByThread(Object.fromEntries(runs.map((run) => [run.threadId, {
+        requestId: run.requestId,
+        status: run.status
+      }])))
+    })
   }, [])
 
   useEffect(() => {
@@ -98,37 +110,35 @@ export function WorkspaceView({
 
   useEffect(() => {
     const handleEvent = (event: ChatEvent): void => {
+      if (event.type === 'status') {
+        setRunsByThread((current) => applyRunEvent(current, event))
+        setMessagesByThread((current) => applyMessageEvent(current, event))
+        return
+      }
       if (event.type === 'tool') {
-        setToolActivities((current) => {
+        setToolsByThread((all) => {
+          const current = all[event.threadId] ?? []
           const running = [...current].reverse().find(
             (activity) => activity.tool === event.tool && activity.status === 'running'
           )
           if (running && event.status !== 'running') {
-            return current.map((activity) => activity.id === running.id
+            return { ...all, [event.threadId]: current.map((activity) => activity.id === running.id
               ? { ...activity, status: event.status }
-              : activity)
+              : activity) }
           }
-          return [...current, { id: crypto.randomUUID(), tool: event.tool, status: event.status }]
+          return { ...all, [event.threadId]: [...current, { id: crypto.randomUUID(), tool: event.tool, status: event.status }] }
         })
         return
       }
       if (event.type === 'content') {
-        setMessages((current) => current.map((message) =>
-          message.id === event.requestId
-            ? { ...message, content: message.content + event.content }
-            : message
-        ))
+        setMessagesByThread((current) => applyMessageEvent(current, event))
         return
       }
 
       if (event.type === 'error') {
-        setMessages((current) => current.map((message) =>
-          message.id === event.requestId
-            ? { ...message, content: message.content || event.reason, failed: true }
-            : message
-        ))
+        setMessagesByThread((current) => applyMessageEvent(current, event))
       }
-      setActiveRequest((current) => current === event.requestId ? null : current)
+      setRunsByThread((current) => applyRunEvent(current, event))
     }
 
     return window.localAgent.onChatEvent(handleEvent)
@@ -200,19 +210,40 @@ export function WorkspaceView({
 
   async function openThread(thread: StoredThread): Promise<void> {
     await closeTerminal()
-    const storedMessages = await window.localAgent.loadThreadMessages(thread.id)
     await window.localAgent.setActiveThread(thread.id)
+    let storedMessages = await window.localAgent.loadThreadMessages(thread.id)
+    const activeRuns = await window.localAgent.listActiveRuns()
+    const active = activeRuns.find((run) => run.threadId === thread.id)
+    if (!active) storedMessages = await window.localAgent.loadThreadMessages(thread.id)
     setActiveThreadId(thread.id)
-    setMessages(storedMessages.map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: message.content
-    })))
+    const ephemeral = active ? { requestId: active.requestId, status: active.status } : undefined
+    setRunsByThread((current) => {
+      if (ephemeral) return { ...current, [thread.id]: ephemeral }
+      if (!current[thread.id]) return current
+      const next = { ...current }
+      delete next[thread.id]
+      return next
+    })
+    setMessagesByThread((current) => {
+      const ephemeralMessage = ephemeral
+        ? current[thread.id]?.find((message) => message.id === ephemeral.requestId)
+        : undefined
+      return { ...current, [thread.id]: [
+        ...storedMessages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content
+        })),
+        ...(ephemeral && !storedMessages.some((message) => message.id === ephemeral.requestId)
+          ? [ephemeralMessage ?? { id: ephemeral.requestId, role: 'assistant' as const, content: '' }]
+          : [])
+      ] }
+    })
     setProject(thread.projectPath
       ? { path: thread.projectPath, name: projectName(thread.projectPath) }
       : null)
     if (thread.model) setSelectedModel(thread.model)
-    setToolActivities([])
+    setToolsByThread((current) => ({ ...current, [thread.id]: current[thread.id] ?? [] }))
     setProjectReview(null)
     setReviewError(null)
     if (thread.projectPath) {
@@ -243,8 +274,7 @@ export function WorkspaceView({
     await closeTerminal()
     await window.localAgent.setActiveThread(null)
     setActiveThreadId(null)
-    setMessages([])
-    setToolActivities([])
+    setMessagesByThread((current) => ({ ...current, __draft__: [] }))
     setProjectReview(null)
     setReviewError(null)
     focusComposer()
@@ -262,7 +292,8 @@ export function WorkspaceView({
         cpuLimit: workerDraft.cpuLimit,
         memoryMb: workerDraft.memoryMb,
         image: workerDraft.image,
-        network: workerDraft.network
+        network: workerDraft.network,
+        maxConcurrentWorkers: workerDraft.maxConcurrentWorkers
       })
       setWorkerProfile(saved)
       setWorkerDraft(saved)
@@ -310,6 +341,7 @@ export function WorkspaceView({
         })
         threadId = thread.id
         await window.localAgent.setActiveThread(thread.id)
+        setMessagesByThread((current) => ({ ...current, [thread.id]: current.__draft__ ?? [] }))
         setActiveThreadId(thread.id)
         setThreads((current) => [...current, thread])
       } catch {
@@ -325,9 +357,12 @@ export function WorkspaceView({
       .map(({ role, content: messageContent }) => ({ role, content: messageContent }))
 
     setPrompt('')
-    setMessages((current) => [...current, userMessage, assistantMessage])
-    setActiveRequest(requestId)
-    setToolActivities([])
+    setMessagesByThread((current) => ({
+      ...current,
+      [threadId]: [...(current[threadId] ?? messages), userMessage, assistantMessage]
+    }))
+    setRunsByThread((current) => ({ ...current, [threadId]: { requestId, status: 'queued' } }))
+    setToolsByThread((current) => ({ ...current, [threadId]: [] }))
     setProjectReview(null)
 
     try {
@@ -348,12 +383,16 @@ export function WorkspaceView({
         ]
       })
     } catch {
-      setMessages((current) => current.map((message) =>
+      setMessagesByThread((current) => ({ ...current, [threadId]: (current[threadId] ?? []).map((message) =>
         message.id === requestId
           ? { ...message, content: 'Impossible de démarrer la conversation.', failed: true }
           : message
-      ))
-      setActiveRequest(null)
+      ) }))
+      setRunsByThread((current) => {
+        const next = { ...current }
+        delete next[threadId]
+        return next
+      })
     }
   }
 
@@ -405,7 +444,7 @@ export function WorkspaceView({
           >
             <span aria-hidden="true">◇</span>
             <span><small>WORKER DU PROJET</small><strong>{workerProfile.mode === 'container' ? workerProfile.runtime : 'Direct'}</strong></span>
-            <span>{workerProfile.cpuLimit} CPU · {Math.round(workerProfile.memoryMb / 1024)} Go</span>
+            <span>{workerProfile.maxConcurrentWorkers}× · {workerProfile.cpuLimit} CPU · {Math.round(workerProfile.memoryMb / 1024)} Go</span>
           </button>
         )}
 
@@ -420,13 +459,15 @@ export function WorkspaceView({
             {threads.map((thread) => (
               <div className={`thread-row ${activeThreadId === thread.id ? 'active' : ''}`} key={thread.id}>
                 <span className="branch" aria-hidden="true">├</span>
-                <span className="thread-agent" aria-hidden="true">●</span>
+                <span className={`thread-agent ${runsByThread[thread.id]?.status ?? ''}`} aria-label={runsByThread[thread.id]
+                  ? runsByThread[thread.id]?.status === 'queued' ? 'Worker en attente' : 'Worker en cours'
+                  : undefined}>●</span>
                 <button type="button" title={thread.title} onClick={() => void openThread(thread)}>{thread.title}</button>
                 <button
                   className="thread-delete"
                   type="button"
                   aria-label={`Supprimer ${thread.title}`}
-                  disabled={Boolean(activeRequest) && activeThreadId === thread.id}
+                  disabled={Boolean(runsByThread[thread.id])}
                   onClick={() => void removeThread(thread.id)}
                 >×</button>
               </div>
@@ -451,7 +492,6 @@ export function WorkspaceView({
                 aria-label="Modèle actif"
                 value={effectiveModel}
                 onChange={(event) => setSelectedModel(event.target.value)}
-                disabled={Boolean(activeRequest)}
               >
                 {models.map((model) => <option value={model.name} key={model.name}>{model.name}</option>)}
               </select>
@@ -547,7 +587,7 @@ export function WorkspaceView({
             ) : messages.map((message) => (
               <article className={`message ${message.role} ${message.failed ? 'failed' : ''}`} key={message.id}>
                 <span>{message.role === 'user' ? 'Vous' : 'Agent'}</span>
-                <p>{message.content || (activeRequest === message.id ? 'Réflexion…' : '')}</p>
+                <p>{message.content || (activeRequest === message.id ? (activeRun?.status === 'queued' ? 'En attente…' : 'Réflexion…') : '')}</p>
               </article>
             ))}
             {toolActivities.length > 0 && (
@@ -672,7 +712,14 @@ export function WorkspaceView({
               <label>RAM (Mo)
                 <input type="number" min="512" step="256" value={workerDraft.memoryMb} onChange={(event) => setWorkerDraft({ ...workerDraft, memoryMb: Number(event.target.value) })} />
               </label>
+              <label>Workers simultanés
+                <input type="number" min="1" max="32" step="1" value={workerDraft.maxConcurrentWorkers} onChange={(event) => setWorkerDraft({ ...workerDraft, maxConcurrentWorkers: Number(event.target.value) })} />
+              </label>
             </div>
+
+            {activeThread?.workspaceMode === 'direct' && workerDraft.maxConcurrentWorkers > 1 && (
+              <p className="worker-warning">Ce thread partage le dossier du projet : les workers qui utilisent ce même dossier resteront sérialisés. Préférez les worktrees Git ; un conteneur seul n’isole pas encore les outils de fichiers.</p>
+            )}
 
             {workerDraft.mode === 'container' && (
               <label>Réseau
