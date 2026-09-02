@@ -15,6 +15,10 @@ button { font: inherit; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #3a403d; background-clip: padding-box; }
 *::-webkit-scrollbar-thumb:hover { background: #525a56; background-clip: padding-box; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 
 .startup-error {
   display: grid; place-content: center; min-height: 100vh; padding: 30px;
@@ -84,8 +88,34 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .diagnostic-card button { width: 100%; margin-top: 10px; }
 .diagnostic-card button:not(.secondary-button) { color: #111411; background: #e1e5df; }
 .diagnostic-card button:not(.secondary-button):hover { background: #f4f6f2; }
-.secondary-button { color: #b9c0bb; background: #252b28; }
+.secondary-button { color: #d0d6d2; background: #252b28; }
 .secondary-button:hover:not(:disabled) { background: #313934; }
+.ollama-card { min-height: 470px; }
+.setup-checklist { display: grid; gap: 0; margin: 18px 0 0; padding: 0; list-style: none; }
+.setup-checklist li {
+  display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: 9px;
+  min-height: 46px; padding: 7px 0; border-bottom: 1px solid #252c28;
+}
+.setup-checklist li > span {
+  display: grid; place-items: center; width: 20px; height: 20px; border: 1px solid #3a433d;
+  border-radius: 50%; color: #828d86; font-size: 10px; font-weight: 800;
+}
+.setup-checklist li.complete > span { border-color: #36785f; color: #7be2bd; background: rgba(56, 193, 143, 0.1); }
+.setup-checklist li.incomplete > span { border-color: #754646; color: #f1a0a0; background: rgba(210, 70, 70, 0.1); }
+.setup-checklist li > div { display: grid; gap: 2px; min-width: 0; }
+.setup-checklist strong { color: #cbd2cd; font-size: 11px; font-weight: 600; }
+.setup-checklist small { color: #929c95; font-size: 9px; line-height: 1.35; }
+.runtime-message { min-height: 55px; padding-top: 4px; }
+.runtime-message p { margin: 8px 0 0; font-size: 11px; }
+.runtime-actions { display: flex; flex-wrap: wrap; min-height: 37px; align-items: flex-start; }
+.troubleshooting { margin-top: 12px; border-top: 1px solid #29312c; color: #87918a; font-size: 10px; }
+.troubleshooting summary { padding: 12px 0 4px; color: #b6c0b9; cursor: pointer; font-weight: 600; }
+.troubleshooting p { margin: 8px 0; line-height: 1.5; }
+.troubleshooting dl { display: grid; gap: 6px; margin: 10px 0; }
+.troubleshooting dl div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 8px; }
+.troubleshooting dt { color: #6d7770; }
+.troubleshooting dd { margin: 0; }
+.troubleshooting code { color: #c5cec8; font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; }
 .hardware-card dl { display: grid; gap: 13px; margin: 24px 0 0; }
 .hardware-card dl div { padding-bottom: 12px; border-bottom: 1px solid #292b32; }
 .hardware-card dt { color: #6f737e; font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; }
@@ -218,7 +248,7 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 }
 .settings-sidebar nav button:hover, .settings-sidebar nav button.active { color: #e2e7e3; background: #242b27; }
 .settings-sidebar nav button span { width: 18px; color: #9ca69f; text-align: center; }
-.settings-sidebar nav button small { margin-left: auto; color: #58615b; font-size: 7px; text-transform: uppercase; letter-spacing: 0.08em; }
+.settings-sidebar nav button small { margin-left: auto; color: #7b857e; font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
 .settings-back { margin-top: auto; }
 .settings-content { min-width: 0; padding: 0 32px 45px; overflow-y: auto; background: #0c0f0e; }
 .settings-page-header {
@@ -226,7 +256,7 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
   margin: 0 -32px 24px; padding: 0 32px; border-bottom: 1px solid #242925; background: #0f1211;
 }
 .settings-page-header h2 { margin: 6px 0 0; font-size: 22px; letter-spacing: -0.03em; }
-.settings-page-header > p { max-width: 420px; margin: 0; color: #737b76; font-size: 11px; }
+.settings-page-header > p { max-width: 420px; margin: 0; color: #929b95; font-size: 11px; }
 .runtime-panel, .models-section { max-width: 1120px; margin: 0 auto; }
 .runtime-panel { margin-bottom: 30px; }
 .diagnostic-grid { grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr); gap: 10px; }
@@ -437,10 +467,20 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 @media (max-width: 1050px) {
   .intro { grid-template-columns: 1fr; }
   .catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .diagnostic-grid { grid-template-columns: 1fr; }
+  .ollama-card { min-height: 0; }
 }
 
 @media (max-width: 760px) {
   .diagnostic-grid, .catalog-grid { grid-template-columns: 1fr; }
+  .setup-view { grid-template-columns: 1fr; overflow-y: auto; }
+  .settings-sidebar { flex-direction: row; align-items: center; padding: 8px 10px; border-right: 0; border-bottom: 1px solid #252b27; }
+  .settings-sidebar > div { padding: 0 8px; }
+  .settings-sidebar nav { display: none; }
+  .settings-sidebar .settings-back { width: auto; margin: 0 0 0 auto; }
+  .settings-content { padding: 0 18px 35px; overflow: visible; }
+  .settings-page-header { align-items: flex-start; flex-direction: column; gap: 10px; margin: 0 -18px 20px; padding: 20px 18px; }
+  .model-browser { grid-template-columns: 1fr; }
   .workspace-view { grid-template-columns: 1fr; height: calc(100vh - 42px); overflow-y: auto; }
   .workspace-sidebar { min-height: 260px; }
   .chat-panel { min-height: 650px; }

@@ -234,6 +234,10 @@ Le mode direct est présenté comme moins isolé que le mode conteneur. L'applic
 - assistant de première configuration ;
 - documentation utilisateur et dépannage.
 
+État actuel : les paquets Windows et Linux et leur construction CI non signée sont configurés. Le renderer ouvre un assistant au premier lancement, conserve les choix de catégorie et de modèle, et présente séparément l’installation d’Ollama, le démarrage du service, l’accès à l’API locale et la disponibilité d’un modèle. Une vérification actualise ces états sur place sans reconstruire la page. Les actions de démarrage et de téléchargement restent explicites ; l’interface ne simule ni détection d’installation ni installation automatique. Le dépannage intégré documente le port localhost 11434 et les commandes de démarrage Windows/Linux.
+
+Les mises à jour automatiques signées, la signature des artefacts, les smoke tests natifs empaquetés et un diagnostic indépendant de l’installation avant toute tentative de démarrage restent à réaliser. L’état « installation inconnue » est donc volontaire lorsque l’API ne répond pas encore.
+
 ### Phase 6 — Extensions
 
 - agents parallèles lorsque les tâches sont réellement indépendantes ;

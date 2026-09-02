@@ -6,9 +6,18 @@ import type {
   OllamaStatus,
   SetupInfo
 } from '../../shared/contracts'
+import {
+  getOllamaSetupState,
+  installationEvidenceFromStart,
+  type InstallationEvidence,
+  type SetupStepState
+} from './setup-state'
 import { WorkspaceView } from './WorkspaceView'
 
 type LoadState = OllamaStatus | null | 'loading'
+
+const ONBOARDING_KEY = 'local-agent:onboarding-complete'
+const CATEGORY_KEY = 'local-agent:model-category'
 
 const CATEGORIES: Array<{ id: ModelCategory; label: string; description: string }> = [
   { id: 'fast', label: 'Simple et rapide', description: 'Résumés et petites demandes' },
@@ -40,6 +49,17 @@ function compatibilityLabel(model: CatalogModel): string {
 type AppView = 'agent' | 'setup'
 type WorkspaceShortcut = { type: 'new-thread' | 'open-project' }
 
+function initialCategory(): ModelCategory {
+  const saved = localStorage.getItem(CATEGORY_KEY)
+  return CATEGORIES.some((category) => category.id === saved) ? saved as ModelCategory : 'code'
+}
+
+function stepIcon(state: SetupStepState): string {
+  if (state === 'complete') return '✓'
+  if (state === 'incomplete') return '!'
+  return '·'
+}
+
 function TitleBar({ view, onViewChange }: {
   view: AppView
   onViewChange: (view: AppView) => void
@@ -69,22 +89,30 @@ function TitleBar({ view, onViewChange }: {
 }
 
 export function App(): React.JSX.Element {
-  const [view, setView] = useState<AppView>('agent')
+  const [firstRun, setFirstRun] = useState(() => localStorage.getItem(ONBOARDING_KEY) !== 'true')
+  const [view, setView] = useState<AppView>(() => firstRun ? 'setup' : 'agent')
   const [workspaceShortcut, setWorkspaceShortcut] = useState<WorkspaceShortcut | null>(null)
   const [status, setStatus] = useState<LoadState>(null)
   const [setup, setSetup] = useState<SetupInfo | null>(null)
-  const [category, setCategory] = useState<ModelCategory>('code')
+  const [category, setCategory] = useState<ModelCategory>(initialCategory)
   const [pullProgress, setPullProgress] = useState<ModelPullProgress | null>(null)
   const [pullError, setPullError] = useState<string | null>(null)
   const [downloadingModel, setDownloadingModel] = useState<string | null>(null)
   const [checkingOllama, setCheckingOllama] = useState(false)
   const [startingOllama, setStartingOllama] = useState(false)
+  const [installationEvidence, setInstallationEvidence] = useState<InstallationEvidence>('unknown')
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const refreshStatus = useCallback(async () => {
     setCheckingOllama(true)
+    setActionError(null)
     setStatus((current) => current === null ? 'loading' : current)
     try {
-      setStatus(await window.localAgent.getOllamaStatus())
+      const nextStatus = await window.localAgent.getOllamaStatus()
+      setStatus(nextStatus)
+      if (nextStatus.available) setInstallationEvidence('detected')
+    } catch {
+      setActionError('La vérification a échoué. Redémarrez Local Agent puis réessayez.')
     } finally {
       setCheckingOllama(false)
     }
@@ -92,8 +120,13 @@ export function App(): React.JSX.Element {
 
   async function startOllama(): Promise<void> {
     setStartingOllama(true)
+    setActionError(null)
     try {
-      setStatus(await window.localAgent.startOllama())
+      const nextStatus = await window.localAgent.startOllama()
+      setStatus(nextStatus)
+      setInstallationEvidence(installationEvidenceFromStart(nextStatus))
+    } catch {
+      setActionError("Local Agent n'a pas pu lancer Ollama. Utilisez la commande adaptée ci-dessous.")
     } finally {
       setStartingOllama(false)
     }
@@ -107,6 +140,10 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     return window.localAgent.onModelPullProgress(setPullProgress)
   }, [])
+
+  useEffect(() => {
+    localStorage.setItem(CATEGORY_KEY, category)
+  }, [category])
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
@@ -139,7 +176,16 @@ export function App(): React.JSX.Element {
 
   const isLoading = status === null || status === 'loading'
   const canDownload = status !== null && status !== 'loading' && status.available
+  const resolvedStatus = status === 'loading' ? null : status
+  const ollamaSetup = getOllamaSetupState(resolvedStatus, installationEvidence)
+  const isModelReady = ollamaSetup.modelReady === 'complete'
   const starterModel = setup?.models.find((model) => model.id === 'qwen3.5:4b')
+
+  function finishOnboarding(): void {
+    localStorage.setItem(ONBOARDING_KEY, 'true')
+    setFirstRun(false)
+    setView('agent')
+  }
 
   async function downloadModel(model: CatalogModel): Promise<void> {
     setPullError(null)
@@ -182,57 +228,97 @@ export function App(): React.JSX.Element {
           <button type="button" disabled><span>◇</span> Profils workers <small>Bientôt</small></button>
           <button type="button" disabled><span>⌁</span> Accès et portails <small>Bientôt</small></button>
         </nav>
-        <button className="settings-back" type="button" onClick={() => setView('agent')}>← Retour aux threads</button>
+        <button className="settings-back" type="button" onClick={firstRun ? finishOnboarding : () => setView('agent')}>
+          {firstRun ? 'Configurer plus tard' : '← Retour aux threads'}
+        </button>
       </aside>
 
       <div className="settings-content">
       <header className="settings-page-header">
-        <div><p className="eyebrow">LOCAL RUNTIME</p><h2>Modèles locaux</h2></div>
-        <p>Gérez Ollama et choisissez les modèles disponibles pour vos agents.</p>
+        <div>
+          <p className="eyebrow">{firstRun ? 'PREMIÈRE CONFIGURATION' : 'LOCAL RUNTIME'}</p>
+          <h2>{firstRun ? 'Préparer votre agent local' : 'Modèles locaux'}</h2>
+        </div>
+        <p>Vérifiez le moteur local, puis installez le modèle qui correspond à votre machine.</p>
       </header>
 
       <section className="runtime-panel">
         <div className="diagnostic-grid">
-          <article className="diagnostic-card" aria-live="polite">
+          <article className="diagnostic-card ollama-card" aria-labelledby="ollama-heading">
             <div className="card-title-row">
-              <div><span className="label">Moteur local</span><strong>Ollama</strong></div>
-              <span className={`status-dot ${isLoading ? 'loading' : status.available ? 'online' : 'offline'}`} />
+              <div><span className="label">Moteur local</span><strong id="ollama-heading">Ollama</strong></div>
+              <span
+                className={`status-dot ${isLoading || checkingOllama || startingOllama ? 'loading' : resolvedStatus?.available ? 'online' : 'offline'}`}
+                aria-hidden="true"
+              />
             </div>
-            {isLoading ? (
-              <p className="muted">Vérification en cours…</p>
-            ) : status.available ? (
-              <>
-                <p className="success">Ollama {status.version ? `v${status.version}` : ''} est prêt.</p>
-                <p className="muted">{status.models.length} modèle{status.models.length > 1 ? 's' : ''} installé{status.models.length > 1 ? 's' : ''}</p>
-                {status.models.length === 0 && starterModel && (
-                  <button
-                    type="button"
-                    disabled={Boolean(downloadingModel)}
-                    onClick={() => { setCategory('fast'); void downloadModel(starterModel) }}
-                  >
-                    {downloadingModel === starterModel.id ? 'Téléchargement…' : 'Installer le modèle de démarrage'}
-                  </button>
-                )}
-                <button className="secondary-button" type="button" disabled={checkingOllama} onClick={() => void refreshStatus()}>
-                  {checkingOllama ? 'Vérification…' : 'Actualiser'}
+
+            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {checkingOllama ? 'Vérification d’Ollama en cours.' : startingOllama ? 'Démarrage d’Ollama en cours.' :
+                resolvedStatus?.available ? `Ollama est joignable avec ${resolvedStatus.models.length} modèle installé.` :
+                  resolvedStatus?.reason ?? 'Vérification d’Ollama en cours.'}
+            </p>
+
+            <ol className="setup-checklist" aria-label="État de la configuration Ollama">
+              <li className={ollamaSetup.installed}>
+                <span aria-hidden="true">{stepIcon(ollamaSetup.installed)}</span>
+                <div><strong>Application installée</strong><small>{ollamaSetup.installed === 'complete' ? 'Exécutable Ollama détecté' : ollamaSetup.installed === 'incomplete' ? 'Exécutable introuvable' : 'Non vérifié tant que le service ne répond pas'}</small></div>
+              </li>
+              <li className={ollamaSetup.running}>
+                <span aria-hidden="true">{stepIcon(ollamaSetup.running)}</span>
+                <div><strong>Service démarré</strong><small>{ollamaSetup.running === 'complete' ? 'Le serveur local répond' : ollamaSetup.running === 'incomplete' ? 'Le démarrage a échoué' : 'État du processus inconnu'}</small></div>
+              </li>
+              <li className={ollamaSetup.reachable}>
+                <span aria-hidden="true">{stepIcon(ollamaSetup.reachable)}</span>
+                <div><strong>API locale joignable</strong><small>{ollamaSetup.reachable === 'complete' ? `Version ${resolvedStatus?.available && resolvedStatus.version ? resolvedStatus.version : 'détectée'} sur le port 11434` : 'Aucune réponse sur 127.0.0.1 ou localhost:11434'}</small></div>
+              </li>
+              <li className={ollamaSetup.modelReady}>
+                <span aria-hidden="true">{stepIcon(ollamaSetup.modelReady)}</span>
+                <div><strong>Modèle prêt</strong><small>{resolvedStatus?.available && resolvedStatus.models.length > 0 ? `${resolvedStatus.models.length} modèle${resolvedStatus.models.length > 1 ? 's' : ''} installé${resolvedStatus.models.length > 1 ? 's' : ''}` : 'Installez un modèle après la connexion'}</small></div>
+              </li>
+            </ol>
+
+            <div className="runtime-message">
+              {isLoading ? <p className="muted">Première vérification en cours…</p> :
+                resolvedStatus?.available ? <p className={isModelReady ? 'success' : 'muted'}>{isModelReady ? 'Votre moteur local est prêt.' : 'Ollama répond. Il reste à installer un modèle.'}</p> :
+                  <p className="error">{resolvedStatus?.reason}</p>}
+              {actionError && <p className="error" role="alert">{actionError}</p>}
+            </div>
+
+            <div className="runtime-actions">
+              {isModelReady && <button type="button" onClick={finishOnboarding}>Utiliser Local Agent</button>}
+              {!isModelReady && resolvedStatus?.available && starterModel && (
+                <button type="button" disabled={Boolean(downloadingModel)} onClick={() => void downloadModel(starterModel)}>
+                  {downloadingModel === starterModel.id ? 'Téléchargement…' : 'Installer le modèle de démarrage'}
                 </button>
-              </>
-            ) : (
-              <>
-                <p className="error">{status.reason}</p>
-                <p className="muted">
-                  S’il est déjà installé, Local Agent peut démarrer son service automatiquement.
-                </p>
+              )}
+              {!resolvedStatus?.available && ollamaSetup.canStart && (
                 <button type="button" disabled={startingOllama || checkingOllama} onClick={() => void startOllama()}>
-                  {startingOllama ? 'Démarrage…' : 'Démarrer Ollama'}
+                  {startingOllama ? 'Démarrage…' : 'Rechercher et démarrer'}
                 </button>
+              )}
+              {!resolvedStatus?.available && ollamaSetup.canOpenDownload && (
                 <button className="secondary-button" type="button" onClick={() => void window.localAgent.openOllamaDownload()}>
-                  Installer Ollama
+                  Télécharger / réinstaller
                 </button>
-                <button className="secondary-button" type="button" disabled={checkingOllama} onClick={() => void refreshStatus()}>
-                  {checkingOllama ? 'Vérification…' : 'J’ai terminé, vérifier'}
+              )}
+              {!isLoading && (
+                <button className="secondary-button" type="button" disabled={checkingOllama || startingOllama} onClick={() => void refreshStatus()}>
+                  {checkingOllama ? 'Vérification…' : 'Réessayer la connexion'}
                 </button>
-              </>
+              )}
+            </div>
+
+            {!resolvedStatus?.available && !isLoading && (
+              <details className="troubleshooting">
+                <summary>Dépannage rapide</summary>
+                <p><strong>Localhost</strong> désigne ce PC, pas Internet. Local Agent attend l’API Ollama sur le port <code>11434</code>.</p>
+                <dl>
+                  <div><dt>Windows · PowerShell</dt><dd><code>ollama serve</code></dd></div>
+                  <div><dt>Linux · terminal</dt><dd><code>ollama serve</code> ou <code>sudo systemctl start ollama</code></dd></div>
+                </dl>
+                <p>Gardez la commande ouverte, puis choisissez « Réessayer la connexion ». Si le port est utilisé, fermez l’ancien processus Ollama avant de relancer.</p>
+              </details>
             )}
           </article>
 
@@ -282,14 +368,13 @@ export function App(): React.JSX.Element {
         </div>
 
         <div className="model-browser">
-        <div className="category-tabs" role="tablist" aria-label="Types de modèles">
+        <div className="category-tabs" aria-label="Filtrer les modèles par usage">
           {CATEGORIES.map((item) => (
             <button
               className={category === item.id ? 'active' : ''}
               key={item.id}
               type="button"
-              role="tab"
-              aria-selected={category === item.id}
+              aria-pressed={category === item.id}
               onClick={() => setCategory(item.id)}
             >
               <strong>{item.label}</strong>
@@ -334,6 +419,7 @@ export function App(): React.JSX.Element {
                 <button
                   type="button"
                   disabled={disabled}
+                  title={!canDownload ? 'Ollama doit être joignable avant de télécharger un modèle.' : undefined}
                   onClick={() => void downloadModel(model)}
                 >
                   {installed ? 'Installé' : downloading ? 'Téléchargement…' : 'Télécharger ce modèle'}

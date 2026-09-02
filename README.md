@@ -4,7 +4,9 @@ Local Agent est une application de développement assistée par une IA locale. E
 
 La version 0.1 fournit :
 
-- détecte Ollama, sa version et les modèles installés ;
+- guide la première configuration sans bloquer l’accès aux threads ;
+- distingue l’installation d’Ollama, son service, son API locale et la présence d’un modèle ;
+- détecte la version d’Ollama et les modèles installés lorsque son API locale répond ;
 - ouvre l'installation officielle d'Ollama à la demande ;
 - détecte la RAM, le processeur et le GPU ;
 - vérifie séparément Git, Docker et Podman et recommande le runtime worker disponible ;
@@ -22,10 +24,33 @@ La version 0.1 fournit :
 
 Ollama n'est pas obligatoire pour ouvrir l'interface. Aucun logiciel ni modèle n'est installé sans une action explicite de l'utilisateur.
 
+## Première configuration et Ollama
+
+Au premier lancement, l’écran **Modèles** vérifie `127.0.0.1:11434` puis `localhost:11434`. Ces adresses désignent uniquement le PC courant : un échec ne signifie pas que la connexion Internet est coupée, mais que l’API locale d’Ollama ne répond pas. L’application ne prétend pas savoir si Ollama est installé tant qu’elle n’a pas joint son API ou recherché explicitement son exécutable via l’action **Rechercher et démarrer**.
+
+Si Ollama est installé mais reste injoignable :
+
+```powershell
+# Windows — dans PowerShell ; garder cette fenêtre ouverte
+ollama serve
+```
+
+```bash
+# Linux — dans un terminal ; garder cette commande ouverte
+ollama serve
+
+# Ou, pour une installation enregistrée comme service système
+sudo systemctl start ollama
+```
+
+Revenir ensuite dans **Modèles** et choisir **Réessayer la connexion**. Si `ollama` est introuvable, utiliser **Télécharger / réinstaller** et l’installateur officiel, puis ouvrir un nouveau terminal afin que le `PATH` mis à jour soit pris en compte. Si le port 11434 est déjà utilisé, fermer l’ancien processus Ollama avant de relancer le service.
+
+Une API joignable sans modèle n’est pas encore prête pour une conversation. Installer explicitement un modèle du catalogue ; les recommandations décrivent la mémoire détectée mais ne remplacent jamais le choix de l’utilisateur. La catégorie de catalogue et le modèle sélectionné sont conservés lors des nouvelles vérifications.
+
 ## Tester toute la version 0.1
 
-1. Installer Ollama depuis le bouton de l'application ou depuis son site officiel.
-2. Lancer `pnpm dev`, ouvrir l'onglet **Modèles**, puis installer le modèle de démarrage ou un modèle de code compatible avec les outils.
+1. Lancer `pnpm dev` et suivre la première configuration. Installer Ollama depuis l’application ou son site officiel uniquement si nécessaire.
+2. Dans **Modèles**, vérifier séparément le service et l’API locale, puis installer le modèle de démarrage ou un modèle de code compatible avec les outils.
 3. Dans **Agent**, ouvrir un dépôt Git, envoyer une demande de modification, contrôler les confirmations natives, puis utiliser **Voir les changements**.
 4. Dans un thread de projet actif, ouvrir **Terminal**, vérifier les programmes interactifs et le redimensionnement, puis fermer le panneau pour arrêter tout l’arbre de processus.
 5. Arrêter une génération pour vérifier l'annulation, fermer puis rouvrir l'application pour vérifier la persistance, et supprimer le thread. Une confirmation supplémentaire protège les changements non enregistrés.
