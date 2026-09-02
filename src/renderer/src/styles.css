@@ -367,6 +367,7 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .thread-identity h3 { margin: 0; overflow: hidden; color: #cfd6d1; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .chat-header-actions { align-items: center; }
 .ghost-button { border: 1px solid #29312c; color: #8d9790; background: #151a17; }
+.portal-trigger.active { border-color: #355e49; color: #8dddb2; background: #14241b; }
 .thread-menu { position: relative; }
 .thread-menu .thread-menu-trigger {
   display: grid; place-items: center; width: 31px; height: 29px; border-radius: 6px;
@@ -464,6 +465,19 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .worker-error { padding: 10px; border-radius: 6px; color: #f1a0a0 !important; background: #2b1919; }
 .worker-panel footer { display: flex; justify-content: flex-end; gap: 7px; margin-top: 22px; padding-top: 15px; border-top: 1px solid #29312c; }
 .worker-panel footer button { font-size: 10px; }
+.portal-panel form { display: grid; gap: 12px; }
+.portal-panel form > button { justify-self: start; color: #101511; background: #d9e5dc; }
+.portal-panel form > button:hover:not(:disabled) { background: #edf4ef; }
+.portal-ready { display: grid; gap: 10px; margin-bottom: 18px; padding: 12px; border: 1px solid #355e49; border-radius: 7px; background: #132019; }
+.portal-ready > span { color: #78c99d; font-size: 8px; font-weight: 700; letter-spacing: 0.08em; }
+.portal-ready code { overflow: hidden; color: #d8e5dc; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.portal-ready > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.portal-ready button { padding: 8px 10px; font-size: 9px; }
+.portal-ready .portal-stop { color: #f1aaaa; background: #351d20; }
+.portal-public-disabled { display: grid; gap: 4px; margin-top: 24px; padding: 12px; border: 1px solid #29312c; border-radius: 7px; opacity: 0.68; }
+.portal-public-disabled span { color: #69736d; font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
+.portal-public-disabled strong { color: #aab3ad; font-size: 10px; }
+.portal-public-disabled small { color: #69736d; font-size: 9px; line-height: 1.45; }
 
 @keyframes pulse { from { opacity: 0.45; } to { opacity: 1; } }
 

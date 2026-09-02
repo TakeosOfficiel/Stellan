@@ -1,94 +1,61 @@
 # Portails de prévisualisation
 
-## Objectif
+## État livré
 
-Un portail rend un serveur web d’un projet accessible sans exposer arbitrairement la machine. Trois niveaux sont prévus :
+La première tranche fournit un portail de prévisualisation **LOCAL uniquement** pour un thread de projet actif. L’utilisateur ouvre explicitement le panneau du thread, saisit un port numérique et démarre le portail. Le processus principal Electron crée alors un proxy HTTP sur un port aléatoire de `127.0.0.1` et affiche son URL seulement après un contrôle de disponibilité effectué à travers ce proxy.
 
-1. **Local** : accessible uniquement sur la machine ; mode par défaut.
-2. **Réseau local** : activation explicite, protégée par un jeton de session.
-3. **Public expérimental** : URL temporaire fournie par Cloudflare Quick Tunnels.
+Le portail prend en charge HTTP ordinaire, les sous-chemins, redirections, cookies et les upgrades WebSocket utilisés par le rechargement à chaud. L’interface permet de copier ou ouvrir l’URL, puis d’arrêter immédiatement le portail. Cette URL n’est accessible que depuis le même ordinateur : elle n’est ni publique ni disponible sur le réseau local.
 
-Le produit ne possède actuellement aucun relais cloud. Il ne doit donc pas présenter une URL temporaire gratuite comme un service privé, permanent ou garanti.
+L’état existe uniquement en mémoire. Il n’est pas enregistré en SQLite et aucun portail n’est restauré après un redémarrage. Il est supprimé lors de l’arrêt explicite, de la suppression du thread, de la fermeture de sa fenêtre ou de l’application.
 
-## Architecture retenue
+## Architecture livrée
 
 ```text
-Navigateur ───▶ connecteur optionnel ───▶ proxy Local Agent ───▶ serveur du projet
-               Cloudflare public         port aléatoire local    127.0.0.1:port
+Navigateur local ───▶ proxy Electron aléatoire ───▶ 127.0.0.1:port
+                      écoute 127.0.0.1              ou [::1]:port
 ```
 
-Le connecteur ne reçoit jamais directement une cible choisie par l’agent. Local Agent démarre un proxy dédié sur une adresse de boucle locale et lui associe une seule cible validée. Pour un conteneur, le port du service doit être publié uniquement sur la boucle locale de l’hôte.
+Le renderer transmet seulement l’identifiant du thread actif et un entier de port compris entre 1 et 65535. Il ne peut fournir ni hôte amont ni URL. Le processus principal vérifie la fenêtre, la frame principale, la propriété de session, le thread sélectionné, le projet persistant et l’environnement actif. Il choisit ensuite une cible fixe parmi `127.0.0.1` et `::1` ; l’en-tête `Host` d’une requête ne participe jamais au routage.
 
-État persistant prévu :
+Chaque portail possède au plus une cible. Son URL utilise un port de proxy choisi par le système afin d’éviter les collisions prévisibles. Un changement de port exige l’arrêt préalable du portail existant.
 
-```ts
-type PortalScope = 'loopback' | 'lan' | 'public-experimental'
-type PortalStatus = 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed'
+## Limites de sécurité appliquées
 
-type Portal = {
-  id: string
-  projectPath: string
-  targetPort: number
-  scope: PortalScope
-  status: PortalStatus
-  provider: 'none' | 'cloudflare-quick'
-  publicUrl?: string
-}
-```
+- écoute du proxy exclusivement sur `127.0.0.1` ;
+- cible exclusivement numérique sur `127.0.0.1` ou `::1`, sans DNS ni hôte fourni par le renderer ;
+- refus de `CONNECT`, des cibles en forme absolue et des cibles commençant par `//` ;
+- validation stricte de `Host` contre l’autorité exacte du portail ;
+- suppression des en-têtes hop-by-hop, des noms cités par `Connection`, des identifiants proxy et de tous les en-têtes `Forwarded`/`X-Forwarded-*` entrants ;
+- définition interne de `Host`, `X-Forwarded-For`, `X-Forwarded-Host` et `X-Forwarded-Proto` ;
+- assainissement équivalent des en-têtes de réponse ;
+- limite d’en-têtes de 16 Kio, corps de requête de 10 Mio, 64 connexions, 100 requêtes par socket et délais stricts ;
+- sockets HTTP et WebSocket détruits avant la fermeture du serveur ;
+- contrôle HTTP via le proxy avant de passer à l’état prêt ;
+- aucun shell, connecteur ou processus enfant utilisé par cette tranche.
 
-La configuration peut être conservée, mais pas les PID ni les anciennes URL temporaires. Après un redémarrage, tout portail revient à l’état arrêté et une exposition publique n’est jamais réactivée silencieusement.
+Le proxy ne constitue pas une frontière d’authentification entre processus locaux. Un processus local peut joindre l’URL tant que le portail fonctionne, comme il peut généralement joindre le serveur amont lui-même. Le portail réduit l’exposition et empêche le routage arbitraire ; il ne transforme pas un service local en service multi-utilisateur sûr.
 
-## Première tranche livrable
+## LAN et accès public : volontairement indisponibles
 
-- proxy HTTP local lié à un projet et à un port explicitement approuvé ;
-- HTTP, WebSocket et rechargement à chaud ;
-- indicateur visible tant qu’un accès réseau est actif ;
-- bouton d’arrêt immédiat et nettoyage à la fermeture de l’application ;
-- mode LAN protégé, avec avertissement concernant le pare-feu ;
-- Quick Tunnel facultatif lancé sans shell avec `--no-autoupdate` ;
-- contrôle de disponibilité à travers le proxy avant d’afficher l’état prêt ;
-- acceptation explicite des conditions Cloudflare avant la première utilisation.
+Les modes LAN et public expérimental décrits dans les premières explorations ne sont pas implémentés. L’interface les indique comme indisponibles et ne prétend pas fournir d’accès public.
 
-La commande publique envisagée est :
+Avant d’ajouter ces modes, Local Agent devra au minimum :
 
-```text
-cloudflared tunnel --url http://127.0.0.1:<port-du-proxy> --no-autoupdate
-```
+1. attribuer de façon vérifiable le processus qui écoute au thread et au projet concernés, y compris sur Windows et pour les conteneurs ;
+2. définir une authentification, une expiration, une révocation et une protection contre les requêtes intersites ;
+3. traiter le pare-feu, les interfaces réseau et le nettoyage des connecteurs sur Windows et Linux ;
+4. tester les pannes et l’absence de reprise silencieuse après redémarrage.
 
-Quick Tunnels est réservé au développement : pas de SLA, URL `trycloudflare.com` temporaire, maximum documenté de 200 requêtes simultanées et absence de SSE. Son URL est publique pour toute personne qui la possède ; elle n’est pas une authentification.
+Cloudflare Quick Tunnels reste une possibilité de recherche, pas une fonction annoncée. Une URL `trycloudflare.com` est publique pour toute personne qui la possède, sans SLA et sans authentification implicite. Aucun binaire `cloudflared`, jeton, condition d’utilisation ou état public n’est présent dans l’application actuelle.
 
-## Invariants de sécurité
+## Vérification couverte
 
-- écoute locale par défaut et activation publique toujours manuelle ;
-- cible limitée à `127.0.0.1` ou `::1`, avec port numérique et processus attribuable au projet ;
-- refus des sockets Docker, chemins UNC, réseaux bridge, adresses link-local et services de métadonnées cloud ;
-- origine fixe par portail : l’en-tête `Host` ne choisit jamais la destination ;
-- rejet de `CONNECT`, des requêtes en forme absolue et des en-têtes proxy non fiables ;
-- suppression des en-têtes hop-by-hop et définition interne des en-têtes de transfert ;
-- limites de taille, délais et nombre de connexions ;
-- aucun jeton dans les journaux, URL, rapports de crash ou paramètres ordinaires ;
-- arrêt de l’entrée réseau avant l’arrêt du proxy, puis terminaison de tout l’arbre du connecteur ;
-- aucune restauration automatique d’une exposition LAN ou publique.
+Les tests automatisés couvrent : cible fixe, propriété de fenêtre, thread/environnement actif, frame IPC principale, contrat preload sans hôte, `Host`, forme absolue, `CONNECT`, taille de requête, délais, en-têtes entrants et sortants, HTTP, upgrade WebSocket, arrêt explicite et nettoyages par propriétaire/application. Le smoke local réel utilise deux serveurs loopback et fait circuler HTTP et des octets après un upgrade `101`.
 
-Un tunnel Cloudflare nommé pourra être ajouté ensuite pour les utilisateurs qui possèdent un compte et un domaine. Son jeton devra être conservé dans le coffre du système et Cloudflare Access sera recommandé par défaut. Local Agent ne demandera pas de clé API globale et ne créera pas de tunnel dans un compte partagé par le produit.
+Restent à valider manuellement sur les applications empaquetées Windows et Linux : comportement des pare-feu/antivirus, HMR de frameworks représentatifs et fermeture forcée par le système d’exploitation. L’attribution du processus amont au projet n’est pas encore disponible ; c’est la raison principale pour laquelle aucune exposition LAN ou publique n’est proposée.
 
-## Vérification requise
-
-- tests Windows et Linux des collisions de ports et du nettoyage des processus ;
-- HTTP, WebSocket, redirections, cookies et sous-chemins ;
-- tests Host/SSRF/`CONNECT` et usurpation des en-têtes de transfert ;
-- expiration et révocation des accès LAN ;
-- panne DNS, connecteur interrompu, cible arrêtée et fermeture de l’application ;
-- contrôle qu’un service local étranger au projet ne peut pas être sélectionné ;
-- confirmation qu’aucune exposition n’est reprise après redémarrage.
-
-## Sources externes
+## Sources externes pour la suite
 
 - [Cloudflare Quick Tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)
-- [Installation de Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/setup/)
 - [Applications auto-hébergées avec Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)
 - [Jetons et rotation des tunnels](https://developers.cloudflare.com/tunnel/advanced/tunnel-tokens/)
-- [Téléchargements et plateformes prises en charge](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/)
-- [Licence Apache 2.0 de cloudflared](https://github.com/cloudflare/cloudflared/blob/master/LICENSE)
-
-L’implémentation n’est pas encore présente dans la version 0.1. Cette documentation fixe les limites à respecter afin de ne pas transformer une fonction de prévisualisation en proxy ouvert ou en promesse de service cloud inexistante.

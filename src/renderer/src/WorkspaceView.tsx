@@ -10,6 +10,7 @@ import type {
   WorkerProfile
 } from '../../shared/contracts'
 import { TerminalPanel } from './TerminalPanel'
+import { applyPortalEvent, type PortalUiState } from './portal-state'
 import {
   applyMessageEvent,
   applyRunEvent,
@@ -71,12 +72,18 @@ export function WorkspaceView({
   const [savingWorker, setSavingWorker] = useState(false)
   const [terminalThreadId, setTerminalThreadId] = useState<string | null>(null)
   const [terminalError, setTerminalError] = useState<string | null>(null)
+  const [portalPanelOpen, setPortalPanelOpen] = useState(false)
+  const [portalPort, setPortalPort] = useState('3000')
+  const [portalsByThread, setPortalsByThread] = useState<PortalUiState>({})
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const newThreadButtonRef = useRef<HTMLButtonElement>(null)
   const projectSwitcherRef = useRef<HTMLButtonElement>(null)
   const workerTriggerRef = useRef<HTMLButtonElement>(null)
   const workerCloseRef = useRef<HTMLButtonElement>(null)
   const workerPanelRef = useRef<HTMLElement>(null)
+  const portalTriggerRef = useRef<HTMLButtonElement>(null)
+  const portalCloseRef = useRef<HTMLButtonElement>(null)
+  const portalPanelRef = useRef<HTMLElement>(null)
   const threadMenuButtonRef = useRef<HTMLButtonElement>(null)
   const handledShortcutRef = useRef<typeof shortcut>(null)
   const messageKey = activeThreadId ?? '__draft__'
@@ -149,12 +156,22 @@ export function WorkspaceView({
   }, [workerPanelOpen])
 
   useEffect(() => {
+    if (portalPanelOpen) portalCloseRef.current?.focus()
+  }, [portalPanelOpen])
+
+  useEffect(() => {
     const handleEscape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
 
       if (workerPanelOpen) {
         event.preventDefault()
         closeWorkerPanel()
+        return
+      }
+
+      if (portalPanelOpen) {
+        event.preventDefault()
+        closePortalPanel()
         return
       }
 
@@ -167,7 +184,7 @@ export function WorkspaceView({
 
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [threadMenuOpen, workerPanelOpen])
+  }, [portalPanelOpen, threadMenuOpen, workerPanelOpen])
 
   useEffect(() => {
     if (!shortcut || handledShortcutRef.current === shortcut) return
@@ -191,6 +208,11 @@ export function WorkspaceView({
   function closeWorkerPanel(): void {
     setWorkerPanelOpen(false)
     requestAnimationFrame(() => workerTriggerRef.current?.focus())
+  }
+
+  function closePortalPanel(): void {
+    setPortalPanelOpen(false)
+    requestAnimationFrame(() => portalTriggerRef.current?.focus())
   }
 
   async function chooseProject(): Promise<void> {
@@ -250,6 +272,19 @@ export function WorkspaceView({
       const profile = await window.localAgent.getWorkerProfile(thread.projectPath)
       setWorkerProfile(profile)
       setWorkerDraft(profile)
+      if (thread.environmentStatus === 'active') {
+        try {
+          const portal = await window.localAgent.getPortal(thread.id)
+          setPortalsByThread((current) => applyPortalEvent(current, portal
+            ? { threadId: thread.id, type: 'ready', portal }
+            : { threadId: thread.id, type: 'closed' }))
+        } catch {
+          setPortalsByThread((current) => applyPortalEvent(
+            applyPortalEvent(current, { threadId: thread.id, type: 'closed' }),
+            { threadId: thread.id, type: 'error', error: 'Impossible de lire l’état du portail local.' }
+          ))
+        }
+      }
     } else {
       setWorkerProfile(null)
       setWorkerDraft(null)
@@ -277,6 +312,7 @@ export function WorkspaceView({
     setMessagesByThread((current) => ({ ...current, __draft__: [] }))
     setProjectReview(null)
     setReviewError(null)
+    setPortalPanelOpen(false)
     focusComposer()
   }
 
@@ -321,9 +357,67 @@ export function WorkspaceView({
       if (terminalThreadId === threadId) await closeTerminal()
       if (!await window.localAgent.deleteThread(threadId)) return
       setThreads((current) => current.filter((thread) => thread.id !== threadId))
+      setPortalsByThread((current) => {
+        const next = { ...current }
+        delete next[threadId]
+        return next
+      })
       if (activeThreadId === threadId) await newThread()
     } catch {
       setReviewError('Impossible de supprimer ce thread pendant son utilisation.')
+    }
+  }
+
+  async function startPortal(): Promise<void> {
+    if (!activeThreadId) return
+    const port = Number(portalPort)
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      setPortalsByThread((current) => applyPortalEvent(current, {
+        threadId: activeThreadId,
+        type: 'error',
+        error: 'Saisissez un port numérique entre 1 et 65535.'
+      }))
+      return
+    }
+    setPortalsByThread((current) => applyPortalEvent(current, { threadId: activeThreadId, type: 'starting' }))
+    try {
+      const portal = await window.localAgent.startPortal({ threadId: activeThreadId, port })
+      setPortalsByThread((current) => applyPortalEvent(current, { threadId: activeThreadId, type: 'ready', portal }))
+    } catch (error) {
+      setPortalsByThread((current) => applyPortalEvent(current, {
+        threadId: activeThreadId,
+        type: 'error',
+        error: error instanceof Error ? error.message : 'Le portail local n’a pas pu démarrer.'
+      }))
+    }
+  }
+
+  async function stopPortal(): Promise<void> {
+    if (!activeThreadId) return
+    setPortalsByThread((current) => applyPortalEvent(current, { threadId: activeThreadId, type: 'stopping' }))
+    try {
+      await window.localAgent.stopPortal(activeThreadId)
+      setPortalsByThread((current) => applyPortalEvent(current, { threadId: activeThreadId, type: 'closed' }))
+    } catch (error) {
+      setPortalsByThread((current) => applyPortalEvent(current, {
+        threadId: activeThreadId,
+        type: 'error',
+        error: error instanceof Error ? error.message : 'Le portail local n’a pas pu être arrêté.'
+      }))
+    }
+  }
+
+  async function usePortal(action: 'copy' | 'open'): Promise<void> {
+    if (!activeThreadId) return
+    try {
+      if (action === 'copy') await window.localAgent.copyPortalUrl(activeThreadId)
+      else await window.localAgent.openPortal(activeThreadId)
+    } catch (error) {
+      setPortalsByThread((current) => applyPortalEvent(current, {
+        threadId: activeThreadId,
+        type: 'error',
+        error: error instanceof Error ? error.message : `Impossible ${action === 'copy' ? 'de copier' : 'd’ouvrir'} l’URL locale.`
+      }))
     }
   }
 
@@ -398,6 +492,7 @@ export function WorkspaceView({
 
   const hasOllama = Boolean(status && status !== 'loading' && status.available)
   const activeThread = threads.find((thread) => thread.id === activeThreadId)
+  const activePortal = activeThreadId ? portalsByThread[activeThreadId] : undefined
 
   return (
     <section className="workspace-view">
@@ -510,6 +605,18 @@ export function WorkspaceView({
             <h3>{activeThread?.title ?? 'Nouveau thread'}</h3>
           </div>
           <div className="chat-header-actions">
+            {activeThread?.projectPath && activeThread.environmentStatus === 'active' && (
+              <button
+                ref={portalTriggerRef}
+                className={`ghost-button portal-trigger ${activePortal?.status === 'ready' ? 'active' : ''}`}
+                type="button"
+                aria-haspopup="dialog"
+                aria-expanded={portalPanelOpen}
+                onClick={() => setPortalPanelOpen(true)}
+              >
+                <span aria-hidden="true">⌁</span> {activePortal?.status === 'ready' ? 'Portail LOCAL actif' : 'Portail local'}
+              </button>
+            )}
             {activeThread?.projectPath && activeThread.environmentStatus === 'active' && (
               <button
                 className="ghost-button"
@@ -640,6 +747,80 @@ export function WorkspaceView({
           <small>Entrée pour envoyer · Maj + Entrée pour une nouvelle ligne</small>
         </div>
       </div>
+
+      {portalPanelOpen && activeThread?.projectPath && activeThread.environmentStatus === 'active' && (
+        <div className="worker-panel-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) closePortalPanel()
+        }}>
+          <section
+            ref={portalPanelRef}
+            className="worker-panel portal-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="portal-panel-title"
+            onKeyDown={(event) => {
+              if (event.key !== 'Tab') return
+              const focusable = Array.from(portalPanelRef.current?.querySelectorAll<HTMLElement>(
+                'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+              ) ?? [])
+              const first = focusable[0]
+              const last = focusable.at(-1)
+              if (!first || !last) return
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault()
+                last.focus()
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault()
+                first.focus()
+              }
+            }}
+          >
+            <header>
+              <div><p className="eyebrow">LOCAL UNIQUEMENT</p><h2 id="portal-panel-title">Portail de prévisualisation</h2></div>
+              <button ref={portalCloseRef} type="button" aria-label="Fermer le portail" onClick={closePortalPanel}>×</button>
+            </header>
+            <p>Crée une URL temporaire accessible uniquement depuis cet ordinateur. Ce portail n’est ni public ni accessible depuis le réseau local.</p>
+
+            {activePortal?.portal ? (
+              <div className="portal-ready" role="status">
+                <span>PRÊT · CIBLE 127.0.0.1/::1:{activePortal.portal.targetPort}</span>
+                <code>{activePortal.portal.url}</code>
+                <div>
+                  <button type="button" onClick={() => void usePortal('copy')}>Copier l’URL</button>
+                  <button type="button" onClick={() => void usePortal('open')}>Ouvrir</button>
+                  <button className="portal-stop" type="button" disabled={activePortal.status === 'stopping'} onClick={() => void stopPortal()}>
+                    {activePortal.status === 'stopping' ? 'Arrêt…' : 'Arrêter'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={(event) => { event.preventDefault(); void startPortal() }}>
+                <label>Port HTTP du projet
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="65535"
+                    step="1"
+                    value={portalPort}
+                    onChange={(event) => setPortalPort(event.target.value)}
+                  />
+                </label>
+                <button type="submit" disabled={activePortal?.status === 'starting'}>
+                  {activePortal?.status === 'starting' ? 'Vérification via le proxy…' : 'Démarrer le portail LOCAL'}
+                </button>
+              </form>
+            )}
+
+            {activePortal?.error && <p className="worker-error" role="alert">{activePortal.error}</p>}
+            <div className="portal-public-disabled" aria-disabled="true">
+              <span>Accès LAN et public</span>
+              <strong>Indisponible</strong>
+              <small>Ces modes resteront désactivés tant que l’application ne peut pas attribuer un processus au projet et appliquer des contrôles d’accès.</small>
+            </div>
+          </section>
+        </div>
+      )}
 
       {workerPanelOpen && workerDraft && (
         <div className="worker-panel-backdrop" role="presentation" onMouseDown={(event) => {

@@ -51,7 +51,12 @@ const api: LocalAgentApi = {
     }
     ipcRenderer.on('terminal:event', handler)
     return () => ipcRenderer.removeListener('terminal:event', handler)
-  }
+  },
+  getPortal: (threadId) => ipcRenderer.invoke('portal:get', threadId),
+  startPortal: (request) => ipcRenderer.invoke('portal:start', request),
+  stopPortal: (threadId) => ipcRenderer.invoke('portal:stop', threadId),
+  copyPortalUrl: (threadId) => ipcRenderer.invoke('portal:copy-url', threadId),
+  openPortal: (threadId) => ipcRenderer.invoke('portal:open', threadId)
 }
 
 contextBridge.exposeInMainWorld('localAgent', api)

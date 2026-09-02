@@ -20,6 +20,7 @@ La version 0.1 fournit :
 - planifie les générations dans le processus principal, affiche leur état en cours ou en attente et laisse changer de thread sans les arrêter ;
 - exécute les commandes autorisées dans Docker ou Podman lorsque le profil conteneur est activé ;
 - ouvre un vrai terminal PTY par thread dans son worktree actif, en mode direct ou dans le conteneur du profil worker ;
+- crée sur demande un portail de prévisualisation HTTP/WebSocket lié au thread, accessible uniquement via une URL loopback temporaire ;
 - demande une confirmation avant chaque écriture ou commande ;
 - permet à l'agent de lire, rechercher, modifier, tester et présenter le diff Git ;
 - borne le contexte et les sorties d'outils pour rester utilisable avec de petits modèles.
@@ -55,14 +56,17 @@ Une API joignable sans modèle n’est pas encore prête pour une conversation. 
 2. Dans **Modèles**, vérifier séparément le service et l’API locale, puis installer le modèle de démarrage ou un modèle de code compatible avec les outils.
 3. Dans **Agent**, ouvrir un dépôt Git, envoyer une demande de modification, contrôler les confirmations natives, puis utiliser **Voir les changements**.
 4. Dans un thread de projet actif, ouvrir **Terminal**, vérifier les programmes interactifs et le redimensionnement, puis fermer le panneau pour arrêter tout l’arbre de processus.
-5. Régler **Workers simultanés** à 2, lancer deux threads du même projet, passer de l’un à l’autre et vérifier leurs indicateurs indépendants. Avec des worktrees, les deux peuvent progresser ; avec deux threads qui partagent le dossier direct, le second reste volontairement en attente.
-6. Arrêter une génération en cours puis une génération en attente pour vérifier les deux chemins d'annulation, fermer puis rouvrir l'application pour vérifier que les runs abandonnés sont journalisés comme interrompus, et supprimer le thread. Une confirmation supplémentaire protège les changements non enregistrés.
+5. Lancer un serveur HTTP dans le projet, ouvrir **Portail local**, saisir son port, puis vérifier l’URL, la copie, l’ouverture, le rechargement à chaud et l’arrêt. L’URL `127.0.0.1` reste accessible uniquement depuis le même ordinateur et n’est jamais restaurée au redémarrage.
+6. Régler **Workers simultanés** à 2, lancer deux threads du même projet, passer de l’un à l’autre et vérifier leurs indicateurs indépendants. Avec des worktrees, les deux peuvent progresser ; avec deux threads qui partagent le dossier direct, le second reste volontairement en attente.
+7. Arrêter une génération en cours puis une génération en attente pour vérifier les deux chemins d'annulation, fermer puis rouvrir l'application pour vérifier que les runs abandonnés sont journalisés comme interrompus, et supprimer le thread. Une confirmation supplémentaire protège les changements non enregistrés.
 
 Pour un dossier qui ne permet pas de créer un worktree Git, l'application explique que l'isolation est indisponible et exige une confirmation avant d'utiliser le dossier original en mode direct.
 
 La limite est appliquée par projet dans le processus principal, pas par l’interface. Une seule génération reste permise par thread. Les threads dotés de worktrees distincts peuvent occuper plusieurs slots ; deux threads qui résolvent vers le même dossier direct sont toujours sérialisés, y compris avec un profil conteneur, car les outils de fichiers modifient encore l’hôte. Ces slots décrivent la concurrence des agents et de leurs outils locaux, pas la capacité d’inférence : Ollama peut encore sérialiser les requêtes ou charger/décharger le modèle selon sa propre configuration et le matériel disponible.
 
 Le renderer ne choisit jamais le dossier du terminal : il transmet uniquement l’identifiant du thread explicitement marqué actif, et le processus principal résout le worktree enregistré. Les entrées et dimensions sont bornées et validées, le PTY est limité à une session par thread et tous les appels IPC exigent la frame principale autorisée. Le mode direct lance `cmd.exe` sous Windows et Bash (ou `sh`) sous Linux avec un tableau d’arguments, sans interpolation de commande. Le mode conteneur reprend l’image, le réseau et les limites du profil worker et détruit explicitement son conteneur à la fermeture. L’historique du terminal n’est pas persisté et un terminal fermé ne peut pas être repris.
+
+Le renderer ne choisit pas non plus l’hôte d’un portail : il fournit uniquement le thread actif et un port numérique. Electron fixe la cible à `127.0.0.1` ou `::1`, démarre un proxy aléatoire lié à `127.0.0.1`, filtre les requêtes et vérifie le serveur à travers le proxy avant d’afficher l’état prêt. Le portail est éphémère et nettoyé à l’arrêt, à la suppression du thread et à la fermeture. Les accès LAN et public restent désactivés tant que le processus serveur ne peut pas être attribué au projet et que des contrôles d’accès adaptés ne sont pas disponibles ; voir [`docs/PORTALS.md`](docs/PORTALS.md).
 
 ## Développement
 

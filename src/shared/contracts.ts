@@ -160,6 +160,19 @@ export type TerminalEvent =
   | { threadId: string; type: 'data'; data: string }
   | { threadId: string; type: 'exit'; exitCode: number; signal: number | null }
 
+export type PortalInfo = {
+  threadId: string
+  targetPort: number
+  status: 'ready'
+  scope: 'loopback'
+  url: string
+}
+
+export type PortalStartRequest = {
+  threadId: string
+  port: number
+}
+
 export type OllamaStatus =
   | {
       available: true
@@ -199,4 +212,9 @@ export type LocalAgentApi = {
   resizeTerminal: (threadId: string, cols: number, rows: number) => Promise<void>
   closeTerminal: (threadId: string) => Promise<boolean>
   onTerminalEvent: (listener: (event: TerminalEvent) => void) => () => void
+  getPortal: (threadId: string) => Promise<PortalInfo | null>
+  startPortal: (request: PortalStartRequest) => Promise<PortalInfo>
+  stopPortal: (threadId: string) => Promise<boolean>
+  copyPortalUrl: (threadId: string) => Promise<void>
+  openPortal: (threadId: string) => Promise<void>
 }

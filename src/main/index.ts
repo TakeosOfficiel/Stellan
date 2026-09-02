@@ -1,11 +1,13 @@
 import { basename, join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
 import { compactConversation, runCodingAgent, type AgentToolLifecycleEvent } from './agent'
 import { getHardwareInfo } from './hardware'
+import { isTrustedMainFrame } from './ipc-security'
 import { getModelCatalog, isCatalogModel } from './model-catalog'
 import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat } from './ollama'
 import { startOllamaServer } from './ollama-process'
+import { assertPortalAccess, PortalManager } from './portal'
 import { ProjectTools } from './project-tools'
 import { createThreadWorktree, getRuntimeInfo, removeThreadWorktree } from './runtime'
 import { ThreadStore } from './storage'
@@ -37,6 +39,11 @@ const TERMINAL_WRITE_CHANNEL = 'terminal:write'
 const TERMINAL_RESIZE_CHANNEL = 'terminal:resize'
 const TERMINAL_CLOSE_CHANNEL = 'terminal:close'
 const TERMINAL_EVENT_CHANNEL = 'terminal:event'
+const PORTAL_GET_CHANNEL = 'portal:get'
+const PORTAL_START_CHANNEL = 'portal:start'
+const PORTAL_STOP_CHANNEL = 'portal:stop'
+const PORTAL_COPY_URL_CHANNEL = 'portal:copy-url'
+const PORTAL_OPEN_CHANNEL = 'portal:open'
 const WINDOW_MINIMIZE_CHANNEL = 'window:minimize'
 const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'window:toggle-maximize'
 const WINDOW_CLOSE_CHANNEL = 'window:close'
@@ -64,6 +71,10 @@ const terminalWriteSchema = z.object({
   data: z.string().max(65_536)
 })
 const terminalResizeSchema = terminalStartSchema
+const portalStartSchema = z.object({
+  threadId: z.uuid(),
+  port: z.number().int().min(1).max(65_535)
+})
 const createThreadSchema = z.object({
   title: z.string().trim().min(1).max(200),
   projectPath: z.string().min(1).max(10_000).nullable(),
@@ -94,13 +105,16 @@ const activeThreadOwners = new Map<number, string>()
 const approvedProjectPaths = new Set<string>()
 let threadStore: ThreadStore | null = null
 let mainWindow: BrowserWindow | null = null
-let windowTerminalCleanup: Promise<void> | null = null
+let shutdownReady = false
+let shutdownCleanup: Promise<void> | null = null
+const pendingWindowCleanups = new Set<Promise<void>>()
 const terminalManager = new TerminalManager((ownerId, terminalEvent) => {
   const contents = mainWindow?.webContents
   if (contents && !contents.isDestroyed() && contents.id === ownerId) {
     contents.send(TERMINAL_EVENT_CHANNEL, terminalEvent)
   }
 })
+const portalManager = new PortalManager()
 
 function getThreadStore(): ThreadStore {
   if (!threadStore) throw new Error('Le stockage local n’est pas prêt.')
@@ -132,6 +146,12 @@ async function openThreadProject(threadId: string): Promise<ProjectTools> {
   }
 }
 
+function requireActiveProjectThread(ownerId: number, threadId: string) {
+  const thread = getThreadStore().getThread(threadId)
+  assertPortalAccess(activeThreadOwners.get(ownerId), threadId, thread)
+  return thread
+}
+
 async function defaultWorkerProfile(projectPath: string) {
   const hardware = await getHardwareInfo()
   const cpuLimit = Math.max(1, Math.min(4, Math.floor(hardware.cpuCores / 2)))
@@ -157,11 +177,7 @@ function handle<T extends unknown[], R>(
   listener: (event: Electron.IpcMainInvokeEvent, ...args: T) => R
 ): void {
   ipcMain.handle(channel, (event, ...args) => {
-    if (
-      !mainWindow ||
-      event.sender !== mainWindow.webContents ||
-      event.senderFrame !== event.sender.mainFrame
-    ) {
+    if (!isTrustedMainFrame(event, mainWindow?.webContents ?? null)) {
       throw new Error('Appel IPC refusé.')
     }
     return listener(event, ...(args as T))
@@ -189,7 +205,15 @@ function createWindow(): void {
   const ownerId = window.webContents.id
   window.once('closed', () => {
     activeThreadOwners.delete(ownerId)
-    windowTerminalCleanup = terminalManager.closeOwner(ownerId)
+    const cleanup = Promise.all([
+      portalManager.closeOwner(ownerId),
+      terminalManager.closeOwner(ownerId)
+    ]).then(() => undefined)
+    pendingWindowCleanups.add(cleanup)
+    void cleanup.catch((error: unknown) => console.error(
+      'Window resource cleanup failed:',
+      error instanceof Error ? error.message : 'unknown error'
+    )).finally(() => pendingWindowCleanups.delete(cleanup))
     if (mainWindow === window) mainWindow = null
   })
 
@@ -368,6 +392,7 @@ app.whenReady().then(() => {
     if (workerScheduler.hasThread(threadId)) {
       throw new Error('Arrêtez la génération avant de supprimer ce thread.')
     }
+    await portalManager.close(threadId, event.sender.id)
     await terminalManager.close(threadId, event.sender.id)
     if (thread.environmentStatus === 'terminated') return store.deleteThread(threadId)
     if (thread.projectPath && thread.workspacePath) {
@@ -466,6 +491,35 @@ app.whenReady().then(() => {
   handle(TERMINAL_CLOSE_CHANNEL, (event, input: unknown) => {
     const threadId = requestIdSchema.parse(input)
     return terminalManager.close(threadId, event.sender.id)
+  })
+  handle(PORTAL_GET_CHANNEL, (event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    requireActiveProjectThread(event.sender.id, threadId)
+    return portalManager.get(threadId, event.sender.id)
+  })
+  handle(PORTAL_START_CHANNEL, async (event, input: unknown) => {
+    const request = portalStartSchema.parse(input)
+    requireActiveProjectThread(event.sender.id, request.threadId)
+    return portalManager.start(request.threadId, event.sender.id, request.port)
+  })
+  handle(PORTAL_STOP_CHANNEL, (event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    requireActiveProjectThread(event.sender.id, threadId)
+    return portalManager.close(threadId, event.sender.id)
+  })
+  handle(PORTAL_COPY_URL_CHANNEL, (event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    requireActiveProjectThread(event.sender.id, threadId)
+    const portal = portalManager.get(threadId, event.sender.id)
+    if (!portal) throw new Error('Aucun portail actif pour ce thread.')
+    clipboard.writeText(portal.url)
+  })
+  handle(PORTAL_OPEN_CHANNEL, async (event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    requireActiveProjectThread(event.sender.id, threadId)
+    const portal = portalManager.get(threadId, event.sender.id)
+    if (!portal) throw new Error('Aucun portail actif pour ce thread.')
+    await shell.openExternal(portal.url)
   })
   handle(CHAT_START_CHANNEL, async (event, input: unknown) => {
     const parsed = chatRequestSchema.safeParse(input)
@@ -639,15 +693,26 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    const cleanup = windowTerminalCleanup ?? terminalManager.closeAll()
-    void cleanup
-      .catch((error: unknown) => console.error(
-        'Terminal cleanup failed during shutdown:',
-        error instanceof Error ? error.message : 'unknown error'
-      ))
-      .finally(() => app.quit())
-  }
+  if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', (event) => {
+  if (shutdownReady) return
+  event.preventDefault()
+  shutdownCleanup ??= Promise.all([
+    portalManager.closeAll(),
+    terminalManager.closeAll(),
+    ...pendingWindowCleanups
+  ]).then(() => undefined)
+  void shutdownCleanup
+    .catch((error: unknown) => console.error(
+      'Application resource cleanup failed:',
+      error instanceof Error ? error.message : 'unknown error'
+    ))
+    .finally(() => {
+      shutdownReady = true
+      app.quit()
+    })
 })
 
 app.on('will-quit', () => {
@@ -675,6 +740,11 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(TERMINAL_WRITE_CHANNEL)
   ipcMain.removeHandler(TERMINAL_RESIZE_CHANNEL)
   ipcMain.removeHandler(TERMINAL_CLOSE_CHANNEL)
+  ipcMain.removeHandler(PORTAL_GET_CHANNEL)
+  ipcMain.removeHandler(PORTAL_START_CHANNEL)
+  ipcMain.removeHandler(PORTAL_STOP_CHANNEL)
+  ipcMain.removeHandler(PORTAL_COPY_URL_CHANNEL)
+  ipcMain.removeHandler(PORTAL_OPEN_CHANNEL)
   workerScheduler.shutdown()
   for (const controller of activeChats.values()) controller.abort()
   activeChats.clear()
