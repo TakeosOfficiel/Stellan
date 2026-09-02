@@ -167,6 +167,8 @@ async function resolveStaticFile(root: string, requestUrl: string): Promise<stri
     return null
   }
   if (!pathname.startsWith('/') || pathname.includes('\\') || pathname.includes('\0')) return null
+  const segments = pathname.split('/').filter(Boolean)
+  if (segments.some((segment) => segment.startsWith('.'))) return null
   let candidate = resolve(root, `.${pathname}`)
   const candidateRelative = relative(root, candidate)
   if (candidateRelative.startsWith('..') || isAbsolute(candidateRelative)) return null

@@ -458,7 +458,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                   workerSignal,
                   async () => {
                   const toolName = `worker:${task.title}`
-                  const callId = `worker:${taskIndex}`
+                  const callId = `worker:${child.id}`
                   let summary = ''
                   store.markAgentRunRunning(childRun.id)
                   sendChatEvent(childRun, { type: 'status', status: 'running' })
@@ -862,6 +862,18 @@ app.whenReady().then(() => {
     if (workerScheduler.hasThread(threadId) || activeThreadChats.has(threadId)) {
       throw new Error('Arrêtez la génération avant de supprimer ce thread.')
     }
+    const children = store.listThreads().filter((candidate) => candidate.parentThreadId === threadId)
+    if (children.some((child) => workerScheduler.hasThread(child.id) || activeThreadChats.has(child.id))) {
+      throw new Error('Attendez la fin des workers avant de supprimer ce thread.')
+    }
+    for (const child of children) {
+      await portalManager.close(child.id, event.sender.id)
+      await terminalManager.close(child.id, event.sender.id)
+      const childProfile = child.projectPath ? store.getWorkerProfile(child.projectPath) : null
+      if (childProfile?.mode === 'container' && childProfile.runtime) {
+        await removeWorkerContainer(childProfile.runtime, child.id)
+      }
+    }
     await portalManager.close(threadId, event.sender.id)
     await terminalManager.close(threadId, event.sender.id)
     if (thread.parentThreadId) {
@@ -1105,16 +1117,30 @@ app.whenReady().then(() => {
   })
   handle(CHAT_UPDATE_QUEUED_CHANNEL, (_event, input: unknown) => {
     const request = updateQueuedMessageSchema.parse(input)
-    return toPublicRunSummary(getThreadStore().updateQueuedAgentRun(request.requestId, request.content))
+    const store = getThreadStore()
+    const run = store.listActiveAgentRuns().find((candidate) => candidate.requestId === request.requestId)
+    if (run && store.getThread(run.threadId)?.parentThreadId) {
+      throw new Error('La file d’attente d’un worker est gérée automatiquement.')
+    }
+    return toPublicRunSummary(store.updateQueuedAgentRun(request.requestId, request.content))
   })
   handle(CHAT_DELETE_QUEUED_CHANNEL, (_event, input: unknown) => {
     const requestId = requestIdSchema.parse(input)
+    const store = getThreadStore()
+    const run = store.listActiveAgentRuns().find((candidate) => candidate.requestId === requestId)
+    if (run && store.getThread(run.threadId)?.parentThreadId) {
+      throw new Error('La file d’attente d’un worker est gérée automatiquement.')
+    }
     if (workerScheduler.has(requestId) && !workerScheduler.removeQueued(requestId)) return false
-    return getThreadStore().deleteQueuedAgentRun(requestId)
+    return store.deleteQueuedAgentRun(requestId)
   })
   handle(CHAT_SEND_NOW_CHANNEL, async (_event, input: unknown) => {
     const requestId = requestIdSchema.parse(input)
     const store = getThreadStore()
+    const activeRun = store.listActiveAgentRuns().find((candidate) => candidate.requestId === requestId)
+    if (activeRun && store.getThread(activeRun.threadId)?.parentThreadId) {
+      throw new Error('La file d’attente d’un worker est gérée automatiquement.')
+    }
     const run = store.prioritizeQueuedAgentRun(requestId)
     if (!workerScheduler.has(requestId)) await scheduleAgentRun(run)
     workerScheduler.prioritize(requestId)

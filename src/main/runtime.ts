@@ -503,7 +503,7 @@ export async function executeInWorkerContainer(
     throw new Error('command must contain at least one argument and no NUL bytes')
   }
   const name = await ensureWorkerContainer(options, runner)
-  return runner(options.runtime, [
+  const execution = await runner(options.runtime, [
     'exec', ...(options.input === undefined ? [] : ['--interactive']),
     '--workdir', '/workspace', name, ...options.command
   ], {
@@ -512,6 +512,13 @@ export async function executeInWorkerContainer(
     maxOutputBytes: 2_000_000,
     input: options.input
   })
+  if (execution.timedOut || options.signal?.aborted) {
+    const removed = await runner(options.runtime, ['rm', '--force', name], { timeoutMs: 30_000 })
+    if (!containerIsAlreadyRemoved(removed) || removed.timedOut) {
+      requireSuccess(removed, 'Cancelled worker container removal')
+    }
+  }
+  return execution
 }
 
 export async function removeWorkerContainer(

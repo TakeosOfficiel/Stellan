@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   CatalogModel,
-  HardwareInfo,
   ModelCategory,
   ModelPullProgress,
   OllamaStatus,
@@ -11,8 +10,7 @@ import type {
 import {
   getOllamaSetupState,
   installationEvidenceFromStart,
-  type InstallationEvidence,
-  type SetupStepState
+  type InstallationEvidence
 } from './setup-state'
 import { WorkspaceView } from './WorkspaceView'
 
@@ -56,12 +54,6 @@ function initialCategory(): ModelCategory {
   return CATEGORIES.some((category) => category.id === saved) ? saved as ModelCategory : 'code'
 }
 
-function stepIcon(state: SetupStepState): string {
-  if (state === 'complete') return '✓'
-  if (state === 'incomplete') return '!'
-  return '·'
-}
-
 function TitleBar({ view, onViewChange }: {
   view: AppView
   onViewChange: (view: AppView) => void
@@ -96,7 +88,7 @@ export function App(): React.JSX.Element {
   const [workspaceShortcut, setWorkspaceShortcut] = useState<WorkspaceShortcut | null>(null)
   const [status, setStatus] = useState<LoadState>(null)
   const [setup, setSetup] = useState<SetupInfo | null>(null)
-  const [hardwarePreview, setHardwarePreview] = useState<HardwareInfo | null>(null)
+  const [setupError, setSetupError] = useState<string | null>(null)
   const [category, setCategory] = useState<ModelCategory>(initialCategory)
   const [pullProgress, setPullProgress] = useState<ModelPullProgress | null>(null)
   const [pullError, setPullError] = useState<string | null>(null)
@@ -104,11 +96,10 @@ export function App(): React.JSX.Element {
   const [checkingOllama, setCheckingOllama] = useState(false)
   const [startingOllama, setStartingOllama] = useState(false)
   const [activatingRuntime, setActivatingRuntime] = useState(false)
-  const [analyzingComputer, setAnalyzingComputer] = useState(false)
   const [installationEvidence, setInstallationEvidence] = useState<InstallationEvidence>('unknown')
   const [actionError, setActionError] = useState<string | null>(null)
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null)
-  const [runtimeElapsed, setRuntimeElapsed] = useState(0)
+  const startupCardRef = useRef<HTMLElement>(null)
 
   const refreshStatus = useCallback(async () => {
     setCheckingOllama(true)
@@ -170,29 +161,17 @@ export function App(): React.JSX.Element {
   }, [])
 
   async function analyzeComputer(): Promise<void> {
-    setAnalyzingComputer(true)
+    setSetupError(null)
     try {
-      setHardwarePreview(await window.localAgent.getBasicHardwareInfo())
       setSetup(await window.localAgent.getSetupInfo())
-    } finally {
-      setAnalyzingComputer(false)
+    } catch {
+      setSetupError('La détection du catalogue et de la machine a échoué.')
     }
   }
 
   useEffect(() => window.localAgent.onRuntimeProgress(setRuntimeProgress), [])
 
   const runtimeBusy = startingOllama || checkingOllama || activatingRuntime
-  useEffect(() => {
-    if (!runtimeBusy) {
-      setRuntimeElapsed(0)
-      return
-    }
-    const startedAt = Date.now()
-    setRuntimeElapsed(0)
-    const timer = setInterval(() => setRuntimeElapsed(Math.floor((Date.now() - startedAt) / 1_000)), 1_000)
-    return () => clearInterval(timer)
-  }, [runtimeBusy])
-
   useEffect(() => {
     return window.localAgent.onModelPullProgress(setPullProgress)
   }, [])
@@ -235,8 +214,6 @@ export function App(): React.JSX.Element {
   const resolvedStatus = status === 'loading' ? null : status
   const ollamaSetup = getOllamaSetupState(resolvedStatus, installationEvidence)
   const isModelReady = ollamaSetup.modelReady === 'complete'
-  const starterModel = setup?.models.find((model) => model.id === 'qwen3.5:4b')
-  const detectedHardware = setup?.hardware ?? hardwarePreview
 
   useEffect(() => {
     if (!firstRun || !isModelReady) return
@@ -258,6 +235,10 @@ export function App(): React.JSX.Element {
     : runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
       ? 'Environnement local prêt.'
       : resolvedStatus?.reason ?? 'Préparation de l’environnement privé…')
+
+  useEffect(() => {
+    if (startupVisible) startupCardRef.current?.focus()
+  }, [startupVisible])
 
   function finishOnboarding(): void {
     localStorage.setItem(ONBOARDING_KEY, 'true')
@@ -295,7 +276,16 @@ export function App(): React.JSX.Element {
 
       {startupVisible && (
         <div className="startup-overlay">
-          <section className="startup-card" aria-live="polite" aria-busy={runtimeBusy || firstModelDownload}>
+          <section
+            ref={startupCardRef}
+            className="startup-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Préparation de Local Agent"
+            aria-live="polite"
+            aria-busy={runtimeBusy || firstModelDownload}
+            tabIndex={-1}
+          >
             <div className="startup-card-heading">
               <span className="agent-mark" aria-hidden="true">◒</span>
               <div>
@@ -350,157 +340,18 @@ export function App(): React.JSX.Element {
         <p>Installez et gérez les modèles qui correspondent à votre machine et à vos usages.</p>
       </header>
 
-      <section className="runtime-panel">
-        <div className="diagnostic-grid">
-          <article className="diagnostic-card ollama-card" aria-labelledby="ollama-heading">
-            <div className="card-title-row">
-              <div><span className="label">Moteur local</span><strong id="ollama-heading">Ollama</strong></div>
-              <span
-                className={`status-dot ${isLoading || checkingOllama || startingOllama ? 'loading' : resolvedStatus?.available ? 'online' : 'offline'}`}
-                aria-hidden="true"
-              />
-            </div>
-
-            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-              {checkingOllama ? 'Vérification d’Ollama en cours.' : startingOllama ? 'Démarrage d’Ollama en cours.' :
-                resolvedStatus?.available ? `Ollama est joignable avec ${resolvedStatus.models.length} modèle installé.` :
-                  resolvedStatus?.reason ?? 'Vérification d’Ollama en cours.'}
-            </p>
-
-            <ol className="setup-checklist" aria-label="État de la configuration Ollama">
-              <li className={ollamaSetup.installed}>
-                <span aria-hidden="true">{stepIcon(ollamaSetup.installed)}</span>
-                <div><strong>Runtime privé disponible</strong><small>{ollamaSetup.installed === 'complete' ? 'Linux et conteneurs gérés par Local Agent' : ollamaSetup.installed === 'incomplete' ? 'WSL 2 doit être activé' : 'Préparation automatique du moteur isolé'}</small></div>
-              </li>
-              <li className={ollamaSetup.running}>
-                <span aria-hidden="true">{stepIcon(ollamaSetup.running)}</span>
-                <div><strong>Service démarré</strong><small>{ollamaSetup.running === 'complete' ? 'Le serveur local répond' : ollamaSetup.running === 'incomplete' ? 'Le démarrage a échoué' : 'État du processus inconnu'}</small></div>
-              </li>
-              <li className={ollamaSetup.reachable}>
-                <span aria-hidden="true">{stepIcon(ollamaSetup.reachable)}</span>
-                <div><strong>API locale joignable</strong><small>{ollamaSetup.reachable === 'complete' ? `Version ${resolvedStatus?.available && resolvedStatus.version ? resolvedStatus.version : 'détectée'} via le port privé 11435` : 'Aucune réponse du conteneur dans le runtime privé'}</small></div>
-              </li>
-              <li className={ollamaSetup.modelReady}>
-                <span aria-hidden="true">{stepIcon(ollamaSetup.modelReady)}</span>
-                <div><strong>Modèle prêt</strong><small>{resolvedStatus?.available && resolvedStatus.models.length > 0 ? `${resolvedStatus.models.length} modèle${resolvedStatus.models.length > 1 ? 's' : ''} installé${resolvedStatus.models.length > 1 ? 's' : ''}` : 'Installez un modèle après la connexion'}</small></div>
-              </li>
-            </ol>
-
-            <div className="runtime-message">
-              {runtimeBusy && runtimeProgress ? (
-                <div className="runtime-operation" role="status" aria-live="polite">
-                  <div><strong>{runtimeProgress.step}</strong><span>{runtimeProgress.percent}% · {runtimeElapsed} s</span></div>
-                  <progress max="100" value={runtimeProgress.percent} />
-                  <small>{runtimeProgress.detail}</small>
-                </div>
-              ) : isLoading ? <p className="muted">Initialisation automatique…</p> :
-                resolvedStatus?.available ? <p className={isModelReady ? 'success' : 'muted'}>{isModelReady ? 'Votre moteur local est prêt.' : 'Ollama répond. Il reste à installer un modèle.'}</p> :
-                  <p className="error">{resolvedStatus?.reason}</p>}
-              {actionError && <p className="error" role="alert">{actionError}</p>}
-            </div>
-
-            <div className="runtime-actions">
-              {isModelReady && <button type="button" onClick={finishOnboarding}>Utiliser Local Agent</button>}
-              {!isModelReady && resolvedStatus?.available && starterModel && (
-                <button type="button" disabled={Boolean(downloadingModel)} onClick={() => void downloadModel(starterModel)}>
-                  {downloadingModel === starterModel.id ? 'Téléchargement…' : 'Installer le modèle de démarrage'}
-                </button>
-              )}
-              {!resolvedStatus?.available && ollamaSetup.canStart && (
-                <button type="button" disabled={startingOllama || checkingOllama} onClick={() => void startOllama()}>
-                  {startingOllama ? 'Démarrage…' : 'Rechercher et démarrer'}
-                </button>
-              )}
-              {!resolvedStatus?.available && ollamaSetup.canOpenDownload && (
-                <button className="secondary-button" type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>
-                  {activatingRuntime ? 'Activation…' : 'Activer WSL 2'}
-                </button>
-              )}
-              {!isLoading && (
-                <button className="secondary-button" type="button" disabled={checkingOllama || startingOllama} onClick={() => void refreshStatus()}>
-                  {checkingOllama ? 'Vérification…' : 'Réessayer la connexion'}
-                </button>
-              )}
-            </div>
-
-            {starterModel && downloadingModel === starterModel.id && pullProgress?.model === starterModel.id && (
-              <div className="onboarding-download-progress" aria-live="polite">
-                <div>
-                  <strong>{pullProgress.status}</strong>
-                  <span>{pullProgress.percent === null ? 'Préparation…' : `${pullProgress.percent}%`}</span>
-                </div>
-                <progress
-                  aria-label={`Téléchargement de ${starterModel.name}`}
-                  max="100"
-                  value={pullProgress.percent ?? undefined}
-                />
-                <small>
-                  {pullProgress.completed !== null && pullProgress.total !== null
-                    ? `${formatSize(pullProgress.completed)} téléchargés sur ${formatSize(pullProgress.total)}`
-                    : 'Ollama prépare les fichiers du modèle…'}
-                </small>
-              </div>
-            )}
-
-            {!resolvedStatus?.available && !isLoading && (
-              <details className="troubleshooting">
-                <summary>Dépannage rapide</summary>
-                <p>Local Agent crée automatiquement le conteneur <code>local-agent-ollama</code> et conserve tous les modèles dans le volume Docker <code>local-agent-ollama-models</code>.</p>
-                <p>Activez WSL 2 puis réessayez. Local Agent télécharge automatiquement son Linux minimal, le moteur de conteneurs et l’image Ollama.</p>
-              </details>
-            )}
-          </article>
-
-          <article className="diagnostic-card hardware-card">
-            <div className="card-title-row">
-              <div><span className="label">Profil détecté</span><strong>Cette machine</strong></div>
-            </div>
-            {!detectedHardware ? (
-              <div className="hardware-analysis-prompt">
-                <p className="muted">{analyzingComputer ? 'Détection automatique du processeur, de la mémoire et du GPU…' : 'La détection automatique n’a pas abouti.'}</p>
-                {!analyzingComputer && <button type="button" onClick={() => void analyzeComputer()}>Relancer la détection</button>}
-              </div>
-            ) : (
-              <>
-                <dl>
-                  <div><dt>Mémoire</dt><dd>{formatSize(detectedHardware.totalMemoryBytes)}</dd></div>
-                  <div><dt>Processeur</dt><dd>{detectedHardware.cpuCores} cœurs</dd></div>
-                  <div>
-                    <dt>Graphique</dt>
-                    <dd>{setup ? detectedHardware.gpus[0]?.model ?? 'Non détecté' : 'Détection en cours…'}</dd>
-                  </div>
-                </dl>
-                {analyzingComputer && !setup && <p className="hardware-scan-status"><span /> Analyse du GPU et des runtimes en arrière-plan…</p>}
-              </>
-            )}
-          </article>
-        </div>
-        {setup && (
-          <div className="runtime-diagnostics" aria-label="Outils d’isolation détectés">
-            {([
-              ['Git', setup.runtime.git],
-              ['Docker', setup.runtime.docker],
-              ['Podman', setup.runtime.podman]
-            ] as const).map(([name, tool]) => (
-              <div key={name}>
-                <span className={`status-dot ${tool.available ? 'online' : 'offline'}`} />
-                <span><strong>{name}</strong><small>{tool.available ? tool.version ?? 'Disponible' : 'Indisponible'}</small></span>
-              </div>
-            ))}
-            <p>
-              {setup.runtime.recommendedContainerRuntime
-                ? `Runtime worker recommandé : ${setup.runtime.recommendedContainerRuntime}`
-                : 'Runtime privé indisponible : activez WSL 2 pour les workers isolés.'}
-            </p>
-          </div>
-        )}
-      </section>
-
       <section className="models-section">
         <div className="section-heading">
           <div><p className="eyebrow">CATALOGUE</p><h3>Installer un modèle</h3></div>
           <p>Les tailles sont approximatives. Le téléchargement nécessite Internet une seule fois.</p>
         </div>
+
+        {setupError && (
+          <div className="setup-inline-error" role="alert">
+            <span>{setupError}</span>
+            <button type="button" onClick={() => void analyzeComputer()}>Réessayer</button>
+          </div>
+        )}
 
         <div className="model-browser">
         <div className="category-tabs" aria-label="Filtrer les modèles par usage">

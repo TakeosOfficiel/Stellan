@@ -238,6 +238,9 @@ describe('PortalManager protocol and lifecycle', () => {
     const root = join(parent, 'project')
     await mkdir(root)
     await writeFile(join(root, 'index.html'), '<h1>Safe</h1>')
+    await writeFile(join(root, '.env'), 'API_TOKEN=secret')
+    await mkdir(join(root, '.git'))
+    await writeFile(join(root, '.git', 'config'), 'credential.helper=store')
     await writeFile(join(parent, 'secret.txt'), 'secret')
     await symlink(join(parent, 'secret.txt'), join(root, 'linked-secret.txt'))
     const manager = new PortalManager()
@@ -247,6 +250,8 @@ describe('PortalManager protocol and lifecycle', () => {
 
     expect((await httpCall(port, { path: '/%2e%2e/secret.txt' })).status).toBe(404)
     expect((await httpCall(port, { path: '/linked-secret.txt' })).status).toBe(404)
+    expect((await httpCall(port, { path: '/.env' })).status).toBe(404)
+    expect((await httpCall(port, { path: '/.git/config' })).status).toBe(404)
   })
 
   it('proxies HTTP and WebSocket upgrade traffic through its random loopback port', async () => {

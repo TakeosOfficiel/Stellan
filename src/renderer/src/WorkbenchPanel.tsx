@@ -71,11 +71,13 @@ export function WorkbenchPanel({
   const [focused, setFocused] = useState(false)
   const [review, setReview] = useState<ProjectReview | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
+  const [reviewLoading, setReviewLoading] = useState(false)
   const [files, setFiles] = useState<string[]>([])
   const [directories, setDirectories] = useState<string[]>([])
   const [filesTruncated, setFilesTruncated] = useState(false)
   const [filePreview, setFilePreview] = useState<ProjectFilePreview | null>(null)
   const [filesError, setFilesError] = useState<string | null>(null)
+  const [filesLoading, setFilesLoading] = useState(false)
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
   const [portal, setPortal] = useState<PortalInfo | null>(null)
   const [portalDuration, setPortalDuration] = useState<PortalDuration>(null)
@@ -90,16 +92,20 @@ export function WorkbenchPanel({
   async function refreshChanges(): Promise<void> {
     if (!thread || !ready) return
     setReviewError(null)
+    setReviewLoading(true)
     try {
       setReview(await window.localAgent.reviewThreadProject(thread.id))
     } catch (error) {
       setReviewError(error instanceof Error ? error.message : 'Impossible de lire les changements.')
+    } finally {
+      setReviewLoading(false)
     }
   }
 
   async function refreshFiles(): Promise<void> {
     if (!thread || !ready) return
     setFilesError(null)
+    setFilesLoading(true)
     try {
       const result = await window.localAgent.listProjectFiles(thread.id)
       setFiles(result.files)
@@ -107,17 +113,21 @@ export function WorkbenchPanel({
       setFilesTruncated(result.truncated)
     } catch (error) {
       setFilesError(error instanceof Error ? error.message : 'Impossible de lire les fichiers du projet.')
+    } finally {
+      setFilesLoading(false)
     }
   }
 
   useEffect(() => {
     setReview(null)
     setReviewError(null)
+    setReviewLoading(Boolean(thread && ready))
     setFiles([])
     setDirectories([])
     setFilesTruncated(false)
     setFilePreview(null)
     setFilesError(null)
+    setFilesLoading(Boolean(thread && ready))
     setExpandedFolders(new Set())
     setPortal(null)
     setPortalError(null)
@@ -132,11 +142,13 @@ export function WorkbenchPanel({
       if (canceled) return
       if (reviewResult.status === 'fulfilled') setReview(reviewResult.value)
       else setReviewError('Impossible de lire les changements.')
+      setReviewLoading(false)
       if (filesResult.status === 'fulfilled') {
         setFiles(filesResult.value.files)
         setDirectories(filesResult.value.directories)
         setFilesTruncated(filesResult.value.truncated)
       } else setFilesError('Impossible de lire les fichiers du projet.')
+      setFilesLoading(false)
       if (portalResult.status === 'fulfilled') setPortal(portalResult.value)
       else setPortalError('Impossible de lire l’état du portail local.')
     })
@@ -256,8 +268,6 @@ export function WorkbenchPanel({
       return (
         <div
           className="file-tree-node"
-          role="treeitem"
-          aria-expanded={node.type === 'directory' ? expanded : undefined}
           key={`${node.type}:${node.path}`}
         >
           <button
@@ -265,6 +275,7 @@ export function WorkbenchPanel({
             style={{ paddingLeft: `${8 + depth * 15}px` }}
             type="button"
             title={node.path}
+            aria-expanded={node.type === 'directory' ? expanded : undefined}
             onClick={() => node.type === 'directory' ? toggleFolder(node.path) : void openFile(node.path)}
           >
             {node.type === 'directory'
@@ -274,7 +285,7 @@ export function WorkbenchPanel({
             <span className="file-tree-name">{node.name}</span>
             {node.status && <span className="file-status" aria-label={`Statut Git ${node.status}`}>{node.status}</span>}
           </button>
-          {expanded && <div role="group">{renderFileNodes(node.children, depth + 1)}</div>}
+          {expanded && <div>{renderFileNodes(node.children, depth + 1)}</div>}
         </div>
       )
     })
@@ -317,7 +328,7 @@ export function WorkbenchPanel({
             </header>
             {reviewError && <p className="workbench-error" role="alert">{reviewError}</p>}
             <small>{review?.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
-            {reviewOpen ? (
+            {reviewLoading ? <div className="workbench-zero"><p>Lecture des changements…</p></div> : reviewOpen ? (
               review?.diff ? <pre className="workbench-diff">{review.diff}</pre> : <div className="workbench-zero"><span aria-hidden="true">✓</span><p>Rien à relire pour le moment</p></div>
             ) : statusLines.length > 0 ? (
               <div className="change-list">{statusLines.map((line) => <code key={line}>{line}</code>)}</div>
@@ -388,8 +399,12 @@ export function WorkbenchPanel({
                 <pre>{filePreview.content}</pre>
               </div>
             ) : (
-              <div className="file-tree" role="tree" aria-label={`Fichiers de ${projectName}`}>
-                {fileTree.length > 0 ? renderFileNodes(fileTree) : <div className="workbench-zero"><span aria-hidden="true">▧</span><p>Aucun fichier</p></div>}
+              <div className="file-tree" aria-label={`Fichiers de ${projectName}`}>
+                {filesLoading
+                  ? <div className="workbench-zero"><p>Lecture des fichiers…</p></div>
+                  : fileTree.length > 0
+                    ? renderFileNodes(fileTree)
+                    : <div className="workbench-zero"><span aria-hidden="true">▧</span><p>Aucun fichier</p></div>}
                 {filesTruncated && <small>Liste limitée aux 5 000 premiers fichiers.</small>}
               </div>
             )}

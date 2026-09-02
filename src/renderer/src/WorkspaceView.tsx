@@ -197,6 +197,7 @@ export function WorkspaceView({
   const [workerDraft, setWorkerDraft] = useState<WorkerProfile | null>(null)
   const [workerPanelOpen, setWorkerPanelOpen] = useState(false)
   const [threadMenuOpen, setThreadMenuOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [workerError, setWorkerError] = useState<string | null>(null)
   const [savingWorker, setSavingWorker] = useState(false)
   const [dictationState, setDictationState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
@@ -216,6 +217,7 @@ export function WorkspaceView({
   const bufferedContentRef = useRef(new Map<string, ContentEvent>())
   const contentFrameRef = useRef<number | null>(null)
   const handledShortcutRef = useRef<typeof shortcut>(null)
+  const openThreadRequestRef = useRef(0)
   const messageKey = activeThreadId ?? '__draft__'
   const messages = messagesByThread[messageKey] ?? []
   const activeRun = activeThreadId ? runsByThread[activeThreadId] : undefined
@@ -478,15 +480,19 @@ export function WorkspaceView({
   }
 
   async function openThread(thread: StoredThread): Promise<void> {
-    await window.localAgent.setActiveThread(thread.id)
+    const request = ++openThreadRequestRef.current
     const [storedMessages, runHistory] = await Promise.all([
       window.localAgent.loadThreadMessages(thread.id),
       window.localAgent.listThreadRuns(thread.id)
     ])
+    if (request !== openThreadRequestRef.current) return
+    await window.localAgent.setActiveThread(thread.id)
+    if (request !== openThreadRequestRef.current) return
     const active = runHistory.find((run) => run.status === 'running')
       ?? runHistory.find((run) => run.status === 'queued')
     stickToBottomRef.current = true
     setShowScrollToBottom(false)
+    setSidebarOpen(false)
     setActiveThreadId(thread.id)
     setRunHistoryOpen(false)
     setEditingRequestId(null)
@@ -817,14 +823,21 @@ export function WorkspaceView({
     <section className="workspace-view">
       <nav className="app-rail" aria-label="Sections de Local Agent">
         <div className="rail-main">
-          <button className="active" type="button" aria-label="Threads" title="Threads">⌁</button>
+          <button
+            className="active"
+            type="button"
+            aria-label="Threads"
+            aria-expanded={sidebarOpen}
+            title="Threads"
+            onClick={() => setSidebarOpen((open) => !open)}
+          >⌁</button>
           <button type="button" aria-label="Projets" aria-keyshortcuts="Control+O Meta+O" title="Projets" onClick={() => void chooseProject()}>◇</button>
           <button type="button" aria-label="Nouveau thread" aria-keyshortcuts="Control+N Meta+N" title="Nouveau thread" onClick={newThread}>＋</button>
         </div>
         <button type="button" aria-label="Modèles et réglages" aria-keyshortcuts="Control+, Meta+," title="Modèles et réglages" onClick={onOpenSetup}>⚙</button>
       </nav>
 
-      <aside className="workspace-sidebar">
+      <aside className={`workspace-sidebar${sidebarOpen ? ' open' : ''}`}>
         <button
           ref={projectSwitcherRef}
           className="project-switcher"

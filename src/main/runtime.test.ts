@@ -446,6 +446,27 @@ describe('executeInWorkerContainer', () => {
     ]))
   })
 
+  it('removes the persistent container after a timed-out command so no process keeps running', async () => {
+    const projectPath = await temporaryDirectory()
+    const timedOut = result({ exitCode: null, signal: 'SIGKILL', timedOut: true })
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result({ exitCode: 1, stderr: 'not found' }))
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(timedOut)
+      .mockResolvedValueOnce(result())
+
+    await expect(executeInWorkerContainer({
+      runtime: 'docker', threadId: 'cancelled-worker', projectPath,
+      image: 'node:22-bookworm', command: ['npm', 'test'],
+      cpuLimit: 2, memoryLimit: '2048m', network: 'none', timeoutMs: 25
+    }, runner)).resolves.toEqual(timedOut)
+
+    expect(runner.mock.calls[3]).toEqual([
+      'docker', ['rm', '--force', 'local-agent-worker-cancelled-worker'], { timeoutMs: 30_000 }
+    ])
+    expect(runner.mock.calls.some((call) => call[1][0] === 'volume')).toBe(false)
+  })
+
   it('removes both the worker container and its private data volume', async () => {
     const runner = vi.fn<CommandRunner>().mockResolvedValue(result())
 
