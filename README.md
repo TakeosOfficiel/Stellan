@@ -65,7 +65,7 @@ pnpm package:windows
 pnpm package
 ```
 
-La construction Windows est de préférence exécutée sur Windows ; une construction croisée depuis Linux peut nécessiter Wine et d'autres outils système. Les commandes reconstruisent toujours l'application avant de lancer `electron-builder`.
+Sur Windows, la commande utilise directement les outils natifs. Sur Linux ou macOS, Wine 2.0 ou plus récent avec la prise en charge 32 bits est requis (`wine32:i386` sur Debian) ; le script vérifie sa présence avant de lancer `electron-builder` et indique l'alternative officielle `electronuserland/builder:wine` s'il manque. Wine est nécessaire même sans certificat : `electron-builder` l'utilise pour modifier les ressources de l'exécutable puis exécute un installateur NSIS 32 bits temporaire afin de générer et extraire le programme de désinstallation. Les commandes reconstruisent toujours l'application avant de lancer `electron-builder` et désactivent la publication implicite.
 
 La signature est facultative pour la version 0.1. Sans certificat, les artefacts sont **non signés** : Windows affiche alors un éditeur inconnu et peut déclencher Microsoft Defender SmartScreen. Ils ne doivent pas être présentés comme des builds de production authentifiés.
 
@@ -78,5 +78,7 @@ pnpm package:windows
 ```
 
 `CSC_LINK` accepte aussi une URL ou un certificat encodé en base64 selon la documentation d'`electron-builder`. Ne jamais committer le certificat ni son mot de passe. Les paquets Linux produits ici ne sont pas signés ; leur signature et celle d'un dépôt de paquets doivent être gérées séparément lors de la publication.
+
+Sans `CSC_LINK` ou `WIN_CSC_LINK`, une construction croisée désactive explicitement la recherche automatique de certificat et annonce qu'elle produit un artefact non signé. Pour produire et valider un installateur signé, utiliser un vrai certificat de signature de code, de préférence sur Windows. Un build Linux/macOS permet de contrôler la structure et le contenu de l'artefact, mais son installation, sa désinstallation et les avertissements SmartScreen doivent encore être testés sur Windows.
 
 Le plan d'architecture, les limites de sécurité et les étapes de réalisation sont décrits dans [`docs/PLAN.md`](docs/PLAN.md).
