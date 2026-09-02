@@ -215,13 +215,16 @@ export async function streamOllamaChat(
   let content = ''
   const toolCalls: OllamaToolCall[] = []
   let requestMessages = messages
+  const responseTimeout = AbortSignal.timeout(120_000)
+  const requestSignal = signal ? AbortSignal.any([signal, responseTimeout]) : responseTimeout
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
     const response = await fetcher(`${activeOllamaUrl}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model, messages: requestMessages, stream: true, think: false, ...(tools ? { tools } : {}) }),
-      signal
+      signal: requestSignal
     })
 
     if (!response.ok || !response.body) {
@@ -254,18 +257,24 @@ export async function streamOllamaChat(
       if (done) break
     }
 
-    if (completed) return { content, toolCalls }
-    if (attempt === 0 && toolCalls.length === 0) {
-      requestMessages = content
-        ? [
-            ...messages,
-            { role: 'assistant', content },
-            { role: 'user', content: 'Continue exactement la réponse interrompue, sans répéter le texte déjà écrit.' }
-          ]
-        : messages
-      continue
+      if (completed) return { content, toolCalls }
+      if (attempt === 0 && toolCalls.length === 0) {
+        requestMessages = content
+          ? [
+              ...messages,
+              { role: 'assistant', content },
+              { role: 'user', content: 'Continue exactement la réponse interrompue, sans répéter le texte déjà écrit.' }
+            ]
+          : messages
+        continue
+      }
+      throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')
     }
-    throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')
+  } catch (error) {
+    if (responseTimeout.aborted && !signal?.aborted) {
+      throw new Error('Le modèle n’a pas répondu sous deux minutes. Réessayez ou choisissez un modèle plus léger.')
+    }
+    throw error
   }
 
   throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')

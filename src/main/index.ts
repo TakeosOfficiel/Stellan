@@ -341,7 +341,9 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
   }
   const profile = thread.projectPath ? await resolveWorkerProfile(store, thread.projectPath) : null
   if (thread.projectPath && !profile) throw new Error('Le profil worker du projet est invalide.')
-  const projectKey = thread.projectPath ?? '__local-chat__'
+  // A conversation owns its queue. Separate chats may run concurrently even
+  // when they reference the same project; only messages in one chat serialize.
+  const projectKey = thread.id
   if (profile?.mode === 'container') {
     const runtime = await getRuntimeInfo()
     if (!profile.runtime || !runtime[profile.runtime].available) {
@@ -355,7 +357,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
     requestId: run.requestId,
     threadId: thread.id,
     projectKey,
-    isolationKey: thread.workspaceMode === 'direct' ? thread.projectPath : null,
+    isolationKey: null,
     maxConcurrentWorkers: profile?.maxConcurrentWorkers ?? 1,
     cancelQueued: () => {
       store.finishAgentRun(run.id, 'interrupted', '', 'Génération annulée dans la file d’attente.')

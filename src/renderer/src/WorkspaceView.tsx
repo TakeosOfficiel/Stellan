@@ -191,6 +191,7 @@ export function WorkspaceView({
   const [fileReveal, setFileReveal] = useState<{ threadId: string; path: string; nonce: number } | null>(null)
   const [threadMenuOpen, setThreadMenuOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [thinkingElapsed, setThinkingElapsed] = useState(0)
   const [dictationState, setDictationState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
   const [dictationProgress, setDictationProgress] = useState<DictationProgress | null>(null)
   const [dictationError, setDictationError] = useState<string | null>(null)
@@ -218,6 +219,17 @@ export function WorkspaceView({
     if (models.some((model) => model.name === selectedModel)) return selectedModel
     return models[0]?.name ?? ''
   }, [models, selectedModel])
+
+  useEffect(() => {
+    if (activeRun?.status !== 'running') {
+      setThinkingElapsed(0)
+      return
+    }
+    const startedAt = Date.now()
+    setThinkingElapsed(0)
+    const timer = setInterval(() => setThinkingElapsed(Math.floor((Date.now() - startedAt) / 1_000)), 1_000)
+    return () => clearInterval(timer)
+  }, [activeRequest, activeRun?.status])
 
   function contentEventKey(threadId: string, requestId: string): string {
     return `${threadId}:${requestId}`
@@ -924,7 +936,11 @@ export function WorkspaceView({
                     ? message.content
                       ? <MarkdownMessage content={message.content} />
                       : activeRequest === message.id && requestActivities.length === 0
-                        ? <p>{activeRun?.status === 'queued' ? 'En attente…' : 'Réflexion…'}</p>
+                        ? <p>{activeRun?.status === 'queued'
+                            ? 'En attente dans ce chat…'
+                            : thinkingElapsed >= 30
+                              ? `Chargement du modèle… ${thinkingElapsed} s`
+                              : `Réflexion… ${thinkingElapsed} s`}</p>
                         : null
                     : <p>{message.content}</p>}
                 </article>
