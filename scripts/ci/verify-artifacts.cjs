@@ -32,6 +32,22 @@ if (target === 'windows') {
     console.error('The Windows package contains a host node-pty build that can shadow its Windows prebuilds.')
     process.exit(1)
   }
+  for (const unexpected of [
+    'deps',
+    'scripts',
+    'src',
+    'third_party',
+    'typings',
+    'binding.gyp',
+    path.join('prebuilds', 'win32-arm64'),
+    path.join('prebuilds', 'darwin-arm64'),
+    path.join('prebuilds', 'darwin-x64'),
+  ]) {
+    if (fs.existsSync(path.join(nodePty, unexpected))) {
+      console.error(`The Windows x64 package contains unused node-pty payload: ${unexpected}`)
+      process.exit(1)
+    }
+  }
   for (const name of ['conpty.node', 'pty.node']) {
     const nativeModule = path.join(nodePty, 'prebuilds', 'win32-x64', name)
     const signature = fs.readFileSync(nativeModule).subarray(0, 2).toString('ascii')
