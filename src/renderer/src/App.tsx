@@ -197,11 +197,18 @@ export function App(): React.JSX.Element {
       percent: null
     })
     setDownloadingModel(model.id)
-
-    const result = await window.localAgent.pullModel(model.id)
-    if (!result.success) setPullError(result.reason)
-    else await refreshStatus()
-    setDownloadingModel(null)
+    try {
+      const result = await window.localAgent.pullModel(model.id)
+      if (!result.success) setPullError(result.reason)
+      else {
+        await refreshStatus()
+        setPullProgress(null)
+      }
+    } catch {
+      setPullError('Le téléchargement du modèle a échoué. Vérifiez Ollama et votre connexion, puis réessayez.')
+    } finally {
+      setDownloadingModel(null)
+    }
   }
 
   return (
@@ -308,6 +315,25 @@ export function App(): React.JSX.Element {
                 </button>
               )}
             </div>
+
+            {starterModel && downloadingModel === starterModel.id && pullProgress?.model === starterModel.id && (
+              <div className="onboarding-download-progress" aria-live="polite">
+                <div>
+                  <strong>{pullProgress.status}</strong>
+                  <span>{pullProgress.percent === null ? 'Préparation…' : `${pullProgress.percent}%`}</span>
+                </div>
+                <progress
+                  aria-label={`Téléchargement de ${starterModel.name}`}
+                  max="100"
+                  value={pullProgress.percent ?? undefined}
+                />
+                <small>
+                  {pullProgress.completed !== null && pullProgress.total !== null
+                    ? `${formatSize(pullProgress.completed)} téléchargés sur ${formatSize(pullProgress.total)}`
+                    : 'Ollama prépare les fichiers du modèle…'}
+                </small>
+              </div>
+            )}
 
             {!resolvedStatus?.available && !isLoading && (
               <details className="troubleshooting">
