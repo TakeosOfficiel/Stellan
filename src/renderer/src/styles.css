@@ -196,6 +196,169 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .composer button { min-width: 86px; height: 48px; }
 .composer .stop-button { color: #ffaaaa; background: #3d2528; }
 
+/* Application structure: compact navigation, hierarchical threads and focused content. */
+.setup-view {
+  display: grid; grid-template-columns: 238px minmax(0, 1fr);
+  height: calc(100vh - 42px); padding: 0; overflow: hidden;
+}
+.settings-sidebar {
+  display: flex; flex-direction: column; padding: 18px 12px 14px;
+  border-right: 1px solid #252b27; background: #111513;
+}
+.settings-sidebar > div { display: flex; align-items: center; gap: 9px; padding: 2px 8px 18px; font-size: 13px; }
+.agent-mark { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; color: #171d18; background: #b5be6a; font-size: 12px; }
+.settings-sidebar nav { display: grid; gap: 3px; }
+.settings-sidebar nav button, .settings-back {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px;
+  color: #8f9892; background: transparent; font-size: 11px; font-weight: 500; text-align: left;
+}
+.settings-sidebar nav button:hover, .settings-sidebar nav button.active { color: #e2e7e3; background: #242b27; }
+.settings-sidebar nav button span { width: 18px; color: #9ca69f; text-align: center; }
+.settings-sidebar nav button small { margin-left: auto; color: #58615b; font-size: 7px; text-transform: uppercase; letter-spacing: 0.08em; }
+.settings-back { margin-top: auto; }
+.settings-content { min-width: 0; padding: 0 32px 45px; overflow-y: auto; background: #0c0f0e; }
+.settings-page-header {
+  display: flex; align-items: center; justify-content: space-between; min-height: 94px;
+  margin: 0 -32px 24px; padding: 0 32px; border-bottom: 1px solid #242925; background: #0f1211;
+}
+.settings-page-header h2 { margin: 6px 0 0; font-size: 22px; letter-spacing: -0.03em; }
+.settings-page-header > p { max-width: 420px; margin: 0; color: #737b76; font-size: 11px; }
+.runtime-panel, .models-section { max-width: 1120px; margin: 0 auto; }
+.runtime-panel { margin-bottom: 30px; }
+.diagnostic-grid { grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr); gap: 10px; }
+.diagnostic-card { min-height: 0; border-radius: 8px; background: #131816; }
+.diagnostic-card button { display: inline-flex; justify-content: center; width: auto; margin-right: 6px; }
+.hardware-card dl { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; }
+.hardware-card dl div { min-width: 0; padding: 0 12px; border: 0; border-left: 1px solid #292f2b; }
+.hardware-card dl div:first-child { padding-left: 0; border-left: 0; }
+.hardware-card dd { overflow: visible; overflow-wrap: anywhere; text-overflow: initial; white-space: normal; }
+.section-heading { align-items: center; margin-bottom: 14px; }
+.section-heading h3 { margin-top: 5px; font-size: 18px; }
+.model-browser { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 12px; }
+.category-tabs { display: flex; flex-direction: column; gap: 3px; margin: 0; }
+.category-tabs button { min-height: 0; padding: 10px 11px; border-color: transparent; border-radius: 7px; background: transparent; }
+.category-tabs button:hover { background: #171c19; }
+.category-tabs button.active { border-color: #333c36; background: #222a25; }
+.catalog-grid { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 9px; }
+.model-card { min-height: 260px; padding: 16px; border-radius: 8px; }
+
+.workspace-view {
+  display: grid; grid-template-columns: 48px 252px minmax(0, 1fr);
+  height: calc(100vh - 42px); margin: 0; background: #0b0e0d;
+}
+.app-rail {
+  display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+  padding: 9px 6px; border-right: 1px solid #222824; background: #0d110f;
+}
+.rail-main { display: grid; gap: 5px; }
+.app-rail button {
+  display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
+  color: #747e78; background: transparent; font-size: 15px; font-weight: 500;
+}
+.app-rail button:hover, .app-rail button.active { color: #e0e6e2; background: #242b27; }
+.workspace-sidebar {
+  display: flex; flex-direction: column; min-width: 0; padding: 10px 9px;
+  border-right: 1px solid #252b27; background: #111513;
+}
+.workspace-sidebar button { width: auto; }
+.project-switcher {
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 8px;
+  width: 100% !important; padding: 8px; color: #d8ded9; background: transparent; text-align: left;
+}
+.project-switcher:hover { background: #202622; }
+.project-switcher > span:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.project-switcher small { color: #626c66; font-size: 8px; letter-spacing: 0.11em; }
+.project-switcher strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.project-icon { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid #313a34; border-radius: 6px; color: #aab5ad; background: #1a201c; }
+.new-thread-button {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px;
+  width: 100% !important; margin-top: 10px; padding: 8px 9px; border: 1px solid #2b332e;
+  color: #c7cec9; background: #181e1a; font-size: 10px; text-align: left;
+}
+.new-thread-button kbd { color: #59625c; font: 8px ui-monospace, monospace; }
+.thread-list { min-height: 0; margin-top: 18px; padding: 0; border: 0; overflow-y: auto; }
+.thread-group-heading {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 7px;
+  padding: 7px; border-radius: 7px; color: #bec6c0; background: #1c251f;
+}
+.thread-group-heading strong { overflow: hidden; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.thread-group-heading > span:last-child { color: #6f7972; font-size: 9px; }
+.thread-tree { padding: 5px 0 0 8px; }
+.thread-tree > p { margin: 12px 8px; color: #59635d; font-size: 9px; }
+.thread-row {
+  display: grid; grid-template-columns: 13px 13px minmax(0, 1fr) 20px; align-items: center;
+  min-height: 31px; margin: 0; border-radius: 6px;
+}
+.thread-row.active { background: #242c27; }
+.thread-row .branch { color: #465049; font: 11px ui-monospace, monospace; }
+.thread-agent { color: #aeb765; font-size: 8px; }
+.thread-row button { padding: 6px 3px; color: #a1aaa4; font-size: 9px; }
+.thread-row.active button:first-of-type { color: #dde3df; }
+.thread-row .thread-delete { width: 20px; padding: 3px; opacity: 0; text-align: center; }
+.thread-row:hover .thread-delete { opacity: 1; }
+.sidebar-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid #252b27; }
+.runtime-summary { margin: 0 6px 9px; font-size: 9px; }
+.model-selector { margin: 0; padding: 0; border: 0; }
+.model-selector select, .model-selector button {
+  width: 100%; padding: 8px; border: 1px solid #2d352f; border-radius: 6px;
+  color: #aeb7b1; background: #171c19; font-size: 9px;
+}
+.chat-panel { grid-template-rows: 47px minmax(0, 1fr) auto; background: #0b0e0d; }
+.chat-header { padding: 0 14px 0 18px; border-color: #242a26; background: #0f1311; }
+.thread-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.thread-identity > span { color: #59635d; font-size: 10px; }
+.thread-identity h3 { margin: 0; overflow: hidden; color: #cfd6d1; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.chat-header-actions { align-items: center; }
+.ghost-button { border: 1px solid #29312c; color: #8d9790; background: #151a17; }
+.thread-menu { position: relative; }
+.thread-menu summary {
+  display: grid; place-items: center; width: 31px; height: 29px; border-radius: 6px;
+  color: #8a938d; cursor: pointer; list-style: none;
+}
+.thread-menu summary:hover, .thread-menu[open] summary { color: #d9dfdb; background: #222824; }
+.thread-menu summary::-webkit-details-marker { display: none; }
+.thread-menu-popover {
+  position: absolute; z-index: 20; top: 35px; right: 0; display: grid; width: 225px;
+  padding: 5px; border: 1px solid #303a34; border-radius: 8px; background: #101613;
+  box-shadow: 0 16px 45px rgba(0, 0, 0, 0.42);
+}
+.thread-menu-popover > div, .thread-menu-popover button {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center;
+  width: 100%; min-height: 34px; padding: 7px 8px; color: #b6beb8; background: transparent;
+  font-size: 10px; font-weight: 500; text-align: left;
+}
+.thread-menu-popover > div { border-bottom: 1px solid #273029; }
+.thread-menu-popover button:hover { background: #242c27; }
+.thread-menu-popover small { color: #69736d; font-size: 8px; }
+.messages { padding: 0 20px; }
+.conversation-column { width: min(100%, 760px); min-height: 100%; margin: 0 auto; padding: 30px 0; }
+.empty-chat { min-height: calc(100vh - 300px); height: auto; }
+.empty-chat .agent-mark.large { width: 36px; height: 36px; margin-bottom: 14px; font-size: 17px; }
+.empty-chat h2 { margin: 0 0 8px; font-size: 20px; letter-spacing: -0.025em; }
+.empty-chat p { color: #7c8780; }
+.prompt-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 20px; }
+.prompt-suggestions button { padding: 7px 9px; border: 1px solid #303832; color: #99a39c; background: #111613; font-size: 9px; font-weight: 500; }
+.prompt-suggestions button:hover { color: #c9d1cb; background: #1b211d; }
+.message { max-width: 88%; }
+.message p { border: 0; padding: 0; color: #c6cec8; background: transparent; }
+.message.user p { padding: 10px 12px; background: #202722; }
+.composer-area { padding: 10px 20px 12px; border-top: 1px solid #202622; background: #0d110f; }
+.composer-area > small { display: block; width: min(100%, 760px); margin: 5px auto 0; color: #657069; font-size: 8px; text-align: center; }
+.composer {
+  display: grid; width: min(100%, 760px); margin: 0 auto; padding: 0;
+  border: 1px solid #303933; border-radius: 10px; background: #151a17;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+}
+.composer textarea {
+  min-height: 44px; max-height: 130px; padding: 12px 14px 4px;
+  border: 0; border-radius: 10px; background: transparent; resize: none;
+}
+.composer textarea:focus { border: 0; box-shadow: none; }
+.composer-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 33px; padding: 3px 6px 5px 12px; }
+.composer-toolbar > span { color: #667069; font-size: 9px; }
+.composer-toolbar button { display: grid; place-items: center; min-width: 0; width: 27px; height: 27px; padding: 0; border-radius: 7px; }
+.composer-toolbar .stop-button { width: auto; padding: 0 9px; }
+
 @keyframes pulse { from { opacity: 0.45; } to { opacity: 1; } }
 
 @media (max-width: 1050px) {

@@ -221,142 +221,181 @@ export function WorkspaceView({ status, onOpenSetup }: WorkspaceViewProps): Reac
 
   return (
     <section className="workspace-view">
-      <aside className="workspace-sidebar">
-        <div>
-          <p className="eyebrow">ESPACE DE TRAVAIL</p>
-          <h2>{project?.name ?? 'Aucun projet'}</h2>
-          <p>{project?.path ?? 'Sélectionnez un dossier pour préparer les outils de code.'}</p>
-          <button type="button" onClick={() => void chooseProject()}>
-            {project ? 'Changer de projet' : 'Ouvrir un projet'}
-          </button>
+      <nav className="app-rail" aria-label="Sections de Local Agent">
+        <div className="rail-main">
+          <button className="active" type="button" aria-label="Threads" title="Threads">⌁</button>
+          <button type="button" aria-label="Projets" title="Projets" onClick={() => void chooseProject()}>◇</button>
+          <button type="button" aria-label="Nouveau thread" title="Nouveau thread" onClick={newThread}>＋</button>
         </div>
+        <button type="button" aria-label="Modèles et réglages" title="Modèles et réglages" onClick={onOpenSetup}>⚙</button>
+      </nav>
 
-        <div className="model-selector">
-          <label htmlFor="active-model">Modèle actif</label>
-          {models.length > 0 ? (
-            <select
-              id="active-model"
-              value={effectiveModel}
-              onChange={(event) => setSelectedModel(event.target.value)}
-              disabled={Boolean(activeRequest)}
-            >
-              {models.map((model) => <option value={model.name} key={model.name}>{model.name}</option>)}
-            </select>
-          ) : (
-            <button className="secondary-button" type="button" onClick={onOpenSetup}>
-              Configurer un modèle
-            </button>
-          )}
-        </div>
+      <aside className="workspace-sidebar">
+        <button className="project-switcher" type="button" onClick={() => void chooseProject()}>
+          <span className="project-icon">◇</span>
+          <span>
+            <small>ESPACE LOCAL</small>
+            <strong>{project?.name ?? 'Tous les projets'}</strong>
+          </span>
+          <span aria-hidden="true">⌄</span>
+        </button>
+
+        <button className="new-thread-button" type="button" onClick={newThread}>
+          <span>＋</span> Nouveau thread
+          <kbd>Ctrl N</kbd>
+        </button>
 
         <div className="thread-list">
-          <div className="thread-list-heading">
-            <span>Threads</span>
-            <button type="button" onClick={newThread} aria-label="Nouveau thread">+</button>
+          <div className="thread-group-heading">
+            <span className="agent-mark">◒</span>
+            <strong>Agent de programmation</strong>
+            <span>{threads.length}</span>
           </div>
-          {threads.map((thread) => (
-            <div className={`thread-row ${activeThreadId === thread.id ? 'active' : ''}`} key={thread.id}>
-              <button type="button" onClick={() => void openThread(thread)}>{thread.title}</button>
-              <button
-                type="button"
-                aria-label={`Supprimer ${thread.title}`}
-                disabled={Boolean(activeRequest) && activeThreadId === thread.id}
-                onClick={() => void removeThread(thread.id)}
-              >×</button>
-            </div>
-          ))}
+          <div className="thread-tree">
+            {threads.length === 0 && <p>Aucun thread pour le moment</p>}
+            {threads.map((thread) => (
+              <div className={`thread-row ${activeThreadId === thread.id ? 'active' : ''}`} key={thread.id}>
+                <span className="branch" aria-hidden="true">├</span>
+                <span className="thread-agent" aria-hidden="true">●</span>
+                <button type="button" title={thread.title} onClick={() => void openThread(thread)}>{thread.title}</button>
+                <button
+                  className="thread-delete"
+                  type="button"
+                  aria-label={`Supprimer ${thread.title}`}
+                  disabled={Boolean(activeRequest) && activeThreadId === thread.id}
+                  onClick={() => void removeThread(thread.id)}
+                >×</button>
+              </div>
+            ))}
+          </div>
         </div>
 
-        <div className="runtime-summary">
-          <div><span className={`status-dot ${hasOllama ? 'online' : 'offline'}`} />
-            <span>{hasOllama ? 'Ollama connecté' : 'Ollama indisponible'}</span>
+        <div className="sidebar-footer">
+          <div className="runtime-summary">
+            <div>
+              <span className={`status-dot ${hasOllama ? 'online' : 'offline'}`} />
+              <span>{hasOllama ? 'Ollama connecté' : 'Ollama indisponible'}</span>
+            </div>
+            {activeThread?.projectPath && (
+              <small>{activeThread.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
+            )}
           </div>
-          {activeThread?.projectPath && (
-            <small>{activeThread.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
-          )}
+
+          <div className="model-selector">
+            {models.length > 0 ? (
+              <select
+                aria-label="Modèle actif"
+                value={effectiveModel}
+                onChange={(event) => setSelectedModel(event.target.value)}
+                disabled={Boolean(activeRequest)}
+              >
+                {models.map((model) => <option value={model.name} key={model.name}>{model.name}</option>)}
+              </select>
+            ) : (
+              <button type="button" onClick={onOpenSetup}>Configurer un modèle</button>
+            )}
+          </div>
         </div>
       </aside>
 
       <div className="chat-panel">
         <div className="chat-header">
-          <div><p className="eyebrow">THREAD LOCAL</p><h3>{activeThread?.title ?? 'Nouvelle conversation'}</h3></div>
+          <div className="thread-identity">
+            <span>{project?.name ?? 'Local'}</span>
+            <span aria-hidden="true">/</span>
+            <h3>{activeThread?.title ?? 'Nouveau thread'}</h3>
+          </div>
           <div className="chat-header-actions">
             {activeThread?.projectPath && !activeRequest && (
               <button className="ghost-button" type="button" onClick={() => void reviewProject()}>
-                Voir les changements
+                <span aria-hidden="true">±</span> Changements
               </button>
             )}
-            {messages.length > 0 && !activeRequest && (
-              <button className="ghost-button" type="button" onClick={newThread}>
-                Nouveau
-              </button>
-            )}
+            <details className="thread-menu">
+              <summary aria-label="Options du thread">•••</summary>
+              <div className="thread-menu-popover">
+                <div><span>⌁</span><span>Accès</span><small>Privé · local</small></div>
+                <button type="button" onClick={newThread}><span>＋</span><span>Nouveau thread</span></button>
+                <button type="button" onClick={onOpenSetup}><span>⚙</span><span>Réglages du modèle</span></button>
+              </div>
+            </details>
           </div>
         </div>
 
         <div className="messages" aria-live="polite">
-          {(projectReview || reviewError) && (
-            <article className="project-review">
-              <div>
-                <strong>Changements du projet</strong>
-                <button type="button" aria-label="Fermer les changements" onClick={() => { setProjectReview(null); setReviewError(null) }}>×</button>
-              </div>
-              {reviewError ? <p>{reviewError}</p> : projectReview && (
-                <>
-                  <small>{projectReview.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct'}</small>
-                  <pre>{projectReview.status || 'Aucun fichier modifié.'}</pre>
-                  {projectReview.diff && <pre>{projectReview.diff}</pre>}
-                </>
-              )}
-            </article>
-          )}
-          {messages.length === 0 ? (
-            <div className="empty-chat">
-              <span>⌁</span>
-              <h3>Que voulez-vous construire ?</h3>
-              <p>Choisissez un modèle local puis envoyez votre première demande.</p>
-            </div>
-          ) : messages.map((message) => (
-            <article className={`message ${message.role} ${message.failed ? 'failed' : ''}`} key={message.id}>
-              <span>{message.role === 'user' ? 'Vous' : 'Agent'}</span>
-              <p>{message.content || (activeRequest === message.id ? 'Réflexion…' : '')}</p>
-            </article>
-          ))}
-          {toolActivities.length > 0 && (
-            <div className="tool-activities" aria-label="Activité des outils">
-              {toolActivities.map((activity) => (
-                <div className={activity.status} key={activity.id}>
-                  <span>{activity.status === 'running' ? '○' : activity.status === 'done' ? '✓' : '!'}</span>
-                  <span>{TOOL_LABELS[activity.tool] ?? activity.tool}</span>
-                  <small>{activity.status === 'running' ? 'en cours' : activity.status === 'done' ? 'terminé' : activity.status === 'denied' ? 'refusé' : 'erreur'}</small>
+          <div className="conversation-column">
+            {(projectReview || reviewError) && (
+              <article className="project-review">
+                <div>
+                  <strong>Changements du projet</strong>
+                  <button type="button" aria-label="Fermer les changements" onClick={() => { setProjectReview(null); setReviewError(null) }}>×</button>
                 </div>
-              ))}
-            </div>
-          )}
+                {reviewError ? <p>{reviewError}</p> : projectReview && (
+                  <>
+                    <small>{projectReview.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct'}</small>
+                    <pre>{projectReview.status || 'Aucun fichier modifié.'}</pre>
+                    {projectReview.diff && <pre>{projectReview.diff}</pre>}
+                  </>
+                )}
+              </article>
+            )}
+            {messages.length === 0 ? (
+              <div className="empty-chat">
+                <span className="agent-mark large">◒</span>
+                <h2>Que voulez-vous construire ?</h2>
+                <p>Local Agent travaille dans votre projet avec votre modèle Ollama.</p>
+                <div className="prompt-suggestions">
+                  <button type="button" onClick={() => setPrompt('Analyse ce projet et explique-moi sa structure.')}>Analyser le projet</button>
+                  <button type="button" onClick={() => setPrompt('Trouve et corrige le problème principal de ce projet.')}>Corriger un problème</button>
+                  <button type="button" onClick={() => setPrompt('Ajoute les tests manquants les plus importants.')}>Ajouter des tests</button>
+                </div>
+              </div>
+            ) : messages.map((message) => (
+              <article className={`message ${message.role} ${message.failed ? 'failed' : ''}`} key={message.id}>
+                <span>{message.role === 'user' ? 'Vous' : 'Agent'}</span>
+                <p>{message.content || (activeRequest === message.id ? 'Réflexion…' : '')}</p>
+              </article>
+            ))}
+            {toolActivities.length > 0 && (
+              <div className="tool-activities" aria-label="Activité des outils">
+                {toolActivities.map((activity) => (
+                  <div className={activity.status} key={activity.id}>
+                    <span>{activity.status === 'running' ? '○' : activity.status === 'done' ? '✓' : '!'}</span>
+                    <span>{TOOL_LABELS[activity.tool] ?? activity.tool}</span>
+                    <small>{activity.status === 'running' ? 'en cours' : activity.status === 'done' ? 'terminé' : activity.status === 'denied' ? 'refusé' : 'erreur'}</small>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
-        <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
-          <textarea
-            aria-label="Votre demande"
-            placeholder={effectiveModel ? 'Demandez une explication ou une modification…' : 'Installez d’abord un modèle local…'}
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault()
-                void sendMessage()
-              }
-            }}
-            disabled={!effectiveModel || Boolean(activeRequest)}
-          />
-          {activeRequest ? (
-            <button className="stop-button" type="button" onClick={() => void window.localAgent.cancelChat(activeRequest)}>
-              Arrêter
-            </button>
-          ) : (
-            <button type="submit" disabled={!prompt.trim() || !effectiveModel}>Envoyer</button>
-          )}
-        </form>
+        <div className="composer-area">
+          <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
+            <textarea
+              aria-label="Votre demande"
+              placeholder={effectiveModel ? 'Demandez à Local Agent…' : 'Installez d’abord un modèle local…'}
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  void sendMessage()
+                }
+              }}
+              disabled={!effectiveModel || Boolean(activeRequest)}
+            />
+            <div className="composer-toolbar">
+              <span>{project ? `◇ ${project.name}` : 'Aucun projet'}</span>
+              {activeRequest ? (
+                <button className="stop-button" type="button" onClick={() => void window.localAgent.cancelChat(activeRequest)}>Arrêter</button>
+              ) : (
+                <button type="submit" aria-label="Envoyer" disabled={!prompt.trim() || !effectiveModel}>↑</button>
+              )}
+            </div>
+          </form>
+          <small>Entrée pour envoyer · Maj + Entrée pour une nouvelle ligne</small>
+        </div>
       </div>
     </section>
   )

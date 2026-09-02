@@ -140,16 +140,26 @@ export function App(): React.JSX.Element {
         <WorkspaceView status={status} onOpenSetup={() => setView('setup')} />
       ) : (
       <div className="setup-view">
-      <section className="intro">
+      <aside className="settings-sidebar">
         <div>
-          <p className="eyebrow">CONFIGURATION LOCALE</p>
-          <h2>Choisissez l’IA qui vous correspond.</h2>
-          <p className="lede">
-            Local Agent analyse votre machine et conseille des modèles, mais vous gardez
-            toujours le choix selon votre usage.
-          </p>
+          <span className="agent-mark">◒</span>
+          <strong>Réglages</strong>
         </div>
+        <nav aria-label="Réglages">
+          <button className="active" type="button"><span>◉</span> Modèles locaux</button>
+          <button type="button" disabled><span>◇</span> Profils workers <small>Bientôt</small></button>
+          <button type="button" disabled><span>⌁</span> Accès et portails <small>Bientôt</small></button>
+        </nav>
+        <button className="settings-back" type="button" onClick={() => setView('agent')}>← Retour aux threads</button>
+      </aside>
 
+      <div className="settings-content">
+      <header className="settings-page-header">
+        <div><p className="eyebrow">LOCAL RUNTIME</p><h2>Modèles locaux</h2></div>
+        <p>Gérez Ollama et choisissez les modèles disponibles pour vos agents.</p>
+      </header>
+
+      <section className="runtime-panel">
         <div className="diagnostic-grid">
           <article className="diagnostic-card" aria-live="polite">
             <div className="card-title-row">
@@ -216,10 +226,11 @@ export function App(): React.JSX.Element {
 
       <section className="models-section">
         <div className="section-heading">
-          <div><p className="eyebrow">CATALOGUE LOCAL</p><h3>Quel type de modèle voulez-vous ?</h3></div>
+          <div><p className="eyebrow">CATALOGUE</p><h3>Installer un modèle</h3></div>
           <p>Les tailles sont approximatives. Le téléchargement nécessite Internet une seule fois.</p>
         </div>
 
+        <div className="model-browser">
         <div className="category-tabs" role="tablist" aria-label="Types de modèles">
           {CATEGORIES.map((item) => (
             <button
@@ -236,6 +247,7 @@ export function App(): React.JSX.Element {
           ))}
         </div>
 
+        <div className="model-results">
         <div className="catalog-grid">
           {visibleModels.map((model) => {
             const installed = installedModels.has(normalizeModelName(model.id))
@@ -287,7 +299,10 @@ export function App(): React.JSX.Element {
             expérimentalement et sa disponibilité dépend du système.
           </p>
         )}
+        </div>
+        </div>
       </section>
+      </div>
       </div>
       )}
     </main>
