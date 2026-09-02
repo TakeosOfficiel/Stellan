@@ -84,6 +84,25 @@ function isApprovedProject(projectPath: string): boolean {
   )
 }
 
+async function openThreadProject(threadId: string): Promise<ProjectTools> {
+  const store = getThreadStore()
+  const thread = store.getThread(threadId)
+  if (!thread) throw new Error('Le thread local est introuvable.')
+  if (thread.environmentStatus !== 'active') {
+    throw new Error(thread.environmentError ?? 'L’environnement de ce thread n’est pas actif.')
+  }
+
+  const executionPath = thread.workspacePath ?? thread.projectPath
+  if (!executionPath) throw new Error('L’environnement actif n’a pas de dossier de travail.')
+  try {
+    return await ProjectTools.create(executionPath)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Le dossier de travail est indisponible.'
+    store.transitionEnvironment(thread.id, 'error', reason)
+    throw new Error(`L’environnement de ce thread est indisponible : ${reason}`)
+  }
+}
+
 async function defaultWorkerProfile(projectPath: string) {
   const hardware = await getHardwareInfo()
   return {
@@ -155,6 +174,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
   threadStore = new ThreadStore(join(app.getPath('userData'), 'local-agent.sqlite'))
+  threadStore.recoverInterruptedEnvironments()
   handle(WINDOW_MINIMIZE_CHANNEL, () => mainWindow?.minimize())
   handle(WINDOW_TOGGLE_MAXIMIZE_CHANNEL, () => {
     if (!mainWindow) return
@@ -251,16 +271,13 @@ app.whenReady().then(() => {
     const thread = store.createThread(parsed)
     if (!parsed.projectPath) return thread
 
+    let workspacePath: string
     try {
-      const workspacePath = await createThreadWorktree(
+      workspacePath = await createThreadWorktree(
         parsed.projectPath,
         join(app.getPath('userData'), 'workspaces'),
         thread.id
       )
-      return store.updateThread(thread.id, {
-        workspacePath,
-        workspaceMode: 'worktree'
-      }) ?? thread
     } catch (error) {
       const owner = BrowserWindow.fromWebContents(event.sender)
       const options = {
@@ -277,11 +294,13 @@ app.whenReady().then(() => {
         ? await dialog.showMessageBox(owner, options)
         : await dialog.showMessageBox(options)
       if (result.response !== 1) {
+        store.transitionEnvironment(thread.id, 'terminated')
         store.deleteThread(thread.id)
         throw new Error('Création annulée : l’isolation Git est indisponible.')
       }
-      return store.updateThread(thread.id, { workspaceMode: 'direct' }) ?? thread
+      return store.activateEnvironment(thread.id, 'direct', null)
     }
+    return store.activateEnvironment(thread.id, 'worktree', workspacePath)
   })
   handle(THREADS_MESSAGES_CHANNEL, (_event, input: unknown) => {
     const threadId = requestIdSchema.parse(input)
@@ -295,8 +314,11 @@ app.whenReady().then(() => {
     if (activeThreadChats.has(threadId)) {
       throw new Error('Arrêtez la génération avant de supprimer ce thread.')
     }
+    if (thread.environmentStatus === 'terminated') return store.deleteThread(threadId)
     if (thread.projectPath && thread.workspacePath) {
-      const project = await ProjectTools.create(thread.workspacePath)
+      const project = thread.environmentStatus === 'active'
+        ? await openThreadProject(thread.id)
+        : await ProjectTools.create(thread.workspacePath)
       const status = await project.gitStatus()
       let force = false
       if (status.trim()) {
@@ -317,21 +339,32 @@ app.whenReady().then(() => {
         if (result.response !== 1) return false
         force = true
       }
-      await removeThreadWorktree(
-        thread.projectPath,
-        join(app.getPath('userData'), 'workspaces'),
-        thread.id,
-        force
-      )
+      try {
+        await removeThreadWorktree(
+          thread.projectPath,
+          join(app.getPath('userData'), 'workspaces'),
+          thread.id,
+          force
+        )
+      } catch (error) {
+        if (thread.environmentStatus !== 'error') {
+          store.transitionEnvironment(
+            thread.id,
+            'error',
+            error instanceof Error ? error.message : 'Le nettoyage du worktree a échoué.'
+          )
+        }
+        throw error
+      }
     }
+    if (thread.projectPath) store.transitionEnvironment(thread.id, 'terminated')
     return store.deleteThread(threadId)
   })
   handle(THREADS_REVIEW_PROJECT_CHANNEL, async (_event, input: unknown) => {
     const threadId = requestIdSchema.parse(input)
     const thread = getThreadStore().getThread(threadId)
-    const executionPath = thread?.workspacePath ?? thread?.projectPath
-    if (!thread || !executionPath) return null
-    const project = await ProjectTools.create(executionPath)
+    if (!thread || !thread.projectPath) return null
+    const project = await openThreadProject(thread.id)
     const [status, diff] = await Promise.all([project.gitStatus(), project.gitDiff()])
     return {
       status,
@@ -386,7 +419,9 @@ app.whenReady().then(() => {
         if (!await modelSupportsTools(parsed.data.model)) {
           throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
         }
-        const project = await ProjectTools.create(executionPath)
+        const project = thread
+          ? await openThreadProject(thread.id)
+          : await ProjectTools.create(executionPath)
         const workerProfile = thread?.projectPath
           ? getThreadStore().getWorkerProfile(thread.projectPath)
           : null

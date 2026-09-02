@@ -7,10 +7,15 @@ export type Thread = {
   projectPath: string | null
   workspacePath: string | null
   workspaceMode: 'none' | 'worktree' | 'direct'
+  environmentStatus: EnvironmentStatus
+  environmentError: string | null
+  environmentUpdatedAt: string
   model: string | null
   createdAt: string
   updatedAt: string
 }
+
+export type EnvironmentStatus = 'creating' | 'active' | 'error' | 'terminated'
 
 export type CreateThreadInput = {
   title: string
@@ -22,9 +27,6 @@ export type CreateThreadInput = {
 
 export type UpdateThreadInput = {
   title?: string
-  projectPath?: string | null
-  workspacePath?: string | null
-  workspaceMode?: Thread['workspaceMode']
   model?: string | null
 }
 
@@ -93,6 +95,25 @@ const migrations = [
       network TEXT NOT NULL CHECK (network IN ('none', 'bridge')),
       updated_at TEXT NOT NULL
     );
+  `,
+  `
+    ALTER TABLE threads ADD COLUMN environment_status TEXT NOT NULL DEFAULT 'terminated'
+      CHECK (environment_status IN ('creating', 'active', 'error', 'terminated'));
+    ALTER TABLE threads ADD COLUMN environment_error TEXT;
+    ALTER TABLE threads ADD COLUMN environment_updated_at TEXT NOT NULL DEFAULT '';
+
+    UPDATE threads
+    SET environment_status = CASE
+          WHEN project_path IS NULL THEN 'terminated'
+          WHEN workspace_mode IN ('worktree', 'direct') THEN 'active'
+          ELSE 'error'
+        END,
+        environment_error = CASE
+          WHEN project_path IS NOT NULL AND workspace_mode = 'none'
+            THEN 'L’environnement hérité est incomplet.'
+          ELSE NULL
+        END,
+        environment_updated_at = updated_at;
   `
 ]
 
@@ -105,6 +126,9 @@ function toThread(row: StorageRow): Thread {
     workspaceMode: row.workspace_mode === 'worktree' || row.workspace_mode === 'direct'
       ? row.workspace_mode
       : 'none',
+    environmentStatus: String(row.environment_status) as EnvironmentStatus,
+    environmentError: row.environment_error === null ? null : String(row.environment_error),
+    environmentUpdatedAt: String(row.environment_updated_at),
     model: row.model === null ? null : String(row.model),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
@@ -143,8 +167,8 @@ export class ThreadStore {
 
     try {
       this.database.exec('PRAGMA foreign_keys = ON')
-      this.migrate()
       this.ensureThreadColumns()
+      this.migrate()
     } catch (error) {
       this.database.close()
       this.closed = true
@@ -161,19 +185,28 @@ export class ThreadStore {
       projectPath: input.projectPath ?? null,
       workspacePath: input.workspacePath ?? null,
       workspaceMode: input.workspaceMode ?? 'none',
+      environmentStatus: input.projectPath ? 'creating' : 'terminated',
+      environmentError: null,
+      environmentUpdatedAt: new Date().toISOString(),
       model: input.model ?? null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }
     this.database.prepare(`
-      INSERT INTO threads (id, title, project_path, workspace_path, workspace_mode, model, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO threads (
+        id, title, project_path, workspace_path, workspace_mode,
+        environment_status, environment_error, environment_updated_at,
+        model, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       thread.id,
       thread.title,
       thread.projectPath,
       thread.workspacePath,
       thread.workspaceMode,
+      thread.environmentStatus,
+      thread.environmentError,
+      thread.environmentUpdatedAt,
       thread.model,
       thread.createdAt,
       thread.updatedAt
@@ -186,7 +219,9 @@ export class ThreadStore {
     this.assertOpen()
 
     return this.database.prepare(`
-      SELECT id, title, project_path, workspace_path, workspace_mode, model, created_at, updated_at
+      SELECT id, title, project_path, workspace_path, workspace_mode,
+             environment_status, environment_error, environment_updated_at,
+             model, created_at, updated_at
       FROM threads
       ORDER BY created_at ASC, rowid ASC
     `).all().map(toThread)
@@ -196,7 +231,9 @@ export class ThreadStore {
     this.assertOpen()
 
     const row = this.database.prepare(`
-      SELECT id, title, project_path, workspace_path, workspace_mode, model, created_at, updated_at
+      SELECT id, title, project_path, workspace_path, workspace_mode,
+             environment_status, environment_error, environment_updated_at,
+             model, created_at, updated_at
       FROM threads
       WHERE id = ?
     `).get(id)
@@ -209,9 +246,6 @@ export class ThreadStore {
 
     if (
       input.title === undefined &&
-      input.projectPath === undefined &&
-      input.workspacePath === undefined &&
-      input.workspaceMode === undefined &&
       input.model === undefined
     ) {
       return this.getThread(id)
@@ -223,19 +257,70 @@ export class ThreadStore {
     const updatedAt = new Date().toISOString()
     const result = this.database.prepare(`
       UPDATE threads
-      SET title = ?, project_path = ?, workspace_path = ?, workspace_mode = ?, model = ?, updated_at = ?
+      SET title = ?, model = ?, updated_at = ?
       WHERE id = ?
     `).run(
       input.title ?? current.title,
-      input.projectPath === undefined ? current.projectPath : input.projectPath,
-      input.workspacePath === undefined ? current.workspacePath : input.workspacePath,
-      input.workspaceMode ?? current.workspaceMode,
       input.model === undefined ? current.model : input.model,
       updatedAt,
       id
     )
 
     return result.changes === 0 ? null : this.getThread(id)
+  }
+
+  activateEnvironment(
+    id: string,
+    workspaceMode: 'worktree' | 'direct',
+    workspacePath: string | null
+  ): Thread {
+    this.assertOpen()
+    if (workspaceMode === 'worktree' && !workspacePath) {
+      throw new Error('A worktree environment requires a workspace path')
+    }
+
+    const updatedAt = new Date().toISOString()
+    const result = this.database.prepare(`
+      UPDATE threads
+      SET workspace_path = ?, workspace_mode = ?, environment_status = 'active',
+          environment_error = NULL, environment_updated_at = ?, updated_at = ?
+      WHERE id = ? AND project_path IS NOT NULL AND environment_status = 'creating'
+    `).run(workspacePath, workspaceMode, updatedAt, updatedAt, id)
+    if (result.changes === 0) this.throwInvalidEnvironmentTransition(id, 'active')
+    return this.getThread(id) as Thread
+  }
+
+  transitionEnvironment(id: string, status: 'creating' | 'error' | 'terminated', error?: string): Thread {
+    this.assertOpen()
+    if (status === 'error' && !error?.trim()) {
+      throw new Error('An error environment requires a reason')
+    }
+
+    const allowedFrom = status === 'creating' ? ['error'] : status === 'error'
+      ? ['creating', 'active']
+      : ['creating', 'active', 'error']
+    const updatedAt = new Date().toISOString()
+    const placeholders = allowedFrom.map(() => '?').join(', ')
+    const result = this.database.prepare(`
+      UPDATE threads
+      SET environment_status = ?, environment_error = ?, environment_updated_at = ?, updated_at = ?
+      WHERE id = ? AND environment_status IN (${placeholders})
+    `).run(status, status === 'error' ? error?.trim() ?? null : null, updatedAt, updatedAt, id, ...allowedFrom)
+    if (result.changes === 0) this.throwInvalidEnvironmentTransition(id, status)
+    return this.getThread(id) as Thread
+  }
+
+  recoverInterruptedEnvironments(): number {
+    this.assertOpen()
+    const updatedAt = new Date().toISOString()
+    const result = this.database.prepare(`
+      UPDATE threads
+      SET environment_status = 'error',
+          environment_error = 'La création de l’environnement a été interrompue.',
+          environment_updated_at = ?, updated_at = ?
+      WHERE environment_status = 'creating'
+    `).run(updatedAt, updatedAt)
+    return Number(result.changes)
   }
 
   deleteThread(id: string): boolean {
@@ -323,6 +408,12 @@ export class ThreadStore {
     if (this.closed) throw new Error('ThreadStore is closed')
   }
 
+  private throwInvalidEnvironmentTransition(id: string, status: EnvironmentStatus): never {
+    const thread = this.getThread(id)
+    if (!thread) throw new Error(`Thread not found: ${id}`)
+    throw new Error(`Invalid environment transition: ${thread.environmentStatus} -> ${status}`)
+  }
+
   private migrate(): void {
     const row = this.database.prepare('PRAGMA user_version').get()
     const currentVersion = Number(row?.user_version ?? 0)
@@ -345,6 +436,11 @@ export class ThreadStore {
   }
 
   private ensureThreadColumns(): void {
+    const threadsTable = this.database.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'threads'
+    `).get()
+    if (!threadsTable) return
+
     const columns = new Set(
       this.database.prepare('PRAGMA table_info(threads)').all()
         .map((row) => String(row.name))

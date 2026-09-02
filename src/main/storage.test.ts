@@ -75,6 +75,75 @@ describe('ThreadStore', () => {
     }
   })
 
+  it('enforces fail-closed environment state transitions', () => {
+    const store = new ThreadStore(temporaryDatabase())
+    try {
+      const thread = store.createThread({ title: 'Worker', projectPath: '/project' })
+      expect(thread).toMatchObject({
+        workspaceMode: 'none',
+        environmentStatus: 'creating',
+        environmentError: null
+      })
+
+      const direct = store.activateEnvironment(thread.id, 'direct', null)
+      expect(direct).toMatchObject({ workspaceMode: 'direct', environmentStatus: 'active' })
+      expect(() => store.activateEnvironment(thread.id, 'direct', null)).toThrow(
+        'Invalid environment transition: active -> active'
+      )
+      expect(() => store.transitionEnvironment(thread.id, 'error')).toThrow(
+        'An error environment requires a reason'
+      )
+
+      expect(store.transitionEnvironment(thread.id, 'error', 'Workspace disappeared')).toMatchObject({
+        environmentStatus: 'error',
+        environmentError: 'Workspace disappeared'
+      })
+      expect(store.transitionEnvironment(thread.id, 'creating')).toMatchObject({
+        environmentStatus: 'creating',
+        environmentError: null
+      })
+      expect(store.activateEnvironment(thread.id, 'worktree', '/workspace')).toMatchObject({
+        workspaceMode: 'worktree',
+        workspacePath: '/workspace',
+        environmentStatus: 'active'
+      })
+      expect(store.transitionEnvironment(thread.id, 'terminated')).toMatchObject({
+        environmentStatus: 'terminated',
+        environmentError: null
+      })
+      expect(() => store.transitionEnvironment(thread.id, 'error', 'Too late')).toThrow(
+        'Invalid environment transition: terminated -> error'
+      )
+    } finally {
+      store.close()
+    }
+  })
+
+  it('marks interrupted environment creation as an error after reopening', () => {
+    const path = temporaryDatabase()
+    const firstStore = new ThreadStore(path)
+    const interrupted = firstStore.createThread({ title: 'Interrupted', projectPath: '/project' })
+    const active = firstStore.createThread({ title: 'Ready', projectPath: '/project' })
+    firstStore.activateEnvironment(active.id, 'direct', null)
+    firstStore.close()
+
+    const reopenedStore = new ThreadStore(path)
+    try {
+      expect(reopenedStore.recoverInterruptedEnvironments()).toBe(1)
+      expect(reopenedStore.getThread(interrupted.id)).toMatchObject({
+        environmentStatus: 'error',
+        environmentError: 'La création de l’environnement a été interrompue.'
+      })
+      expect(reopenedStore.getThread(active.id)).toMatchObject({
+        environmentStatus: 'active',
+        environmentError: null
+      })
+      expect(reopenedStore.recoverInterruptedEnvironments()).toBe(0)
+    } finally {
+      reopenedStore.close()
+    }
+  })
+
   it('upgrades a legacy database that predates project workspaces', () => {
     const path = temporaryDatabase()
     const legacy = new DatabaseSync(path)
@@ -106,8 +175,50 @@ describe('ThreadStore', () => {
       })).toMatchObject({
         projectPath: '/project',
         workspacePath: '/workspace',
+        environmentStatus: 'creating',
         model: 'local-model'
       })
+    } finally {
+      store.close()
+    }
+  })
+
+  it('migrates existing workspace state into explicit environment state', () => {
+    const path = temporaryDatabase()
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        project_path TEXT,
+        workspace_path TEXT,
+        workspace_mode TEXT NOT NULL DEFAULT 'none',
+        model TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO threads VALUES
+        ('worktree', 'Worktree', '/project', '/workspace', 'worktree', NULL, '2026-01-01', '2026-01-02'),
+        ('direct', 'Direct', '/project', NULL, 'direct', NULL, '2026-01-01', '2026-01-02'),
+        ('incomplete', 'Incomplete', '/project', NULL, 'none', NULL, '2026-01-01', '2026-01-02'),
+        ('chat', 'Chat', NULL, NULL, 'none', NULL, '2026-01-01', '2026-01-02');
+      PRAGMA user_version = 2;
+    `)
+    legacy.close()
+
+    const store = new ThreadStore(path)
+    try {
+      expect(store.getThread('worktree')).toMatchObject({
+        environmentStatus: 'active',
+        environmentError: null,
+        environmentUpdatedAt: '2026-01-02'
+      })
+      expect(store.getThread('direct')).toMatchObject({ environmentStatus: 'active' })
+      expect(store.getThread('incomplete')).toMatchObject({
+        environmentStatus: 'error',
+        environmentError: 'L’environnement hérité est incomplet.'
+      })
+      expect(store.getThread('chat')).toMatchObject({ environmentStatus: 'terminated' })
     } finally {
       store.close()
     }

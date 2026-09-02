@@ -108,6 +108,9 @@ export type StoredThread = {
   projectPath: string | null
   workspacePath: string | null
   workspaceMode: 'none' | 'worktree' | 'direct'
+  environmentStatus: 'creating' | 'active' | 'error' | 'terminated'
+  environmentError: string | null
+  environmentUpdatedAt: string
   model: string | null
   createdAt: string
   updatedAt: string
