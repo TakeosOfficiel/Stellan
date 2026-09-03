@@ -313,14 +313,14 @@ export function App(): React.JSX.Element {
             <div className="startup-orbit" aria-hidden="true"><i /><i /><i /><span><LoaderCircle /></span></div>
             <div className="startup-card-heading">
               <div>
-                <small>{firstRun ? 'PREMIÈRE MISE EN PLACE' : 'ENVIRONNEMENT LOCAL'}</small>
+                <small>STELLAN</small>
                 <strong>{startupStep}</strong>
               </div>
               <span>{startupPercent}%</span>
             </div>
             <progress max="100" value={startupPercent} />
             <p>{STARTUP_PHRASES[Math.min(STARTUP_PHRASES.length - 1, Math.floor(startupPercent / 26))]}</p>
-            <small className="startup-detail">{startupDetail}</small>
+            <small className="startup-detail" title={startupDetail}>{startupDetail}</small>
             {!runtimeBusy && !firstModelDownload && !resolvedStatus?.available && (
               <div className="startup-card-actions">
                 {ollamaSetup.canOpenDownload && <button type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>Activer WSL 2</button>}

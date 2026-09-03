@@ -98,6 +98,7 @@ async function downloadVerifiedRootfs(destination: string): Promise<void> {
 async function wsl(args: readonly string[], options: CommandOptions = {}): Promise<CommandResult> {
   const result = await runHostCommand('wsl.exe', args, {
     ...options,
+    env: { ...process.env, ...options.env, WSL_UTF8: '1' },
     maxOutputBytes: options.maxOutputBytes ?? 200_000
   })
   return {
