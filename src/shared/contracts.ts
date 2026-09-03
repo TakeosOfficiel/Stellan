@@ -270,6 +270,7 @@ export type LocalAgentApi = {
   minimizeWindow: () => Promise<void>
   toggleMaximizeWindow: () => Promise<void>
   closeWindow: () => Promise<void>
+  setStartupWindow: (active: boolean) => Promise<void>
   getOllamaStatus: () => Promise<OllamaStatus>
   startOllama: () => Promise<OllamaStatus>
   getBasicHardwareInfo: () => Promise<HardwareInfo>
@@ -281,6 +282,7 @@ export type LocalAgentApi = {
   transcribeDictation: (audio: ArrayBuffer) => Promise<string>
   onDictationProgress: (listener: (progress: DictationProgress) => void) => () => void
   selectProject: () => Promise<ProjectSelection | null>
+  createProject: (name: string) => Promise<ProjectSelection>
   startChat: (request: ChatRequest) => Promise<AgentRunSummary>
   cancelChat: (requestId: string) => Promise<void>
   listActiveRuns: () => Promise<ActiveRun[]>

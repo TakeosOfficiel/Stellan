@@ -12,6 +12,7 @@ const api: LocalAgentApi = {
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
+  setStartupWindow: (active) => ipcRenderer.invoke('window:set-startup', active),
   getOllamaStatus: () => ipcRenderer.invoke('ollama:get-status'),
   startOllama: () => ipcRenderer.invoke('ollama:start'),
   getBasicHardwareInfo: () => ipcRenderer.invoke('hardware:get-basic'),
@@ -41,6 +42,7 @@ const api: LocalAgentApi = {
     return () => ipcRenderer.removeListener('dictation:progress', handler)
   },
   selectProject: () => ipcRenderer.invoke('project:select'),
+  createProject: (name) => ipcRenderer.invoke('project:create', name),
   startChat: (request) => ipcRenderer.invoke('chat:start', request),
   cancelChat: (requestId) => ipcRenderer.invoke('chat:cancel', requestId),
   listActiveRuns: () => ipcRenderer.invoke('chat:list-active'),

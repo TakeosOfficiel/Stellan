@@ -39,6 +39,7 @@ if [ ! -d .git ]; then git init; fi
 rm -rf .git/hooks && mkdir -p .git/hooks
 git config core.hooksPath /dev/null
 git config core.fsmonitor false
+[ -n "$(find . -mindepth 1 -maxdepth 1 ! -name .git -print -quit)" ] || touch .gitkeep
 git add -A
 if ! git rev-parse --verify HEAD >/dev/null 2>&1 || ! git diff --cached --quiet; then
   git -c user.name="Local Agent" -c user.email="local-agent@localhost" commit --no-verify -m "Local Agent snapshot"

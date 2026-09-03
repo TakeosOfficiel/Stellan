@@ -184,6 +184,9 @@ export function WorkspaceView({
   const [resourceSettings, setResourceSettings] = useState<ProjectResourceSettings | null>(null)
   const [resourceError, setResourceError] = useState<string | null>(null)
   const [savingResources, setSavingResources] = useState(false)
+  const [newProjectName, setNewProjectName] = useState<string | null>(null)
+  const [creatingProject, setCreatingProject] = useState(false)
+  const [createProjectError, setCreateProjectError] = useState<string | null>(null)
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
   const [messagesByThread, setMessagesByThread] = useState<Record<string, UiMessage[]>>({})
   const [prompt, setPrompt] = useState('')
@@ -468,6 +471,24 @@ export function WorkspaceView({
     }
   }
 
+  async function createProject(): Promise<void> {
+    const name = newProjectName?.trim()
+    if (!name) return
+    setCreatingProject(true)
+    setCreateProjectError(null)
+    try {
+      const selection = await window.localAgent.createProject(name)
+      await createProjectThread(selection)
+      setProject(selection)
+      setNewProjectName(null)
+      focusComposer()
+    } catch (error) {
+      setCreateProjectError(error instanceof Error ? error.message : 'La création du projet a échoué.')
+    } finally {
+      setCreatingProject(false)
+    }
+  }
+
   async function openThread(thread: StoredThread): Promise<void> {
     const request = ++openThreadRequestRef.current
     const [storedMessages, runHistory] = await Promise.all([
@@ -522,7 +543,8 @@ export function WorkspaceView({
   async function newThread(): Promise<void> {
     closeThreadMenu()
     if (!project) {
-      await chooseProject()
+      setCreateProjectError(null)
+      setNewProjectName('')
       return
     }
     await window.localAgent.setActiveThread(null)
@@ -829,7 +851,7 @@ export function WorkspaceView({
             title="Threads"
             onClick={() => setSidebarOpen((open) => !open)}
           >⌁</button>
-          <button type="button" aria-label="Projets" aria-keyshortcuts="Control+O Meta+O" title="Projets" onClick={() => void chooseProject()}>◇</button>
+          <button type="button" aria-label="Importer un projet" aria-keyshortcuts="Control+O Meta+O" title="Importer un projet" onClick={() => void chooseProject()}>◇</button>
           <button type="button" aria-label="Nouveau thread" aria-keyshortcuts="Control+N Meta+N" title="Nouveau thread" onClick={newThread}>＋</button>
         </div>
         <button type="button" aria-label="Modèles et réglages" aria-keyshortcuts="Control+, Meta+," title="Modèles et réglages" onClick={onOpenSetup}>⚙</button>
@@ -935,6 +957,21 @@ export function WorkspaceView({
         </div>
       </aside>
 
+      {newProjectName !== null && (
+        <div className="project-create-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !creatingProject) setNewProjectName(null)
+        }}>
+          <form className="project-create-dialog" onSubmit={(event) => { event.preventDefault(); void createProject() }}>
+            <small>NOUVEL ESPACE PRIVÉ</small>
+            <h3>Créer un projet</h3>
+            <p>Le projet sera créé directement dans l’environnement isolé. Aucun dossier Windows ne doit être choisi.</p>
+            <label>Nom du projet<input autoFocus maxLength={100} value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} placeholder="Mon projet" /></label>
+            {createProjectError && <p className="resource-error" role="alert">{createProjectError}</p>}
+            <footer><button type="button" disabled={creatingProject} onClick={() => setNewProjectName(null)}>Annuler</button><button type="submit" disabled={creatingProject || !newProjectName.trim()}>{creatingProject ? 'Création…' : 'Créer'}</button></footer>
+          </form>
+        </div>
+      )}
+
       {resourceSettings && (
         <div className="resource-dialog-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !savingResources) setResourceSettings(null)
@@ -1005,14 +1042,14 @@ export function WorkspaceView({
               <div className="empty-chat">
                 <span className="agent-mark large">◒</span>
                 <h2>{project ? 'Que voulez-vous construire ?' : 'Ouvrez d’abord un projet'}</h2>
-                <p>{project ? 'Local Agent travaille dans votre projet avec votre modèle Ollama.' : 'Choisissez un dépôt Git ou créez un dossier vierge depuis le sélecteur Windows.'}</p>
+                <p>{project ? 'Local Agent travaille dans votre projet avec votre modèle Ollama.' : 'Créez un espace privé ou importez un dossier existant.'}</p>
                 {project ? (
                   <div className="prompt-suggestions">
                     <button type="button" onClick={() => setPrompt('Analyse ce projet et explique-moi sa structure.')}>Analyser le projet</button>
                     <button type="button" onClick={() => setPrompt('Trouve et corrige le problème principal de ce projet.')}>Corriger un problème</button>
                     <button type="button" onClick={() => setPrompt('Ajoute les tests manquants les plus importants.')}>Ajouter des tests</button>
                   </div>
-                ) : <button className="empty-project-button" type="button" onClick={() => void chooseProject()}>Ouvrir ou créer un projet</button>}
+                ) : <div className="empty-project-actions"><button className="empty-project-button" type="button" onClick={() => setNewProjectName('')}>Créer un projet</button><button className="empty-project-button secondary" type="button" onClick={() => void chooseProject()}>Importer un dossier</button></div>}
               </div>
             ) : messages.map((message) => {
               const requestActivities = message.role === 'assistant'

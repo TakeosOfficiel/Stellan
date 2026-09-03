@@ -1,6 +1,6 @@
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { cp, lstat, statfs } from 'node:fs/promises'
+import { cp, lstat, mkdir, rm, statfs } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
@@ -43,6 +43,7 @@ const MODEL_PULL_PROGRESS_CHANNEL = 'ollama:pull-progress'
 const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
+const PROJECT_CREATE_CHANNEL = 'project:create'
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_CANCEL_CHANNEL = 'chat:cancel'
 const CHAT_LIST_ACTIVE_CHANNEL = 'chat:list-active'
@@ -76,6 +77,7 @@ const PORTAL_OPEN_CHANNEL = 'portal:open'
 const WINDOW_MINIMIZE_CHANNEL = 'window:minimize'
 const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'window:toggle-maximize'
 const WINDOW_CLOSE_CHANNEL = 'window:close'
+const WINDOW_SET_STARTUP_CHANNEL = 'window:set-startup'
 
 const modelIdSchema = z.string().min(1).max(100).refine(isCatalogModel)
 const dictationAudioSchema = z.custom<ArrayBuffer>((value) => value instanceof ArrayBuffer)
@@ -640,10 +642,9 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
 
 function createWindow(): void {
   const window = new BrowserWindow({
-    width: 1180,
-    height: 760,
-    minWidth: 880,
-    minHeight: 600,
+    width: 460,
+    height: 250,
+    resizable: false,
     backgroundColor: '#0c0d10',
     frame: false,
     autoHideMenuBar: true,
@@ -727,6 +728,20 @@ app.whenReady().then(() => {
     else mainWindow.maximize()
   })
   handle(WINDOW_CLOSE_CHANNEL, () => mainWindow?.close())
+  handle(WINDOW_SET_STARTUP_CHANNEL, (_event, input: unknown) => {
+    const active = z.boolean().parse(input)
+    if (!mainWindow) return
+    if (active) {
+      mainWindow.setResizable(false)
+      mainWindow.setMinimumSize(0, 0)
+      mainWindow.setSize(460, 250, true)
+    } else {
+      mainWindow.setMinimumSize(880, 600)
+      mainWindow.setResizable(true)
+      mainWindow.setSize(1180, 760, true)
+    }
+    mainWindow.center()
+  })
   handle(OLLAMA_STATUS_CHANNEL, () => getOllamaStatus())
   handle(OLLAMA_START_CHANNEL, () => ensureOllamaRunning())
   handle(HARDWARE_BASIC_CHANNEL, () => getBasicHardwareInfo())
@@ -812,6 +827,31 @@ app.whenReady().then(() => {
     }
     approvedProjectPaths.set(projectPath, kind)
     return { path: projectPath, name: projectName }
+  })
+  handle(PROJECT_CREATE_CHANNEL, async (_event, input: unknown) => {
+    const projectName = z.string().trim().min(1).max(100).regex(/^[^<>:"/\\|?*]+$/).parse(input)
+    const projectId = randomUUID()
+    const source = join(app.getPath('userData'), 'project-seeds', projectId)
+    await mkdir(source, { recursive: true })
+    try {
+      const privateProject = process.platform === 'win32'
+        ? await importPrivateProject(projectId, source)
+        : null
+      const projectPath = privateProject?.repositoryPath ?? source
+      if (privateProject) await rm(source, { recursive: true, force: true })
+      if (!privateProject) {
+        const tools = await ProjectTools.create(projectPath)
+        await tools.writeFile('.gitkeep', '')
+        await tools.runCommand('git', ['init'], { timeoutMs: 10_000 })
+        await tools.runCommand('git', ['add', '.gitkeep'], { timeoutMs: 10_000 })
+        await tools.runCommand('git', ['-c', 'user.name=Local Agent', '-c', 'user.email=local-agent@localhost', 'commit', '-m', 'Initial project'], { timeoutMs: 10_000 })
+      }
+      approvedProjectPaths.set(projectPath, 'git')
+      return { path: projectPath, name: projectName }
+    } catch (error) {
+      await rm(source, { recursive: true, force: true })
+      throw error
+    }
   })
   handle(THREADS_LIST_CHANNEL, () => getThreadStore().listThreads())
   handle(THREADS_SET_ACTIVE_CHANNEL, async (event, input: unknown) => {
@@ -1331,6 +1371,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(WINDOW_MINIMIZE_CHANNEL)
   ipcMain.removeHandler(WINDOW_TOGGLE_MAXIMIZE_CHANNEL)
   ipcMain.removeHandler(WINDOW_CLOSE_CHANNEL)
+  ipcMain.removeHandler(WINDOW_SET_STARTUP_CHANNEL)
   ipcMain.removeHandler(OLLAMA_STATUS_CHANNEL)
   ipcMain.removeHandler(OLLAMA_START_CHANNEL)
   ipcMain.removeHandler(SETUP_INFO_CHANNEL)
@@ -1338,6 +1379,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(MODEL_PULL_CHANNEL)
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
+  ipcMain.removeHandler(PROJECT_CREATE_CHANNEL)
   ipcMain.removeHandler(CHAT_START_CHANNEL)
   ipcMain.removeHandler(CHAT_CANCEL_CHANNEL)
   ipcMain.removeHandler(CHAT_LIST_ACTIVE_CHANNEL)

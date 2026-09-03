@@ -18,6 +18,12 @@ type LoadState = OllamaStatus | null | 'loading'
 
 const ONBOARDING_KEY = 'local-agent:onboarding-complete'
 const CATEGORY_KEY = 'local-agent:model-category'
+const STARTUP_PHRASES = [
+  'Préparation de votre espace privé…',
+  'Mise en route des outils locaux…',
+  'Tout reste sur votre ordinateur.',
+  'Encore quelques instants…'
+]
 
 const CATEGORIES: Array<{ id: ModelCategory; label: string; description: string }> = [
   { id: 'fast', label: 'Simple et rapide', description: 'Résumés et petites demandes' },
@@ -243,6 +249,7 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     if (startupVisible) startupCardRef.current?.focus()
+    void window.localAgent.setStartupWindow(startupVisible)
   }, [startupVisible])
 
   function finishOnboarding(): void {
@@ -275,11 +282,10 @@ export function App(): React.JSX.Element {
     }
   }
 
-  return (
-    <main className="app-shell">
-      <TitleBar view={view} onViewChange={setView} />
-
-      {startupVisible && (
+  if (startupVisible) {
+    return (
+      <main className="startup-shell">
+        <div className="startup-window-drag" />
         <div className="startup-overlay">
           <section
             ref={startupCardRef}
@@ -291,8 +297,8 @@ export function App(): React.JSX.Element {
             aria-busy={runtimeBusy || firstModelDownload}
             tabIndex={-1}
           >
+            <div className="startup-orbit" aria-hidden="true"><i /><i /><i /><span>◒</span></div>
             <div className="startup-card-heading">
-              <span className="agent-mark" aria-hidden="true">◒</span>
               <div>
                 <small>{firstRun ? 'PREMIÈRE MISE EN PLACE' : 'ENVIRONNEMENT LOCAL'}</small>
                 <strong>{startupStep}</strong>
@@ -300,7 +306,8 @@ export function App(): React.JSX.Element {
               <span>{startupPercent}%</span>
             </div>
             <progress max="100" value={startupPercent} />
-            <p>{startupDetail}</p>
+            <p>{STARTUP_PHRASES[Math.min(STARTUP_PHRASES.length - 1, Math.floor(startupPercent / 26))]}</p>
+            <small className="startup-detail">{startupDetail}</small>
             {!runtimeBusy && !firstModelDownload && !resolvedStatus?.available && (
               <div className="startup-card-actions">
                 {ollamaSetup.canOpenDownload && <button type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>Activer WSL 2</button>}
@@ -309,7 +316,13 @@ export function App(): React.JSX.Element {
             )}
           </section>
         </div>
-      )}
+      </main>
+    )
+  }
+
+  return (
+    <main className="app-shell">
+      <TitleBar view={view} onViewChange={setView} />
 
       {view === 'agent' ? (
         <WorkspaceView
