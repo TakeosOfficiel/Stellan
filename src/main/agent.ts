@@ -10,7 +10,7 @@ import {
 import { ProjectTools } from './project-tools'
 
 export type AgentProjectTools = Pick<ProjectTools,
-  'listFiles' | 'readFile' | 'search' | 'writeFile' | 'deleteFile' | 'gitStatus' | 'gitDiff' | 'runCommand'
+  'listFiles' | 'readFile' | 'search' | 'writeFile' | 'deleteFile' | 'gitStatus' | 'gitDiff' | 'gitChanges' | 'runCommand'
 >
 
 const TOOL_DEFINITIONS = [
@@ -169,15 +169,6 @@ const workerTasksSchema = z.object({
     instructions: z.string().trim().min(1).max(4_000),
     files: z.array(z.string().min(1).max(2_000)).min(1).max(50)
   })).min(2).max(4)
-}).superRefine(({ tasks }, context) => {
-  const owners = new Map<string, number>()
-  tasks.forEach((task, taskIndex) => task.files.forEach((file) => {
-    const normalized = normalizeWorkerPath(file)
-    const owner = owners.get(normalized)
-    if (owner !== undefined) {
-      context.addIssue({ code: 'custom', message: `Le fichier ${normalized} appartient déjà au worker ${owner + 1}.` })
-    } else owners.set(normalized, taskIndex)
-  }))
 })
 
 export type WorkerTask = z.infer<typeof workerTasksSchema>['tasks'][number]
@@ -370,8 +361,36 @@ async function executeTool(
     if (name === 'create_workers') {
       if (!options.spawnWorkers) return { content: 'Les workers enfants ne sont pas disponibles ici.', status: 'denied' }
       const { tasks } = workerTasksSchema.parse(input)
+      const claimedFiles = new Set<string>()
+      const skippedTasks: Array<{ title: string; files: string[] }> = []
+      const workerTasks = tasks.filter((task) => {
+        const files = [...new Set(task.files.map((file) => normalizeWorkerPath(file)))]
+        const overlaps = files.filter((file) => claimedFiles.has(file))
+        if (overlaps.length > 0) {
+          skippedTasks.push({ title: task.title, files: overlaps })
+          return false
+        }
+        files.forEach((file) => claimedFiles.add(file))
+        return true
+      })
+      if (workerTasks.length < 2) {
+        return {
+          content: 'Le plan ne contient pas au moins deux tâches indépendantes. Répartissez des fichiers distincts entre les workers.',
+          status: 'error'
+        }
+      }
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
-      return { content: compactResult(await options.spawnWorkers(tasks)), status: 'done' }
+      const workers = await options.spawnWorkers(workerTasks)
+      return {
+        content: compactResult({
+          workers,
+          ...(skippedTasks.length > 0 ? {
+            skippedTasks,
+            next: 'Ces tâches recoupaient les fichiers des workers. Effectuez leur intégration et leur vérification dans le thread principal.'
+          } : {})
+        }),
+        status: 'done'
+      }
     }
     return { content: `Outil inconnu : ${name}`, status: 'error' }
   } catch (error) {
@@ -387,7 +406,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   const conversation: OllamaMessage[] = [
     {
       role: 'system',
-      content: `Tu es un agent de développement local. Inspecte le projet avec les outils avant de modifier. Utilise des chemins relatifs. Quand l’utilisateur demande une modification, effectue-la réellement avec write_file ou delete_file avant de conclure. Utilise delete_file pour supprimer un fichier, jamais rm. Ne crée jamais de commit Git sauf demande explicite de l’utilisateur. Ne prétends jamais avoir modifié un fichier sans résultat d’écriture ou suppression réussi. Lance les tests pertinents après une modification et termine par un résumé concis.${options.isGitRepository === false ? ' Ce projet n’est pas un dépôt Git : n’utilise jamais git_status, git_diff ou une commande git.' : ''}${options.spawnWorkers ? ' Utilise create_workers seulement pour une tâche importante répartie sur au moins 4 fichiers indépendants. Pour 3 fichiers ou moins, travaille directement sans workers enfants. Le coordinateur vérifie ensuite le résultat et lance les tests.' : ''}`
+      content: `Tu es un agent de développement local. Inspecte le projet avec les outils avant de modifier. Utilise des chemins relatifs. Quand l’utilisateur demande une modification, effectue-la réellement avec write_file ou delete_file avant de conclure. Utilise delete_file pour supprimer un fichier, jamais rm. Ne crée jamais de commit Git sauf demande explicite de l’utilisateur. Ne prétends jamais avoir modifié un fichier sans résultat d’écriture ou suppression réussi. Lance les tests pertinents après une modification et termine par un résumé concis.${options.isGitRepository === false ? ' Ce projet n’est pas un dépôt Git : n’utilise jamais git_status, git_diff ou une commande git.' : ''}${options.spawnWorkers ? ' Utilise create_workers quand l’utilisateur demande explicitement plusieurs workers ou quand une tâche importante se répartit entre plusieurs fichiers indépendants. N’attribue jamais le même fichier à plusieurs workers. Le coordinateur effectue ensuite l’intégration et les tests.' : ''}`
     },
     ...options.messages.filter((message) => message.role !== 'system')
   ]
@@ -417,7 +436,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     } catch (error) {
       if (error instanceof OllamaIdleTimeoutError && completedWrites.size > 0) {
         const files = [...completedWrites]
-        options.onContent(`Terminé. J’ai modifié ou supprimé ${files.length} fichier${files.length > 1 ? 's' : ''} : ${files.map((file) => `\`${file}\``).join(', ')}. Le modèle local n’a pas généré de résumé final.`)
+        options.onContent(`Terminé. ${files.length} fichier${files.length > 1 ? 's' : ''} modifié${files.length > 1 ? 's' : ''} : ${files.map((file) => `\`${file}\``).join(', ')}.`)
         return
       }
       throw error

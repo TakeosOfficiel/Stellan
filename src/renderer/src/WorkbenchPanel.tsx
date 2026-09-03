@@ -65,6 +65,21 @@ function FileTreeIcon({ type, expanded }: { type: FileTreeNode['type']; expanded
   return <FileCode2 className="file-kind-icon" aria-hidden="true" />
 }
 
+function DiffContent({ diff, className }: { diff: string; className?: string }): React.JSX.Element {
+  return (
+    <pre className={className}>{diff.split('\n').map((line, index) => {
+      const kind = line.startsWith('+') && !line.startsWith('+++')
+        ? 'added'
+        : line.startsWith('-') && !line.startsWith('---')
+          ? 'removed'
+          : line.startsWith('@@')
+            ? 'hunk'
+            : 'context'
+      return <span className={`diff-line ${kind}`} key={`${index}:${line}`}>{line || ' '}{'\n'}</span>
+    })}</pre>
+  )
+}
+
 export function WorkbenchPanel({
   thread,
   projectName,
@@ -82,6 +97,7 @@ export function WorkbenchPanel({
   const [reviewOpen, setReviewOpen] = useState(false)
   const [focused, setFocused] = useState(false)
   const [review, setReview] = useState<ProjectReview | null>(null)
+  const [expandedChanges, setExpandedChanges] = useState<Set<string>>(new Set())
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [reviewLoading, setReviewLoading] = useState(false)
   const [files, setFiles] = useState<string[]>([])
@@ -145,6 +161,7 @@ export function WorkbenchPanel({
 
   useEffect(() => {
     setReview(null)
+    setExpandedChanges(new Set())
     setReviewError(null)
     setReviewLoading(Boolean(thread && ready))
     setFiles([])
@@ -274,12 +291,20 @@ export function WorkbenchPanel({
     if (next === 'terminal' && ready && thread) setTerminalStartedForThreadId(thread.id)
   }
 
-  const statusLines = review?.status.split('\n').filter(Boolean) ?? []
   const fileTree = useMemo(() => buildFileTree(files, review?.status ?? '', directories), [directories, files, review?.status])
   const hasProjectIndex = files.includes('index.html')
 
   function toggleFolder(path: string): void {
     setExpandedFolders((current) => {
+      const next = new Set(current)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  function toggleChange(path: string): void {
+    setExpandedChanges((current) => {
       const next = new Set(current)
       if (next.has(path)) next.delete(path)
       else next.add(path)
@@ -356,9 +381,24 @@ export function WorkbenchPanel({
             {reviewError && <p className="workbench-error" role="alert">{reviewError}</p>}
             <small>{review?.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
             {reviewLoading ? <div className="workbench-zero"><p>Lecture des changements…</p></div> : reviewOpen ? (
-              review?.diff ? <pre className="workbench-diff">{review.diff}</pre> : <div className="workbench-zero"><span aria-hidden="true"><Check /></span><p>Rien à relire pour le moment</p></div>
-            ) : statusLines.length > 0 ? (
-              <div className="change-list">{statusLines.map((line) => <code key={line}>{line}</code>)}</div>
+              review?.diff ? <DiffContent className="workbench-diff" diff={review.diff} /> : <div className="workbench-zero"><span aria-hidden="true"><Check /></span><p>Rien à relire pour le moment</p></div>
+            ) : review && review.changes.length > 0 ? (
+              <div className="change-list">{review.changes.map((change) => {
+                const expanded = expandedChanges.has(change.path)
+                const label = change.kind === 'added' ? 'Nouveau' : change.kind === 'deleted' ? 'Supprimé' : change.kind === 'renamed' ? 'Renommé' : 'Modifié'
+                return <article key={change.path}>
+                  <button type="button" aria-expanded={expanded} onClick={() => toggleChange(change.path)}>
+                    <ChevronRight className={expanded ? 'expanded' : ''} aria-hidden="true" />
+                    <code>{change.path}</code>
+                    <small>{label}</small>
+                    <span className="change-added">+{change.added}</span>
+                    <span className="change-removed">−{change.removed}</span>
+                  </button>
+                  {expanded && (change.diff
+                    ? <DiffContent diff={change.diff} />
+                    : <p>Aucun diff textuel disponible pour ce fichier.</p>)}
+                </article>
+              })}</div>
             ) : <div className="workbench-zero"><span aria-hidden="true"><Plus /></span><p>Aucune modification</p></div>}
           </section>
 

@@ -205,7 +205,16 @@ export type CreateThreadRequest = {
 export type ProjectReview = {
   status: string
   diff: string
+  changes: ProjectChange[]
   workspaceMode: 'worktree' | 'direct'
+}
+
+export type ProjectChange = {
+  path: string
+  kind: 'added' | 'modified' | 'deleted' | 'renamed'
+  added: number
+  removed: number
+  diff: string
 }
 
 export type ProjectFileList = {
@@ -278,6 +287,7 @@ export type LocalAgentApi = {
   openOllamaDownload: () => Promise<void>
   onRuntimeProgress: (listener: (progress: RuntimeProgress) => void) => () => void
   pullModel: (model: string) => Promise<ModelPullResult>
+  warmModel: (model: string) => Promise<boolean>
   onModelPullProgress: (listener: (progress: ModelPullProgress) => void) => () => void
   transcribeDictation: (audio: ArrayBuffer) => Promise<string>
   onDictationProgress: (listener: (progress: DictationProgress) => void) => () => void

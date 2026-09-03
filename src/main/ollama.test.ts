@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat } from './ollama'
+import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -93,6 +93,26 @@ describe('modelSupportsTools', () => {
   })
 })
 
+describe('warmOllamaModel', () => {
+  it('loads the model with the same context as chat and keeps it ready', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ done: true }))
+
+    await expect(warmOllamaModel('qwen3.5:4b', fetcher)).resolves.toBe(true)
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:11435/api/generate',
+      expect.objectContaining({
+        body: JSON.stringify({
+          model: 'qwen3.5:4b',
+          prompt: '',
+          stream: false,
+          keep_alive: -1,
+          options: { num_ctx: 8192, num_predict: 2048 }
+        })
+      })
+    )
+  })
+})
+
 describe('streamOllamaChat', () => {
   it('streams content even when JSON lines span network chunks', async () => {
     const stream = new ReadableStream({
@@ -118,7 +138,7 @@ describe('streamOllamaChat', () => {
       model: 'qwen3.5:4b',
       stream: true,
       think: false,
-      keep_alive: '30m',
+      keep_alive: -1,
       options: { num_ctx: 8192, num_predict: 2048 }
     })
   })

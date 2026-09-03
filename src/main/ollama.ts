@@ -47,6 +47,7 @@ const showResponseSchema = z.object({
 })
 
 const OLLAMA_URLS = ['http://127.0.0.1:11435', 'http://localhost:11435'] as const
+const MODEL_OPTIONS = { num_ctx: 8192, num_predict: 2048 } as const
 let activeOllamaUrl: string = OLLAMA_URLS[0]
 const toolSupportByModel = new Map<string, boolean>()
 
@@ -211,6 +212,29 @@ export async function pullOllamaModel(
   }
 }
 
+export async function warmOllamaModel(
+  model: string,
+  fetcher: typeof fetch = fetch
+): Promise<boolean> {
+  try {
+    const response = await fetcher(`${activeOllamaUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        prompt: '',
+        stream: false,
+        keep_alive: -1,
+        options: MODEL_OPTIONS
+      }),
+      signal: AbortSignal.timeout(300_000)
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 export async function streamOllamaChat(
   model: string,
   messages: OllamaMessage[],
@@ -242,8 +266,8 @@ export async function streamOllamaChat(
         messages: requestMessages,
         stream: true,
         think: false,
-        keep_alive: '30m',
-        options: { num_ctx: 8192, num_predict: 2048 },
+        keep_alive: -1,
+        options: MODEL_OPTIONS,
         ...(tools ? { tools } : {})
       }),
       signal: requestSignal

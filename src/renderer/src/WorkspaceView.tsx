@@ -179,6 +179,7 @@ export function WorkspaceView({
   onOpenSetup
 }: WorkspaceViewProps): React.JSX.Element {
   const models = status && status !== 'loading' && status.available ? status.models : []
+  const hasOllama = Boolean(status && status !== 'loading' && status.available)
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
   const [project, setProject] = useState<ProjectSelection | null>(null)
   const [threads, setThreads] = useState<StoredThread[]>([])
@@ -220,6 +221,7 @@ export function WorkspaceView({
   const stickToBottomRef = useRef(true)
   const bufferedContentRef = useRef(new Map<string, ContentEvent>())
   const contentFrameRef = useRef<number | null>(null)
+  const warmedModelRef = useRef('')
   const handledShortcutRef = useRef<typeof shortcut>(null)
   const openThreadRequestRef = useRef(0)
   const messageKey = activeThreadId ?? '__draft__'
@@ -303,6 +305,12 @@ export function WorkspaceView({
   useEffect(() => {
     if (effectiveModel) localStorage.setItem('local-agent:model', effectiveModel)
   }, [effectiveModel])
+
+  useEffect(() => {
+    if (!effectiveModel || !hasOllama || warmedModelRef.current === effectiveModel) return
+    warmedModelRef.current = effectiveModel
+    void window.localAgent.warmModel(effectiveModel)
+  }, [effectiveModel, hasOllama])
 
   useEffect(() => () => {
     if (contentFrameRef.current !== null) cancelAnimationFrame(contentFrameRef.current)
@@ -889,7 +897,6 @@ export function WorkspaceView({
     )
   }
 
-  const hasOllama = Boolean(status && status !== 'loading' && status.available)
   const activeThread = threads.find((thread) => thread.id === activeThreadId)
   const rootThreads = threads.filter((thread) => !thread.parentThreadId || !threads.some((candidate) => candidate.id === thread.parentThreadId))
   const workbenchRefreshKey = activeRunHistory.map((run) => `${run.requestId}:${run.status}:${run.finishedAt ?? ''}`).join('|')
@@ -1137,8 +1144,8 @@ export function WorkspaceView({
                         ? <p>{activeRun?.status === 'queued'
                             ? 'En attente dans ce chat…'
                             : thinkingElapsed < 10
-                              ? `Démarrage de ${effectiveModel}…`
-                              : `${effectiveModel} travaille… ${thinkingElapsed} s`}</p>
+                              ? 'Préparation de la réponse…'
+                              : `Analyse en cours… ${thinkingElapsed} s`}</p>
                         : null
                     : <p>{message.content}</p>}
                 </article>

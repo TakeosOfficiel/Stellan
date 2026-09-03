@@ -152,6 +152,10 @@ describe('ProjectTools', () => {
     expect(await tools.gitStatus()).toContain(' M src/hello.txt')
     expect(await tools.gitStatus()).toContain('?? new.txt')
     expect(await tools.gitDiff()).toContain('-hello world')
+    await expect(tools.gitChanges()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'src/hello.txt', kind: 'modified', added: 1, removed: 2 }),
+      expect.objectContaining({ path: 'new.txt', kind: 'added', added: 1, removed: 0, diff: expect.stringContaining('+untracked') })
+    ]))
 
     execFileSync('git', ['add', 'src/hello.txt'], { cwd: project })
     expect(await tools.gitDiff(true)).toContain('+changed')

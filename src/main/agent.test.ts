@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { compactConversation, MAX_CONVERSATION_CHARACTERS, normalizeWorkerPath, runCodingAgent } from './agent'
+import { compactConversation, MAX_CONVERSATION_CHARACTERS, normalizeWorkerPath, runCodingAgent, type WorkerTask } from './agent'
 import { ProjectTools } from './project-tools'
 
 const temporaryDirectories: string[] = []
@@ -440,20 +440,28 @@ describe('runCodingAgent', () => {
     expect(String(fetcher.mock.calls[0]?.[1]?.body)).toContain('create_workers')
   })
 
-  it('rejects worker plans that assign the same file twice', async () => {
+  it('spawns independent workers and leaves overlapping integration to the coordinator', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
     const project = await ProjectTools.create(projectPath)
-    const spawnWorkers = vi.fn()
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+    const tasks = [
+      { title: 'HTML', instructions: 'Structure', files: ['index.html'] },
+      { title: 'CSS', instructions: 'Styles', files: ['style.css'] },
+      { title: 'JavaScript', instructions: 'Animation', files: ['script.js'] },
+      { title: 'Intégration', instructions: 'Vérifie les liens', files: ['./index.html', 'style.css', 'script.js'] }
+    ]
+    const spawnWorkers = vi.fn().mockImplementation(async (workerTasks: WorkerTask[]) => workerTasks.map((task) => ({
+      title: task.title,
+      summary: 'Terminé',
+      files: task.files
+    })))
+    const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(streamResponse([{
-        message: { tool_calls: [{ function: { name: 'create_workers', arguments: { tasks: [
-          { title: 'A', instructions: 'A', files: ['index.html'] },
-          { title: 'B', instructions: 'B', files: ['./index.html'] }
-        ] } } }] },
+        message: { tool_calls: [{ function: { name: 'create_workers', arguments: { tasks } } }] },
         done: true
       }]))
-      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Plan refusé.' }, done: true }])))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Intégration terminée.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
 
     await runCodingAgent({
       model: 'test-model',
@@ -466,6 +474,8 @@ describe('runCodingAgent', () => {
       spawnWorkers
     })
 
-    expect(spawnWorkers).not.toHaveBeenCalled()
+    expect(spawnWorkers).toHaveBeenCalledWith(tasks.slice(0, 3))
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Intégration')
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('thread principal')
   })
 })

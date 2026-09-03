@@ -2,7 +2,8 @@ import path from 'node:path'
 import { diffLines } from 'diff'
 import type { WorkerProfile } from '../shared/contracts'
 import type { AgentProjectTools } from './agent'
-import type { FileWriteResult, SearchResult } from './project-tools'
+import { countDiffLines, parseGitStatus, type FileWriteResult, type SearchResult } from './project-tools'
+import type { ProjectChange } from '../shared/contracts'
 import { executeInWorkerContainer, type CommandResult } from './runtime'
 
 type ContainerExecutor = typeof executeInWorkerContainer
@@ -102,6 +103,24 @@ fs.mkdirSync(path.dirname(target), { recursive: true }); const chunks = []; proc
 
   async gitDiff(staged = false): Promise<string> {
     return this.success(await this.execute(['git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'diff', '--no-ext-diff', '--no-textconv', ...(staged ? ['--cached'] : [])]))
+  }
+
+  async gitChanges(): Promise<ProjectChange[]> {
+    const status = this.success(await this.execute([
+      'git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace',
+      'status', '--porcelain=v1', '-z'
+    ]))
+    return Promise.all(parseGitStatus(status).map(async (change) => {
+      const untracked = status.includes(`?? ${change.path}\0`)
+      const result = await this.execute(untracked
+        ? ['git', 'diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', change.path]
+        : ['git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--', change.path])
+      if (result.exitCode !== 0 && !(untracked && result.exitCode === 1)) {
+        throw new Error(result.stderr.trim() || `Impossible de lire le diff de ${change.path}.`)
+      }
+      if (result.outputTruncated) throw new Error(`Le diff de ${change.path} est trop volumineux.`)
+      return { ...change, ...countDiffLines(result.stdout), diff: result.stdout }
+    }))
   }
 
   runCommand(command: string, args: readonly string[] = [], options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<CommandResult> {

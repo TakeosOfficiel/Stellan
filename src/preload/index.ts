@@ -26,6 +26,7 @@ const api: LocalAgentApi = {
     return () => ipcRenderer.removeListener('runtime:progress', handler)
   },
   pullModel: (model) => ipcRenderer.invoke('ollama:pull-model', model),
+  warmModel: (model) => ipcRenderer.invoke('ollama:warm-model', model),
   onModelPullProgress: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: ModelPullProgress): void => {
       listener(progress)

@@ -5,14 +5,14 @@ import { cp, lstat, mkdir, rm, statfs } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
-import type { OllamaStatus, RuntimeProgress } from '../shared/contracts'
+import type { ModelPullProgress, OllamaStatus, RuntimeProgress } from '../shared/contracts'
 import { compactConversation, normalizeWorkerPath, runCodingAgent, type AgentToolLifecycleEvent, type WorkerTask } from './agent'
 import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
 import { getBasicHardwareInfo, getHardwareInfo } from './hardware'
 import { isTrustedMainFrame } from './ipc-security'
 import { getModelCatalog, isCatalogModel } from './model-catalog'
-import { configureOllamaUrl, getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat } from './ollama'
+import { configureOllamaUrl, getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
 import { OLLAMA_HOST_PORT, startOllamaServer } from './ollama-process'
 import { assertPortalAccess, PortalManager } from './portal'
 import { ProjectTools } from './project-tools'
@@ -41,6 +41,7 @@ const OLLAMA_DOWNLOAD_CHANNEL = 'ollama:open-download'
 const RUNTIME_PROGRESS_CHANNEL = 'runtime:progress'
 const MODEL_PULL_CHANNEL = 'ollama:pull-model'
 const MODEL_PULL_PROGRESS_CHANNEL = 'ollama:pull-progress'
+const MODEL_WARM_CHANNEL = 'ollama:warm-model'
 const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
@@ -81,6 +82,7 @@ const WINDOW_CLOSE_CHANNEL = 'window:close'
 const WINDOW_SET_STARTUP_CHANNEL = 'window:set-startup'
 
 const modelIdSchema = z.string().min(1).max(100).refine(isCatalogModel)
+const installedModelNameSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/)
 const dictationAudioSchema = z.custom<ArrayBuffer>((value) => value instanceof ArrayBuffer)
   .refine((audio) => audio.byteLength >= 6_400, 'La dictée est trop courte.')
   .refine((audio) => audio.byteLength <= 3_840_000, 'La dictée dépasse une minute.')
@@ -793,14 +795,36 @@ app.whenReady().then(() => {
         return { success: false, reason: "Ce modèle n'est pas disponible sur ce système." }
       }
 
-      return await pullOllamaModel(model.id, (progress) => {
+      const sendProgress = (progress: ModelPullProgress): void => {
         if (!event.sender.isDestroyed()) {
           event.sender.send(MODEL_PULL_PROGRESS_CHANNEL, progress)
         }
-      })
+      }
+      const result = await pullOllamaModel(model.id, sendProgress)
+      if (!result.success) return result
+
+      const startedAt = Date.now()
+      sendProgress({ model: model.id, status: 'Chargement du modèle en mémoire…', completed: null, total: null, percent: null })
+      const timer = setInterval(() => sendProgress({
+        model: model.id,
+        status: `Chargement du modèle en mémoire… ${Math.round((Date.now() - startedAt) / 1_000)} s`,
+        completed: null,
+        total: null,
+        percent: null
+      }), 5_000)
+      try {
+        await warmOllamaModel(model.id)
+      } finally {
+        clearInterval(timer)
+      }
+      return result
     } finally {
       activeDownload = null
     }
+  })
+  handle(MODEL_WARM_CHANNEL, async (_event, input: unknown) => {
+    const model = installedModelNameSchema.parse(input)
+    return warmOllamaModel(model)
   })
   handle(DICTATION_TRANSCRIBE_CHANNEL, async (event, input: unknown) => {
     const audio = dictationAudioSchema.parse(input)
@@ -1143,12 +1167,13 @@ app.whenReady().then(() => {
     const reviewProject = executionPath
       ? createAgentProjectTools(profile, thread.id, executionPath, project, git)
       : project
-    const [status, diff] = git
-      ? await Promise.all([reviewProject.gitStatus(), reviewProject.gitDiff()])
-      : ['', '']
+    const [status, changes] = git
+      ? await Promise.all([reviewProject.gitStatus(), reviewProject.gitChanges()])
+      : ['', []]
     return {
       status,
-      diff,
+      changes,
+      diff: changes.map((change) => change.diff).filter(Boolean).join('\n'),
       workspaceMode: thread.workspaceMode === 'worktree' ? 'worktree' as const : 'direct' as const
     }
   })
@@ -1402,6 +1427,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(SETUP_INFO_CHANNEL)
   ipcMain.removeHandler(OLLAMA_DOWNLOAD_CHANNEL)
   ipcMain.removeHandler(MODEL_PULL_CHANNEL)
+  ipcMain.removeHandler(MODEL_WARM_CHANNEL)
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
   ipcMain.removeHandler(PROJECT_CREATE_CHANNEL)

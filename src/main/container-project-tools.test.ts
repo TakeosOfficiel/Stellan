@@ -63,4 +63,23 @@ describe('ContainerProjectTools', () => {
     expect(executor).toHaveBeenCalledTimes(2)
     expect(executor.mock.calls[1]?.[0].command).toContain('src/a.ts')
   })
+
+  it('returns reviewable changes and line counts for untracked files', async () => {
+    const executor = vi.fn<typeof executeInWorkerContainer>()
+      .mockResolvedValueOnce(result('?? index.html\0'))
+      .mockResolvedValueOnce(result('diff --git a/index.html b/index.html\n--- /dev/null\n+++ b/index.html\n@@ -0,0 +1,2 @@\n+<h1>Minecraft</h1>\n+<p>Bienvenue</p>\n'))
+    const tools = new ContainerProjectTools(profile, 'thread-123', 'C:\\project', null, executor)
+
+    await expect(tools.gitChanges()).resolves.toEqual([{
+      path: 'index.html',
+      kind: 'added',
+      added: 2,
+      removed: 0,
+      diff: expect.stringContaining('+<h1>Minecraft</h1>')
+    }])
+    expect(executor.mock.calls[0]?.[0].command).toContain('--porcelain=v1')
+    expect(executor.mock.calls[1]?.[0].command).toEqual([
+      'git', 'diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', 'index.html'
+    ])
+  })
 })

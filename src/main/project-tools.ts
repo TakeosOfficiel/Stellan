@@ -5,6 +5,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import spawn from 'cross-spawn'
 import { rgPath } from '@vscode/ripgrep'
 import { diffLines } from 'diff'
+import type { ProjectChange } from '../shared/contracts'
 
 const RIPGREP_PATH = process.resourcesPath
   ? path.join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'rg.exe' : 'rg')
@@ -21,6 +22,38 @@ export type FileWriteResult = {
   path: string
   added: number
   removed: number
+}
+
+export function parseGitStatus(status: string): Array<Pick<ProjectChange, 'path' | 'kind'>> {
+  const entries: Array<Pick<ProjectChange, 'path' | 'kind'>> = []
+  const tokens = status.split('\0')
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (!token || token.length < 4) continue
+    const code = token.slice(0, 2)
+    entries.push({
+      path: token.slice(3),
+      kind: code === '??' || code.includes('A')
+        ? 'added'
+        : code.includes('R')
+            ? 'renamed'
+            : code.includes('D')
+              ? 'deleted'
+              : 'modified'
+    })
+    if (code.includes('R') || code.includes('C')) index += 1
+  }
+  return entries
+}
+
+export function countDiffLines(diff: string): Pick<ProjectChange, 'added' | 'removed'> {
+  let added = 0
+  let removed = 0
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) added += 1
+    if (line.startsWith('-') && !line.startsWith('---')) removed += 1
+  }
+  return { added, removed }
 }
 
 export interface CommandOptions {
@@ -234,6 +267,29 @@ export class ProjectTools {
     if (result.outputTruncated) throw new Error('Git diff exceeded the output limit')
     if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Unable to read Git diff')
     return result.stdout
+  }
+
+  async gitChanges(): Promise<ProjectChange[]> {
+    const status = await this.run('git', [
+      '-c', 'core.fsmonitor=false',
+      '-c', `safe.directory=${this.root}`,
+      'status', '--porcelain=v1', '-z'
+    ], {}, sanitizedGitEnvironment())
+    if (status.outputTruncated) throw new Error('Git status exceeded the output limit')
+    if (status.exitCode !== 0) throw new Error(status.stderr.trim() || 'Unable to read Git status')
+
+    return Promise.all(parseGitStatus(status.stdout).map(async (change) => {
+      const untracked = status.stdout.includes(`?? ${change.path}\0`)
+      const result = await this.run('git', untracked
+        ? ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', change.path]
+        : ['-c', 'core.fsmonitor=false', '-c', `safe.directory=${this.root}`, 'diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--', change.path],
+      {}, sanitizedGitEnvironment())
+      if (result.outputTruncated) throw new Error(`Git diff for ${change.path} exceeded the output limit`)
+      if (result.exitCode !== 0 && !(untracked && result.exitCode === 1)) {
+        throw new Error(result.stderr.trim() || `Unable to read Git diff for ${change.path}`)
+      }
+      return { ...change, ...countDiffLines(result.stdout), diff: result.stdout }
+    }))
   }
 
   runCommand(
