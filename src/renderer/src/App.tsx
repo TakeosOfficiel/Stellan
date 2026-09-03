@@ -337,15 +337,14 @@ export function App(): React.JSX.Element {
     <main className="app-shell">
       <TitleBar view={view} onViewChange={setView} />
 
-      {view === 'agent' ? (
-        <WorkspaceView
-          status={status}
-          shortcut={workspaceShortcut}
-          onShortcutHandled={() => setWorkspaceShortcut(null)}
-          onOpenSetup={() => setView('setup')}
-        />
-      ) : (
-      <div className="setup-view">
+      <WorkspaceView
+        visible={view === 'agent'}
+        status={status}
+        shortcut={workspaceShortcut}
+        onShortcutHandled={() => setWorkspaceShortcut(null)}
+        onOpenSetup={() => setView('setup')}
+      />
+      <div className={`setup-view${view === 'setup' ? '' : ' app-view-hidden'}`} aria-hidden={view !== 'setup'}>
       <aside className="settings-sidebar">
         <div>
           <span className="agent-mark"><Settings2 aria-hidden="true" /></span>
@@ -457,7 +456,6 @@ export function App(): React.JSX.Element {
       </section>
       </div>
       </div>
-      )}
     </main>
   )
 }

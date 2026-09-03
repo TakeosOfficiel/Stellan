@@ -97,11 +97,11 @@ fs.mkdirSync(path.dirname(target), { recursive: true }); const chunks = []; proc
   }
 
   async gitStatus(): Promise<string> {
-    return this.success(await this.execute(['git', '-c', 'core.fsmonitor=false', 'status', '--short']))
+    return this.success(await this.execute(['git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'status', '--short']))
   }
 
   async gitDiff(staged = false): Promise<string> {
-    return this.success(await this.execute(['git', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', ...(staged ? ['--cached'] : [])]))
+    return this.success(await this.execute(['git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'diff', '--no-ext-diff', '--no-textconv', ...(staged ? ['--cached'] : [])]))
   }
 
   runCommand(command: string, args: readonly string[] = [], options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<CommandResult> {

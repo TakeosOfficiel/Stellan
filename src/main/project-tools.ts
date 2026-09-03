@@ -208,6 +208,7 @@ export class ProjectTools {
   async gitStatus(): Promise<string> {
     const result = await this.run('git', [
       '-c', 'core.fsmonitor=false',
+      '-c', `safe.directory=${this.root}`,
       'status', '--short'
     ], {}, sanitizedGitEnvironment())
     if (result.outputTruncated) throw new Error('Git status exceeded the output limit')
@@ -218,6 +219,7 @@ export class ProjectTools {
   async isGitRepository(): Promise<boolean> {
     const result = await this.run('git', [
       '-c', 'core.fsmonitor=false',
+      '-c', `safe.directory=${this.root}`,
       'rev-parse', '--is-inside-work-tree'
     ], {}, sanitizedGitEnvironment())
     return result.exitCode === 0 && result.stdout.trim() === 'true'
@@ -226,6 +228,7 @@ export class ProjectTools {
   async gitDiff(staged = false): Promise<string> {
     const result = await this.run('git', [
       '-c', 'core.fsmonitor=false',
+      '-c', `safe.directory=${this.root}`,
       'diff', '--no-ext-diff', '--no-textconv', ...(staged ? ['--cached'] : [])
     ], {}, sanitizedGitEnvironment())
     if (result.outputTruncated) throw new Error('Git diff exceeded the output limit')

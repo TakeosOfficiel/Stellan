@@ -382,6 +382,7 @@ export function workerDataVolumeName(threadId: string): string {
 
 function workerContainerConfig(options: PersistentContainerOptions, projectPath: string): string {
   return createHash('sha256').update(JSON.stringify({
+    version: 2,
     projectPath,
     image: options.image,
     cpuLimit: options.cpuLimit,
@@ -461,6 +462,9 @@ async function ensureWorkerContainerUnlocked(
     '--cap-drop', 'ALL',
     '--pids-limit', '256',
     '--tmpfs', '/tmp:rw,noexec,nosuid,size=256m',
+    '--env', 'GIT_CONFIG_COUNT=1',
+    '--env', 'GIT_CONFIG_KEY_0=safe.directory',
+    '--env', 'GIT_CONFIG_VALUE_0=/workspace',
     '--mount', `type=bind,source=${projectPath},target=/workspace`,
     ...(gitDirectory ? [
       '--mount', `type=bind,source=${gitDirectory},target=/repo-git`,

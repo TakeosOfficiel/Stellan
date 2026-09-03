@@ -2,6 +2,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import type { ChatMessage } from '../shared/contracts'
 import {
+  OllamaIdleTimeoutError,
   streamOllamaChat,
   type OllamaMessage,
   type OllamaToolCall
@@ -219,6 +220,7 @@ export type CodingAgentOptions = {
   writeScope?: ReadonlySet<string>
   allowRunCommand?: boolean
   isGitRepository?: boolean
+  modelIdleTimeoutMs?: number
   runCommand?: (
     command: string,
     args: readonly string[],
@@ -397,16 +399,29 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   for (let step = 0; step < 12; step += 1) {
     if (options.signal.aborted) throw new DOMException('Aborted', 'AbortError')
     let turnContent = ''
-    const result = await streamOllamaChat(
-      options.model,
-      compactConversation(conversation),
-      (content) => { turnContent += content },
-      options.signal,
-      fetch,
-      options.spawnWorkers
-        ? [...TOOL_DEFINITIONS.filter((tool) => options.isGitRepository !== false || !tool.function.name.startsWith('git_')), CREATE_WORKERS_TOOL]
-        : TOOL_DEFINITIONS.filter((tool) => options.isGitRepository !== false || !tool.function.name.startsWith('git_'))
-    )
+    let result
+    try {
+      result = await streamOllamaChat(
+        options.model,
+        compactConversation(conversation),
+        (content) => { turnContent += content },
+        options.signal,
+        fetch,
+        options.spawnWorkers
+          ? [...TOOL_DEFINITIONS.filter((tool) => options.isGitRepository !== false || !tool.function.name.startsWith('git_')), CREATE_WORKERS_TOOL]
+          : TOOL_DEFINITIONS.filter((tool) => options.isGitRepository !== false || !tool.function.name.startsWith('git_')),
+        completedWrites.size > 0
+          ? Math.min(options.modelIdleTimeoutMs ?? 120_000, 30_000)
+          : options.modelIdleTimeoutMs
+      )
+    } catch (error) {
+      if (error instanceof OllamaIdleTimeoutError && completedWrites.size > 0) {
+        const files = [...completedWrites]
+        options.onContent(`Terminé. J’ai modifié ou supprimé ${files.length} fichier${files.length > 1 ? 's' : ''} : ${files.map((file) => `\`${file}\``).join(', ')}. Le modèle local n’a pas généré de résumé final.`)
+        return
+      }
+      throw error
+    }
 
     if (result.toolCalls.length === 0) {
       if (turnContent) options.onContent(turnContent)

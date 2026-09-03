@@ -72,6 +72,13 @@ export type OllamaChatResult = {
   toolCalls: OllamaToolCall[]
 }
 
+export class OllamaIdleTimeoutError extends Error {
+  constructor() {
+    super('Le modèle ne produit plus de réponse depuis deux minutes. Réessayez ou choisissez un modèle plus léger.')
+    this.name = 'OllamaIdleTimeoutError'
+  }
+}
+
 export async function modelSupportsTools(
   model: string,
   fetcher: typeof fetch = fetch
@@ -210,22 +217,38 @@ export async function streamOllamaChat(
   onContent: (content: string) => void,
   signal?: AbortSignal,
   fetcher: typeof fetch = fetch,
-  tools?: readonly unknown[]
+  tools?: readonly unknown[],
+  idleTimeoutMs = 120_000
 ): Promise<OllamaChatResult> {
   let content = ''
   const toolCalls: OllamaToolCall[] = []
   let requestMessages = messages
-  const responseTimeout = AbortSignal.timeout(120_000)
-  const requestSignal = signal ? AbortSignal.any([signal, responseTimeout]) : responseTimeout
+  const idleController = new AbortController()
+  let idleTimeout: ReturnType<typeof setTimeout> | null = null
+  const touch = (): void => {
+    if (idleTimeout) clearTimeout(idleTimeout)
+    idleTimeout = setTimeout(() => idleController.abort(), idleTimeoutMs)
+  }
+  const requestSignal = signal ? AbortSignal.any([signal, idleController.signal]) : idleController.signal
 
   try {
     for (let attempt = 0; attempt < 2; attempt += 1) {
+    touch()
     const response = await fetcher(`${activeOllamaUrl}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model, messages: requestMessages, stream: true, think: false, ...(tools ? { tools } : {}) }),
+      body: JSON.stringify({
+        model,
+        messages: requestMessages,
+        stream: true,
+        think: false,
+        keep_alive: '30m',
+        options: { num_ctx: 8192, num_predict: 2048 },
+        ...(tools ? { tools } : {})
+      }),
       signal: requestSignal
     })
+    touch()
 
     if (!response.ok || !response.body) {
       throw new Error(`Ollama n'a pas pu démarrer la réponse (statut ${response.status}).`)
@@ -238,6 +261,7 @@ export async function streamOllamaChat(
 
     while (true) {
       const { done, value } = await reader.read()
+      if (!done && value) touch()
       buffer += decoder.decode(value, { stream: !done })
       const lines = buffer.split('\n')
       buffer = done ? '' : (lines.pop() ?? '')
@@ -271,10 +295,10 @@ export async function streamOllamaChat(
       throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')
     }
   } catch (error) {
-    if (responseTimeout.aborted && !signal?.aborted) {
-      throw new Error('Le modèle n’a pas répondu sous deux minutes. Réessayez ou choisissez un modèle plus léger.')
-    }
+    if (idleController.signal.aborted && !signal?.aborted) throw new OllamaIdleTimeoutError()
     throw error
+  } finally {
+    if (idleTimeout) clearTimeout(idleTimeout)
   }
 
   throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')

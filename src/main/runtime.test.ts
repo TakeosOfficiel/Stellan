@@ -392,6 +392,9 @@ describe('executeInWorkerContainer', () => {
       'run', '--detach', '--name', 'local-agent-worker-persistent-123',
       '--label', expect.stringMatching(/^com\.local-agent\.worker-config=[a-f0-9]{64}$/),
       '--cpus', '2', '--memory', '4096m', '--network', 'none',
+      '--env', 'GIT_CONFIG_COUNT=1',
+      '--env', 'GIT_CONFIG_KEY_0=safe.directory',
+      '--env', 'GIT_CONFIG_VALUE_0=/workspace',
       '--mount', `type=bind,source=${projectPath},target=/workspace`,
       '--mount', 'type=volume,source=local-agent-worker-data-persistent-123,target=/worker-data'
     ]))

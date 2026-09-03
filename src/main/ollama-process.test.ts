@@ -15,7 +15,7 @@ describe('startOllamaServer', () => {
   it('reuses the managed Docker container when it is already running', async () => {
     const runner = vi.fn<CommandRunner>()
       .mockResolvedValueOnce(result(0, '27.0.0'))
-      .mockResolvedValueOnce(result(0, 'true|ollama|v3|ollama/ollama:latest'))
+      .mockResolvedValueOnce(result(0, 'true|ollama|v4|ollama/ollama:latest'))
 
     await expect(startOllamaServer({}, runner)).resolves.toEqual({ success: true })
     expect(runner).toHaveBeenCalledTimes(2)
@@ -32,10 +32,11 @@ describe('startOllamaServer', () => {
       'run', '--detach',
       '--name', OLLAMA_CONTAINER_NAME,
       '--label', 'com.local-agent.service=ollama',
-      '--label', 'com.local-agent.ollama-config=v3',
+      '--label', 'com.local-agent.ollama-config=v4',
       '--publish', `127.0.0.1:${OLLAMA_HOST_PORT}:11434`,
       '--volume', `${OLLAMA_MODELS_VOLUME}:/root/.ollama`,
-      '--env', 'OLLAMA_NUM_PARALLEL=2',
+      '--env', 'OLLAMA_NUM_PARALLEL=1',
+      '--env', 'OLLAMA_KEEP_ALIVE=30m',
       '--gpus', 'all',
       'ollama/ollama:latest'
     ]), expect.objectContaining({ timeoutMs: 600_000 }))

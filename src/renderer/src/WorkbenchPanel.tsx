@@ -270,13 +270,13 @@ export function WorkbenchPanel({
     if (next === 'space') return
     setTab(next)
     if (next === 'changes') void refreshChanges()
-    if (next === 'portals' && !portal && portalBusy !== 'starting') void startPortal()
     if (next === 'files') void refreshFiles()
     if (next === 'terminal' && ready && thread) setTerminalStartedForThreadId(thread.id)
   }
 
   const statusLines = review?.status.split('\n').filter(Boolean) ?? []
   const fileTree = useMemo(() => buildFileTree(files, review?.status ?? '', directories), [directories, files, review?.status])
+  const hasProjectIndex = files.includes('index.html')
 
   function toggleFolder(path: string): void {
     setExpandedFolders((current) => {
@@ -410,6 +410,8 @@ export function WorkbenchPanel({
                     <p>Ouverture de Chromium…</p>
                   ) : portalError ? (
                     <div><p>{portalError}</p><button type="button" onClick={() => void startPortal()}>Réessayer</button></div>
+                  ) : !hasProjectIndex ? (
+                    <div><p>L’aperçu sera disponible dès qu’un fichier <code>index.html</code> sera créé.</p></div>
                   ) : (
                     <button type="button" onClick={() => void startPortal()}>Ouvrir l’aperçu</button>
                   )}

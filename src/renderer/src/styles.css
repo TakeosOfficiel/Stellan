@@ -912,11 +912,11 @@ button svg { width: 1.1em; height: 1.1em; flex: 0 0 auto; stroke-width: 1.8; }
 .icon-button { display: grid; place-items: center; padding: 0; }
 
 .app-shell, .startup-shell { height: 100dvh; background: var(--color-canvas); }
-.startup-overlay { padding: 14px; background: radial-gradient(circle at 30% 0%, #26372d 0, #101612 55%, #090d0b 100%); }
+.app-view-hidden { display: none !important; }
+.startup-overlay { padding: 14px 20px; background: radial-gradient(circle at 30% 0%, #26372d 0, #101612 55%, #090d0b 100%); }
 .startup-card {
-  width: min(100%, 424px); max-height: calc(100dvh - 28px); padding: 20px; overflow-y: auto;
-  border: 1px solid var(--color-border-strong); border-radius: 16px; background: rgb(15 21 17 / 88%);
-  box-shadow: 0 22px 65px rgb(0 0 0 / 42%), inset 0 1px rgb(255 255 255 / 3%);
+  width: min(100%, 424px); max-height: calc(100dvh - 28px); padding: 10px 4px 0; overflow-y: auto;
+  border: 0; border-radius: 0; background: transparent; box-shadow: none;
 }
 .startup-orbit { width: 62px; height: 62px; }
 .startup-orbit span svg { width: 22px; height: 22px; }

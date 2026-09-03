@@ -252,6 +252,37 @@ describe('runCodingAgent', () => {
     await expect(readFile(join(projectPath, 'style.css'), 'utf8')).resolves.toBe('body { color: red; }\n')
   })
 
+  it('keeps a successful file change when the model stalls before its final summary', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{
+          function: { name: 'write_file', arguments: { path: 'index.html', content: '<h1>Aquarium</h1>\n' } }
+        }] },
+        done: true
+      }]))
+      .mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+      })))
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Crée un aquarium.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      modelIdleTimeoutMs: 10
+    })
+
+    expect(onContent).toHaveBeenCalledWith(expect.stringContaining('index.html'))
+    await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toBe('<h1>Aquarium</h1>\n')
+  })
+
   it('asks the model to resume instead of claiming success after read-only tools', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)

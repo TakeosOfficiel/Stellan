@@ -50,6 +50,7 @@ import {
 } from './worker-state'
 
 type WorkspaceViewProps = {
+  visible: boolean
   status: OllamaStatus | null | 'loading'
   shortcut: { type: 'new-thread' | 'open-project' } | null
   onShortcutHandled: () => void
@@ -171,6 +172,7 @@ type DictationCapture = {
 }
 
 export function WorkspaceView({
+  visible,
   status,
   shortcut,
   onShortcutHandled,
@@ -710,6 +712,11 @@ export function WorkspaceView({
           { role: 'user', content }
         ]
       })
+      setThreads((current) => current.map((thread) =>
+        thread.id === threadId && thread.title === 'Nouveau thread'
+          ? { ...thread, title: content.length > 60 ? `${content.slice(0, 57)}…` : content }
+          : thread
+      ))
       await refreshRunHistory(threadId)
     } catch {
       await refreshRunHistory(threadId)
@@ -888,7 +895,10 @@ export function WorkspaceView({
   const workbenchRefreshKey = activeRunHistory.map((run) => `${run.requestId}:${run.status}:${run.finishedAt ?? ''}`).join('|')
 
   return (
-    <section className={`workspace-view${mobileWorkbenchOpen ? ' show-mobile-workbench' : ''}`}>
+    <section
+      className={`workspace-view${mobileWorkbenchOpen ? ' show-mobile-workbench' : ''}${visible ? '' : ' app-view-hidden'}`}
+      aria-hidden={!visible}
+    >
       <nav className="app-rail" aria-label="Sections de Local Agent">
         <div className="rail-main">
           <button
@@ -1126,9 +1136,9 @@ export function WorkspaceView({
                       : activeRequest === message.id && requestActivities.length === 0
                         ? <p>{activeRun?.status === 'queued'
                             ? 'En attente dans ce chat…'
-                            : thinkingElapsed >= 30
-                              ? `Chargement du modèle… ${thinkingElapsed} s`
-                              : `Réflexion… ${thinkingElapsed} s`}</p>
+                            : thinkingElapsed < 10
+                              ? `Démarrage de ${effectiveModel}…`
+                              : `${effectiveModel} travaille… ${thinkingElapsed} s`}</p>
                         : null
                     : <p>{message.content}</p>}
                 </article>

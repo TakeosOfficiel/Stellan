@@ -15,7 +15,7 @@ export const OLLAMA_MODELS_VOLUME = 'local-agent-ollama-models'
 export const OLLAMA_IMAGE = 'ollama/ollama:latest'
 export const OLLAMA_HOST_PORT = 11435
 const OLLAMA_MANAGED_LABEL = 'com.local-agent.service=ollama'
-const OLLAMA_CONFIG_LABEL = 'com.local-agent.ollama-config=v3'
+const OLLAMA_CONFIG_LABEL = 'com.local-agent.ollama-config=v4'
 
 function failureDetail(result: CommandResult): string {
   return (result.stderr.trim() || result.stdout.trim()).slice(0, 500)
@@ -61,7 +61,7 @@ export async function startOllamaServer(
         reason: `Un conteneur non géré utilise déjà le nom ${OLLAMA_CONTAINER_NAME}. Supprimez-le avant de réessayer.`
       }
     }
-    if (config === 'v3' && image === OLLAMA_IMAGE) {
+    if (config === 'v4' && image === OLLAMA_IMAGE) {
       if (running === 'true') return { success: true }
       options.onProgress?.({ step: 'Redémarrage d’Ollama', detail: 'Le conteneur existant redémarre en arrière-plan…', percent: 88 })
       const started = await runner('docker', ['start', OLLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
@@ -85,7 +85,8 @@ export async function startOllamaServer(
     '--pull', 'missing',
     '--publish', `127.0.0.1:${OLLAMA_HOST_PORT}:11434`,
     '--volume', `${OLLAMA_MODELS_VOLUME}:/root/.ollama`,
-    '--env', 'OLLAMA_NUM_PARALLEL=2',
+    '--env', 'OLLAMA_NUM_PARALLEL=1',
+    '--env', 'OLLAMA_KEEP_ALIVE=30m',
     '--security-opt', 'no-new-privileges',
     '--cap-drop', 'ALL',
     '--pids-limit', '1024'

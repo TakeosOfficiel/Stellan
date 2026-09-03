@@ -117,7 +117,9 @@ describe('streamOllamaChat', () => {
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({
       model: 'qwen3.5:4b',
       stream: true,
-      think: false
+      think: false,
+      keep_alive: '30m',
+      options: { num_ctx: 8192, num_predict: 2048 }
     })
   })
 
@@ -190,5 +192,21 @@ describe('streamOllamaChat', () => {
       undefined,
       fetcher
     )).rejects.toThrow('statut 503')
+  })
+
+  it('stops a model that stays completely idle', async () => {
+    const fetcher = vi.fn<typeof fetch>((_url, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+    }))
+
+    await expect(streamOllamaChat(
+      'qwen3.5:4b',
+      [{ role: 'user', content: 'Bonjour' }],
+      vi.fn(),
+      undefined,
+      fetcher,
+      undefined,
+      10
+    )).rejects.toThrow('ne produit plus de réponse')
   })
 })

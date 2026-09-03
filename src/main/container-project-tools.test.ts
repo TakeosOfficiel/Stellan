@@ -39,6 +39,13 @@ describe('ContainerProjectTools', () => {
       cpuLimit: 2,
       memoryLimit: '4096m'
     })
+    expect(executor.mock.calls[3]?.[0].command).toEqual([
+      'git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'status', '--short'
+    ])
+    expect(executor.mock.calls[4]?.[0].command).toEqual([
+      'git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace',
+      'diff', '--no-ext-diff', '--no-textconv'
+    ])
     expect(executor.mock.calls[5]?.[0].command).toEqual(['pnpm', 'test'])
   })
 

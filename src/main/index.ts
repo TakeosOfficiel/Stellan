@@ -1273,6 +1273,13 @@ app.whenReady().then(() => {
     }
     const latestUserMessage = [...parsed.data.messages].reverse().find((message) => message.role === 'user')
     if (!latestUserMessage) throw new Error('La demande ne contient aucun nouveau message utilisateur.')
+    if (thread.title === 'Nouveau thread') {
+      store.updateThread(thread.id, {
+        title: latestUserMessage.content.length > 60
+          ? `${latestUserMessage.content.slice(0, 57)}…`
+          : latestUserMessage.content
+      })
+    }
     const run = store.startAgentRun(thread.id, parsed.data.requestId, parsed.data.model, latestUserMessage.content)
     try {
       await scheduleAgentRun(run)
