@@ -448,6 +448,12 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .thread-row.active button:first-of-type { color: #dde3df; }
 .thread-row .thread-delete { width: 20px; padding: 3px; opacity: 0; text-align: center; }
 .thread-row:hover .thread-delete, .thread-row:focus-within .thread-delete { opacity: 1; }
+.export-project-button {
+  width: 100%; padding: 7px 9px; border: 1px solid #2b332e; border-radius: 6px;
+  color: #aab5ad; background: #181e1a; font-size: 9px; text-align: left;
+}
+.export-project-button:hover { color: #d7ddd9; background: #1d241f; }
+.export-project-error { display: block; margin: 5px 6px 8px; color: #d28c82; font-size: 8px; line-height: 1.4; }
 .sidebar-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid #252b27; }
 .runtime-summary { margin: 0 6px 9px; font-size: 9px; }
 .model-selector { margin: 0; padding: 0; border: 0; }

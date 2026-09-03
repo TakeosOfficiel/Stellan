@@ -154,12 +154,11 @@ export type UpdateQueuedMessageRequest = {
   content: string
 }
 
-export type SaveWorkerProfileRequest = Omit<WorkerProfile, 'updatedAt'>
-
 export type StoredThread = {
   id: string
   parentThreadId: string | null
   title: string
+  projectName: string | null
   projectPath: string | null
   workspacePath: string | null
   workspaceMode: 'none' | 'worktree' | 'direct'
@@ -181,6 +180,7 @@ export type StoredMessage = {
 
 export type CreateThreadRequest = {
   title: string
+  projectName: string
   projectPath: string | null
   model: string | null
 }
@@ -264,8 +264,6 @@ export type LocalAgentApi = {
   transcribeDictation: (audio: ArrayBuffer) => Promise<string>
   onDictationProgress: (listener: (progress: DictationProgress) => void) => () => void
   selectProject: () => Promise<ProjectSelection | null>
-  getWorkerProfile: (projectPath: string) => Promise<WorkerProfile>
-  saveWorkerProfile: (profile: SaveWorkerProfileRequest) => Promise<WorkerProfile>
   startChat: (request: ChatRequest) => Promise<AgentRunSummary>
   cancelChat: (requestId: string) => Promise<void>
   listActiveRuns: () => Promise<ActiveRun[]>
@@ -279,6 +277,7 @@ export type LocalAgentApi = {
   createThread: (request: CreateThreadRequest) => Promise<StoredThread>
   loadThreadMessages: (threadId: string) => Promise<StoredMessage[]>
   deleteThread: (threadId: string) => Promise<boolean>
+  exportThreadProject: (threadId: string) => Promise<string | null>
   reviewThreadProject: (threadId: string) => Promise<ProjectReview | null>
   listProjectFiles: (threadId: string) => Promise<ProjectFileList>
   readProjectFile: (request: ProjectFileRequest) => Promise<ProjectFilePreview>

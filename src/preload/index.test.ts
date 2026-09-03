@@ -40,11 +40,13 @@ describe('portal preload IPC', () => {
   })
 
   it('exposes project file reads only through a thread id and relative path', async () => {
+    await api.exportThreadProject('thread')
     await api.listProjectFiles('thread')
     await api.readProjectFile({ threadId: 'thread', path: 'src/index.ts' })
     await api.openProjectFile({ threadId: 'thread', path: 'src/index.ts' })
 
-    expect(mocks.invoke.mock.calls.slice(-3)).toEqual([
+    expect(mocks.invoke.mock.calls.slice(-4)).toEqual([
+      ['threads:export-project', 'thread'],
       ['threads:list-project-files', 'thread'],
       ['threads:read-project-file', { threadId: 'thread', path: 'src/index.ts' }],
       ['threads:open-project-file', { threadId: 'thread', path: 'src/index.ts' }]

@@ -14,8 +14,36 @@ const ALPINE_VERSION = '3.24.1'
 const ALPINE_FILE = `alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz`
 const ALPINE_BASE_URL = 'https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64'
 const ALPINE_SHA256 = '41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081'
-const RUNTIME_MARKER = '/etc/local-agent-runtime-v3'
-export const MANAGED_RUNTIME_PACKAGES = ['openrc', 'docker', 'docker-cli', 'nodejs', 'npm', 'git', 'ripgrep', 'bash', 'coreutils', 'iproute2'] as const
+const RUNTIME_MARKER = '/etc/local-agent-runtime-v4'
+const PRIVATE_PROJECTS_ROOT = '/var/lib/local-agent'
+const PRIVATE_PROJECT_SIZE_BYTES = 20 * 1024 * 1024 * 1024
+const IMPORT_PRIVATE_PROJECT_SCRIPT = `set -eu
+source=$1; disk=$2; target=$3; bytes=$4
+[ -d "$source" ]
+[ ! -e "$disk" ]
+mkdir -p "$(dirname "$disk")" "$target"
+truncate -s "$bytes" "$disk"
+mkfs.ext4 -F -q "$disk"
+mount -o loop,nosuid,nodev "$disk" "$target"
+mkdir -p "$target/worktrees"
+if git -C "$source" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git clone --no-local --no-hardlinks "$source" "$target/repository"
+  find "$target/repository" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
+  tar -C "$source" --exclude=.git -cf - . | tar -C "$target/repository" -xf -
+else
+  mkdir -p "$target/repository"
+  cp -a "$source"/. "$target/repository"/
+fi
+cd "$target/repository"
+if [ ! -d .git ]; then git init; fi
+rm -rf .git/hooks && mkdir -p .git/hooks
+git config core.hooksPath /dev/null
+git config core.fsmonitor false
+git add -A
+if ! git rev-parse --verify HEAD >/dev/null 2>&1 || ! git diff --cached --quiet; then
+  git -c user.name="Local Agent" -c user.email="local-agent@localhost" commit --no-verify -m "Local Agent snapshot"
+fi`
+export const MANAGED_RUNTIME_PACKAGES = ['openrc', 'docker', 'docker-cli', 'nodejs', 'npm', 'git', 'ripgrep', 'bash', 'coreutils', 'iproute2', 'e2fsprogs', 'util-linux'] as const
 export const WSL_ADDRESS_COMMAND = ['/sbin/ip', '-o', '-4', 'addr', 'show', 'dev', 'eth0'] as const
 export const DOCKER_SERVICE_START_SCRIPT = [
   'set -eu',
@@ -26,6 +54,7 @@ export const DOCKER_SERVICE_START_SCRIPT = [
 
 let runtimeRoot: string | null = null
 let startup: Promise<void> | null = null
+let ready = false
 let stopping = false
 let distroAddress: string | null = null
 let progressReporter: ((progress: RuntimeProgress) => void) | null = null
@@ -155,6 +184,108 @@ async function startDockerDaemon(): Promise<void> {
   throw new Error(`Le moteur privé ne répond pas. ${failure(logs)}`.trim())
 }
 
+function validateProjectId(projectId: string): void {
+  if (!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(projectId)) {
+    throw new Error('Identifiant de projet privé invalide.')
+  }
+}
+
+function managedLinuxPathFromWindows(value: string): string | null {
+  const normalized = value.replaceAll('/', '\\')
+  const prefixes = [
+    `\\\\wsl.localhost\\${MANAGED_WSL_DISTRO}\\`,
+    `\\\\wsl$\\${MANAGED_WSL_DISTRO}\\`
+  ]
+  const prefix = prefixes.find((candidate) => normalized.toLowerCase().startsWith(candidate.toLowerCase()))
+  if (!prefix) return null
+  return `/${normalized.slice(prefix.length).replaceAll('\\', '/')}`
+}
+
+function sourceLinuxPath(value: string): string {
+  const managed = managedLinuxPathFromWindows(value)
+  if (managed) return managed
+  const drive = value.match(/^([A-Za-z]):[\\/](.*)$/)
+  if (!drive) throw new Error('Seuls les dossiers situés sur un disque local Windows peuvent être importés.')
+  return `/mnt/${drive[1]!.toLowerCase()}/${drive[2]!.replaceAll('\\', '/')}`
+}
+
+async function mountPrivateProjectDisks(): Promise<void> {
+  const script = [
+    'set -eu',
+    `base=${PRIVATE_PROJECTS_ROOT}`,
+    'mkdir -p "$base/disks" "$base/projects"',
+    'for disk in "$base"/disks/*.img; do',
+    '  [ -f "$disk" ] || continue',
+    '  id=$(basename "$disk" .img)',
+    '  target="$base/projects/$id"',
+    '  mkdir -p "$target"',
+    '  mountpoint -q "$target" || mount -o loop,nosuid,nodev "$disk" "$target"',
+    'done'
+  ].join('\n')
+  await requireSuccess('Montage des projets privés', await distroCommand(
+    ['/bin/sh', '-lc', script],
+    { timeoutMs: 120_000, maxOutputBytes: 100_000 }
+  ))
+}
+
+export function managedProjectWindowsPath(projectId: string, child = ''): string {
+  validateProjectId(projectId)
+  const suffix = child.split(/[\\/]/).filter(Boolean).join('\\')
+  return `\\\\wsl.localhost\\${MANAGED_WSL_DISTRO}\\var\\lib\\local-agent\\projects\\${projectId}${suffix ? `\\${suffix}` : ''}`
+}
+
+export function managedLinuxPathToWindows(value: string): string {
+  if (!value.startsWith('/')) return value
+  return `\\\\wsl.localhost\\${MANAGED_WSL_DISTRO}${value.replaceAll('/', '\\')}`
+}
+
+export async function importPrivateProject(
+  projectId: string,
+  sourcePath: string,
+  sizeBytes = PRIVATE_PROJECT_SIZE_BYTES
+): Promise<{ repositoryPath: string; workspacesPath: string }> {
+  validateProjectId(projectId)
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 1024 * 1024 * 1024) {
+    throw new Error('La taille du projet privé doit être d’au moins 1 Go.')
+  }
+  await ensureManagedWslRuntime()
+  const source = sourceLinuxPath(sourcePath)
+  const disk = `${PRIVATE_PROJECTS_ROOT}/disks/${projectId}.img`
+  const target = `${PRIVATE_PROJECTS_ROOT}/projects/${projectId}`
+  const result = await distroCommand([
+    '/bin/sh', '-lc', IMPORT_PRIVATE_PROJECT_SCRIPT, 'import-private-project', source, disk, target, String(sizeBytes)
+  ], { timeoutMs: 900_000, maxOutputBytes: 500_000 })
+  if (result.exitCode !== 0 || result.timedOut) {
+    await distroCommand(['/bin/sh', '-lc', 'umount "$1" 2>/dev/null || true; rm -rf "$1" "$2"', 'cleanup-private-project', target, disk], { timeoutMs: 120_000 })
+    await requireSuccess('Import du projet privé', result)
+  }
+  return {
+    repositoryPath: managedProjectWindowsPath(projectId, 'repository'),
+    workspacesPath: managedProjectWindowsPath(projectId, 'worktrees')
+  }
+}
+
+export function isManagedProjectWindowsPath(value: string): boolean {
+  return managedLinuxPathFromWindows(value)?.startsWith(`${PRIVATE_PROJECTS_ROOT}/projects/`) ?? false
+}
+
+export async function runManagedWslCommand(
+  executable: string,
+  args: readonly string[],
+  options: CommandOptions = {}
+): Promise<CommandResult> {
+  if (process.platform !== 'win32') return runHostCommand(executable, args, options)
+  await ensureManagedWslRuntime()
+  return distroCommand([
+    executable,
+    ...args.map((argument) => {
+      const assignment = argument.match(/^(.*?=)(\\\\wsl(?:\.localhost|\$)\\[^\\]+\\.*)$/i)
+      if (assignment) return `${assignment[1]}${managedLinuxPathFromWindows(assignment[2]!) ?? assignment[2]}`
+      return managedLinuxPathFromWindows(argument) ?? argument
+    })
+  ], options)
+}
+
 async function refreshDistroAddress(): Promise<void> {
   report('Configuration du réseau privé', 'Connexion sécurisée de Local Agent au runtime…', 77)
   const address = await distroCommand(WSL_ADDRESS_COMMAND, { timeoutMs: 15_000 })
@@ -168,6 +299,7 @@ export function ensureManagedWslRuntime(): Promise<void> {
   if (process.platform !== 'win32') return Promise.resolve()
   if (stopping) return Promise.reject(new Error('Le runtime privé est en cours d’arrêt.'))
   if (!runtimeRoot) return Promise.reject(new Error('Le dossier du runtime privé n’est pas configuré.'))
+  if (ready) return Promise.resolve()
   if (startup) return startup
   startup = (async () => {
     report('Vérification de WSL 2', 'Contrôle du composant de virtualisation Windows…', 8)
@@ -184,16 +316,24 @@ export function ensureManagedWslRuntime(): Promise<void> {
     if (!exists) await importDistro(runtimeRoot as string)
     await installRuntimePackages()
     await startDockerDaemon()
+    await mountPrivateProjectDisks()
     await refreshDistroAddress()
+    ready = true
   })().finally(() => { startup = null })
   return startup
 }
 
 export function translateWindowsDockerArgument(argument: string): string {
+  const managed = managedLinuxPathFromWindows(argument)
+  if (managed) return managed
   const translated = argument.replace(/source=([A-Za-z]):\\([^,]*)/g, (_match, drive: string, rest: string) => (
     `source=/mnt/${drive.toLowerCase()}/${rest.replaceAll('\\', '/')}`
   ))
-  return translated.replace(/^127\.0\.0\.1:(\d+):(\d+)$/, '0.0.0.0:$1:$2')
+  const source = translated.match(/^(.*source=)(\\\\wsl(?:\.localhost|\$)\\[^\\]+\\[^,]*)(.*)$/i)
+  const withManagedSource = source
+    ? `${source[1]}${managedLinuxPathFromWindows(source[2]!) ?? source[2]}${source[3]}`
+    : translated
+  return withManagedSource.replace(/^127\.0\.0\.1:(\d+):(\d+)$/, '0.0.0.0:$1:$2')
 }
 
 export function managedWslServiceUrl(port: number): string | null {
@@ -229,6 +369,7 @@ export function configureManagedWslRuntime(
 ): void {
   runtimeRoot = root
   stopping = false
+  ready = false
   distroAddress = null
   progressReporter = onProgress
   configureManagedDockerRunner(process.platform === 'win32' ? runManagedDocker : null)
@@ -260,5 +401,6 @@ export async function stopManagedWslRuntime(): Promise<void> {
   await startup?.catch(() => undefined)
   await Promise.allSettled(activeDockerCommands)
   await wsl(['--terminate', MANAGED_WSL_DISTRO], { timeoutMs: 30_000 })
+  ready = false
   distroAddress = null
 }

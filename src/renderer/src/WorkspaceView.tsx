@@ -178,6 +178,8 @@ export function WorkspaceView({
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
   const [project, setProject] = useState<ProjectSelection | null>(null)
   const [threads, setThreads] = useState<StoredThread[]>([])
+  const [exportingProject, setExportingProject] = useState(false)
+  const [exportProjectError, setExportProjectError] = useState<string | null>(null)
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
   const [messagesByThread, setMessagesByThread] = useState<Record<string, UiMessage[]>>({})
   const [prompt, setPrompt] = useState('')
@@ -439,6 +441,7 @@ export function WorkspaceView({
   async function createProjectThread(selection: ProjectSelection): Promise<void> {
     const thread = await window.localAgent.createThread({
       title: 'Nouveau thread',
+      projectName: selection.name,
       projectPath: selection.path,
       model: effectiveModel || null
     })
@@ -506,7 +509,7 @@ export function WorkspaceView({
       ] }
     })
     setProject(thread.projectPath
-      ? { path: thread.projectPath, name: projectName(thread.projectPath) }
+      ? { path: thread.projectPath, name: thread.projectName ?? projectName(thread.projectPath) }
       : null)
     if (thread.model) setSelectedModel(thread.model)
     setToolsByThread((current) => ({ ...current, [thread.id]: current[thread.id] ?? [] }))
@@ -537,6 +540,19 @@ export function WorkspaceView({
     } catch { /* Le thread actif reste affiché. */ }
   }
 
+  async function exportProject(): Promise<void> {
+    if (!activeThread) return
+    setExportProjectError(null)
+    setExportingProject(true)
+    try {
+      await window.localAgent.exportThreadProject(activeThread.id)
+    } catch (error) {
+      setExportProjectError(error instanceof Error ? error.message : 'L’export du projet a échoué.')
+    } finally {
+      setExportingProject(false)
+    }
+  }
+
   async function sendMessage(): Promise<void> {
     const content = prompt.trim()
     if (!project || !activeThreadId) {
@@ -550,6 +566,7 @@ export function WorkspaceView({
       try {
         const thread = await window.localAgent.createThread({
           title: content.length > 60 ? `${content.slice(0, 57)}…` : content,
+          projectName: project.name,
           projectPath: project?.path ?? null,
           model: effectiveModel
         })
@@ -852,9 +869,18 @@ export function WorkspaceView({
               <span>{hasOllama ? 'Ollama connecté' : 'Ollama indisponible'}</span>
             </div>
             {activeThread?.projectPath && (
-              <small>{activeThread.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
+              <small>{activeThread.workspaceMode === 'worktree' ? 'Projet privé · stockage limité à 20 Go' : 'Dossier direct confirmé'}</small>
             )}
           </div>
+
+          {activeThread?.workspaceMode === 'worktree' && (
+            <>
+              <button className="export-project-button" type="button" disabled={exportingProject} onClick={() => void exportProject()}>
+                {exportingProject ? 'Export en cours…' : 'Exporter ce projet'}
+              </button>
+              {exportProjectError && <small className="export-project-error" role="alert">{exportProjectError}</small>}
+            </>
+          )}
 
           <div className="model-selector">
             {models.length > 0 ? (
@@ -1067,7 +1093,7 @@ export function WorkspaceView({
 
       <WorkbenchPanel
         thread={activeThread}
-        projectName={activeThread?.projectPath ? projectName(activeThread.projectPath) : 'Projet'}
+        projectName={activeThread?.projectName ?? (activeThread?.projectPath ? projectName(activeThread.projectPath) : 'Projet')}
         refreshKey={workbenchRefreshKey}
         revealFile={fileReveal}
         onChooseProject={() => void chooseProject()}

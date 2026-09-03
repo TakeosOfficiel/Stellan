@@ -9,15 +9,15 @@ La version 0.1 fournit :
 - détecte la version d’Ollama et les modèles installés lorsque son API locale répond ;
 - active WSL 2 à la demande lorsque le composant Windows manque ;
 - détecte la RAM, le processeur et le GPU ;
-- vérifie séparément Git, Docker et Podman et recommande le runtime worker disponible ;
+- installe et pilote son propre Docker headless dans WSL 2 sous Windows, sans Docker Desktop ;
 - classe les modèles par usage : rapide, général, code, vision ou génération d'images ;
 - recommande les modèles adaptés tout en laissant le choix à l'utilisateur ;
 - télécharge le modèle choisi avec une progression visible ;
 - propose une dictée privée au microphone avec Whisper large-v3-turbo, téléchargé à la première utilisation puis conservé dans le cache local ;
 - conserve les threads et messages dans une base SQLite locale ;
-- crée un Git worktree isolé par thread lorsque le projet le permet ;
-- conserve un profil worker conteneurisé par projet avec limites CPU/RAM, image et politique réseau ;
-- permet de choisir, par projet, un nombre maximal de workers simultanés avec une valeur initiale prudente calculée depuis le CPU et la RAM ;
+- importe chaque projet Windows dans un disque Linux privé plafonné à 20 Go, sans modifier le dossier original ;
+- crée un Git worktree isolé pour chaque conversation principale ;
+- calcule automatiquement des limites CPU/RAM prudentes selon le PC et garde le réseau des workers fermé par défaut ;
 - permet au coordinateur de créer automatiquement 2 à 4 chats workers persistants et visibles sous leur thread parent, avec des fichiers exclusifs et une détection des chevauchements avant exécution ;
 - planifie les générations dans le processus principal, affiche leur état en cours ou en attente et laisse changer de thread sans les arrêter ;
 - accepte plusieurs messages par thread pendant une génération, avec file persistante, édition, suppression, priorité immédiate et historique des états ;
@@ -26,9 +26,10 @@ La version 0.1 fournit :
 - crée sur demande un portail de prévisualisation HTTP/WebSocket lié au thread, accessible uniquement via une URL loopback temporaire ;
 - permet à l'agent de lire, rechercher, modifier, tester et présenter le diff Git ;
 - affiche en permanence à droite un espace projet avec Changements, Review, Portails, Fichiers et Terminal ;
+- exporte explicitement le résultat d'une conversation vers un nouveau dossier Windows, sans métadonnées Git ni liens symboliques ;
 - borne le contexte et les sorties d'outils pour rester utilisable avec de petits modèles.
 
-Sous Windows, Docker Desktop et Podman Desktop ne sont pas nécessaires. Local Agent crée une distribution WSL 2 privée nommée `LocalAgentRuntime`, y installe un moteur de conteneurs sans interface et télécharge automatiquement les images nécessaires. Le téléchargement d’un modèle reste déclenché depuis le catalogue afin que l’utilisateur choisisse sa taille.
+Sous Windows, Docker Desktop et Podman Desktop ne sont pas nécessaires. Local Agent crée une distribution WSL 2 privée nommée `LocalAgentRuntime`, y installe un moteur de conteneurs sans interface et télécharge automatiquement les images nécessaires. Ollama, ses modèles, les disques des projets et les workers résident dans ce runtime privé. Ils utilisent toujours le CPU, la RAM, le GPU et le stockage physiques du PC, mais ne sont pas installés directement dans Windows. Le téléchargement d’un modèle reste déclenché depuis le catalogue afin que l’utilisateur choisisse sa taille.
 
 ## Première configuration et Ollama
 
@@ -44,13 +45,13 @@ Une API joignable sans modèle n’est pas encore prête pour une conversation. 
 
 1. Lancer `pnpm dev` et laisser Local Agent préparer WSL 2, son moteur privé et Ollama automatiquement.
 2. Dans **Modèles**, vérifier l’API locale sur le port 11435, puis installer le modèle de démarrage ou un modèle de code compatible avec les outils.
-3. Dans **Agent**, ouvrir un dépôt Git : l’application crée immédiatement un thread de projet et le panneau droit doit afficher ses vrais fichiers. Envoyer une demande de modification, puis consulter **Changes** et **Review**.
+3. Dans **Agent**, ouvrir un projet : sous Windows, l’application en importe une copie dans un disque privé de 20 Go et laisse l’original intact. Elle crée ensuite le premier worktree ; le panneau droit doit afficher ses fichiers. Envoyer une demande de modification, puis consulter **Changes** et **Review**.
 4. Dans le panneau droit du thread actif, ouvrir **Terminal**, vérifier les programmes interactifs et le redimensionnement, puis fermer le terminal ; le worker doit rester disponible pour les outils suivants.
 5. Ajouter un `index.html`, ouvrir **Portals**, puis vérifier l’aperçu Chromium, l’URL, la copie, l’ouverture, le mode appareil, le rechargement et l’arrêt. L’URL loopback reste accessible uniquement depuis le même ordinateur et n’est jamais restaurée au redémarrage.
-6. Régler **Workers simultanés** à 2, lancer deux threads du même projet, passer de l’un à l’autre et vérifier leurs indicateurs indépendants. Avec des worktrees, les deux peuvent progresser ; avec deux threads qui partagent le dossier direct, le second reste volontairement en attente.
+6. Lancer deux conversations du même projet, passer de l’une à l’autre et vérifier leurs indicateurs indépendants. Chacune possède son propre worktree et sa propre file : elles doivent pouvoir progresser simultanément dans les limites automatiquement calculées.
 7. Pendant une génération, vérifier que la réponse apparaît progressivement et que le bouton des nouveaux messages ramène en bas après un défilement manuel. Envoyer ensuite plusieurs messages : ils doivent rester dans la file visible au-dessus du compositeur, sans apparaître dans la conversation. Modifier puis supprimer une entrée, utiliser **Envoyer maintenant**, et ouvrir le bouton d’historique séparé. Fermer puis rouvrir l’application : la génération active devient interrompue, tandis que les messages encore en attente sont conservés et reprennent dans l’ordre. Une confirmation supplémentaire protège les changements non enregistrés lors de la suppression du thread.
 
-Pour un dossier qui ne permet pas de créer un worktree Git, l'application explique que l'isolation est indisponible et exige une confirmation avant d'utiliser le dossier original en mode direct.
+Sous Windows, l'application échoue sans toucher au dossier original si l'import privé ou la création du worktree ne réussit pas. Elle ne propose aucun repli silencieux en mode direct. Sous Linux, le mode direct historique reste disponible après confirmation lorsqu'un worktree est impossible.
 
 Sans projet ouvert, le chat est verrouillé et demande d’ouvrir ou créer un dossier. Il ne présente donc pas un bloc de code comme un changement réellement appliqué. Les aperçus du panneau **Fichiers** sont des lectures bornées de fichiers texte appartenant au thread actif ; les fichiers binaires sont refusés.
 
@@ -58,7 +59,7 @@ Dans l’application Agent, un projet est désormais obligatoire : le compositeu
 
 Le bouton microphone du compositeur enregistre au maximum une minute, convertit le son en mono 16 kHz et le transcrit localement. Le modèle quantifié Whisper large-v3-turbo représente environ 750 Mo à télécharger lors de la première dictée ; il n’est pas inclus dans l’installeur. Les usages suivants fonctionnent depuis le cache sans connexion. Une normalisation déterministe comprend notamment « nouvelle ligne », « ouvre accolade » et « point-virgule », sans confier le texte dicté à un service cloud ni à un second LLM susceptible d’en changer le sens.
 
-La limite est appliquée par projet dans le processus principal, pas par l’interface. Une seule génération reste permise par thread. Les threads dotés de worktrees distincts peuvent occuper plusieurs slots ; deux threads qui partagent le même dossier projet sont sérialisés pour éviter des écritures concurrentes. Tous les outils de l’agent s’exécutent dans le worker persistant. Le worktree reste monté depuis l’hôte afin que les modifications soient visibles dans l’application et dans Git.
+Une seule génération reste permise par conversation, mais les conversations principales possèdent des files indépendantes. Les workers enfants d’un même coordinateur respectent la limite automatique calculée depuis le matériel. Tous les outils de l’agent s’exécutent dans le conteneur persistant du thread. Sous Windows, les worktrees vivent dans le disque privé du projet ; le bouton **Exporter ce projet** crée volontairement une copie Windows du résultat choisi. La limite de 20 Go est globale au projet et à ses worktrees, tandis que les limites CPU/RAM sont appliquées à chaque conteneur worker.
 
 La file d’un thread appartient également au processus principal et à SQLite, pas au renderer. Chaque message est persisté avant confirmation, mais reste séparé de la conversation tant que son exécution n’a pas réellement commencé. Un seul message de ce thread peut être exécuté à la fois et les demandes futures ne sont jamais injectées dans le contexte du message courant. **Envoyer maintenant** place l’entrée choisie en tête, interrompt proprement la génération courante, puis la démarre ; les autres entrées gardent leur ordre. À la fermeture, seul le run réellement actif est marqué interrompu et les entrées en attente restent reprises au prochain lancement.
 

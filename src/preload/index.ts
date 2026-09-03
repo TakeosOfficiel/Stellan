@@ -41,8 +41,6 @@ const api: LocalAgentApi = {
     return () => ipcRenderer.removeListener('dictation:progress', handler)
   },
   selectProject: () => ipcRenderer.invoke('project:select'),
-  getWorkerProfile: (projectPath) => ipcRenderer.invoke('worker-profile:get', projectPath),
-  saveWorkerProfile: (profile) => ipcRenderer.invoke('worker-profile:save', profile),
   startChat: (request) => ipcRenderer.invoke('chat:start', request),
   cancelChat: (requestId) => ipcRenderer.invoke('chat:cancel', requestId),
   listActiveRuns: () => ipcRenderer.invoke('chat:list-active'),
@@ -62,6 +60,7 @@ const api: LocalAgentApi = {
   createThread: (request) => ipcRenderer.invoke('threads:create', request),
   loadThreadMessages: (threadId) => ipcRenderer.invoke('threads:messages', threadId),
   deleteThread: (threadId) => ipcRenderer.invoke('threads:delete', threadId),
+  exportThreadProject: (threadId) => ipcRenderer.invoke('threads:export-project', threadId),
   reviewThreadProject: (threadId) => ipcRenderer.invoke('threads:review-project', threadId),
   listProjectFiles: (threadId) => ipcRenderer.invoke('threads:list-project-files', threadId),
   readProjectFile: (request) => ipcRenderer.invoke('threads:read-project-file', request),

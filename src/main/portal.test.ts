@@ -17,6 +17,7 @@ const activeThread: StoredThread = {
   id: THREAD,
   parentThreadId: null,
   title: 'Portal test',
+  projectName: 'Project',
   projectPath: '/project',
   workspacePath: '/workspace',
   workspaceMode: 'worktree',

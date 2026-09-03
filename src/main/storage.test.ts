@@ -24,12 +24,13 @@ describe('ThreadStore', () => {
     const store = new ThreadStore(temporaryDatabase())
 
     try {
-      const first = store.createThread({ title: 'First thread' })
+      const first = store.createThread({ title: 'First thread', projectName: 'Website' })
       const second = store.createThread({ title: 'Second thread' })
 
       expect(first.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
       expect(store.listThreads().map((thread) => thread.id)).toEqual([first.id, second.id])
       expect(store.getThread(first.id)).toEqual(first)
+      expect(store.getThread(first.id)?.projectName).toBe('Website')
       expect(store.updateThread(first.id, { title: 'Renamed thread' })).toMatchObject({
         id: first.id,
         title: 'Renamed thread',
@@ -408,7 +409,7 @@ describe('ThreadStore', () => {
       })
       const version = new DatabaseSync(path, { readOnly: true })
       try {
-        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(9)
+        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(10)
       } finally {
         version.close()
       }

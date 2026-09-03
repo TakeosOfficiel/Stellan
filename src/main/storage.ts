@@ -6,6 +6,7 @@ export type Thread = {
   id: string
   parentThreadId: string | null
   title: string
+  projectName: string | null
   projectPath: string | null
   workspacePath: string | null
   workspaceMode: 'none' | 'worktree' | 'direct'
@@ -22,6 +23,7 @@ export type EnvironmentStatus = 'creating' | 'active' | 'error' | 'terminated'
 export type CreateThreadInput = {
   title: string
   parentThreadId?: string | null
+  projectName?: string | null
   projectPath?: string | null
   workspacePath?: string | null
   workspaceMode?: Thread['workspaceMode']
@@ -279,6 +281,9 @@ const migrations = [
   `
     ALTER TABLE threads ADD COLUMN parent_thread_id TEXT REFERENCES threads(id) ON DELETE CASCADE;
     CREATE INDEX threads_parent_thread_id ON threads(parent_thread_id, created_at);
+  `,
+  `
+    ALTER TABLE threads ADD COLUMN project_name TEXT;
   `
 ]
 
@@ -289,6 +294,7 @@ function toThread(row: StorageRow): Thread {
       ? null
       : String(row.parent_thread_id),
     title: String(row.title),
+    projectName: row.project_name === null || row.project_name === undefined ? null : String(row.project_name),
     projectPath: row.project_path === null ? null : String(row.project_path),
     workspacePath: row.workspace_path === null ? null : String(row.workspace_path),
     workspaceMode: row.workspace_mode === 'worktree' || row.workspace_mode === 'direct'
@@ -407,6 +413,7 @@ export class ThreadStore {
       id: randomUUID(),
       parentThreadId: input.parentThreadId ?? null,
       title: input.title,
+      projectName: input.projectName ?? null,
       projectPath: input.projectPath ?? null,
       workspacePath: input.workspacePath ?? null,
       workspaceMode: input.workspaceMode ?? 'none',
@@ -419,14 +426,15 @@ export class ThreadStore {
     }
     this.database.prepare(`
       INSERT INTO threads (
-        id, parent_thread_id, title, project_path, workspace_path, workspace_mode,
+        id, parent_thread_id, title, project_name, project_path, workspace_path, workspace_mode,
         environment_status, environment_error, environment_updated_at,
         model, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       thread.id,
       thread.parentThreadId,
       thread.title,
+      thread.projectName,
       thread.projectPath,
       thread.workspacePath,
       thread.workspaceMode,
@@ -445,7 +453,7 @@ export class ThreadStore {
     this.assertOpen()
 
     return this.database.prepare(`
-      SELECT id, parent_thread_id, title, project_path, workspace_path, workspace_mode,
+      SELECT id, parent_thread_id, title, project_name, project_path, workspace_path, workspace_mode,
              environment_status, environment_error, environment_updated_at,
              model, created_at, updated_at
       FROM threads
@@ -457,7 +465,7 @@ export class ThreadStore {
     this.assertOpen()
 
     const row = this.database.prepare(`
-      SELECT id, parent_thread_id, title, project_path, workspace_path, workspace_mode,
+      SELECT id, parent_thread_id, title, project_name, project_path, workspace_path, workspace_mode,
              environment_status, environment_error, environment_updated_at,
              model, created_at, updated_at
       FROM threads

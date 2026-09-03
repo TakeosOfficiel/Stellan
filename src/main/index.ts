@@ -1,6 +1,7 @@
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { basename, join } from 'node:path'
+import { cp, lstat } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
 import type { OllamaStatus, RuntimeProgress } from '../shared/contracts'
@@ -19,7 +20,16 @@ import { ThreadStore, type AgentRun, type AgentRunSummary as StoredAgentRunSumma
 import { TerminalManager } from './terminal'
 import { createWorkerCommandExecutor } from './worker-runtime'
 import { WorkerScheduler } from './worker-scheduler'
-import { configureManagedWslRuntime, installWslFeature, managedWslServiceUrl, stopManagedWslRuntime } from './wsl-runtime'
+import {
+  configureManagedWslRuntime,
+  importPrivateProject,
+  installWslFeature,
+  isManagedProjectWindowsPath,
+  managedLinuxPathToWindows,
+  managedWslServiceUrl,
+  runManagedWslCommand,
+  stopManagedWslRuntime
+} from './wsl-runtime'
 
 const OLLAMA_STATUS_CHANNEL = 'ollama:get-status'
 const OLLAMA_START_CHANNEL = 'ollama:start'
@@ -32,8 +42,6 @@ const MODEL_PULL_PROGRESS_CHANNEL = 'ollama:pull-progress'
 const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
-const WORKER_PROFILE_GET_CHANNEL = 'worker-profile:get'
-const WORKER_PROFILE_SAVE_CHANNEL = 'worker-profile:save'
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_CANCEL_CHANNEL = 'chat:cancel'
 const CHAT_LIST_ACTIVE_CHANNEL = 'chat:list-active'
@@ -47,6 +55,7 @@ const THREADS_SET_ACTIVE_CHANNEL = 'threads:set-active'
 const THREADS_CREATE_CHANNEL = 'threads:create'
 const THREADS_MESSAGES_CHANNEL = 'threads:messages'
 const THREADS_DELETE_CHANNEL = 'threads:delete'
+const THREADS_EXPORT_PROJECT_CHANNEL = 'threads:export-project'
 const THREADS_REVIEW_PROJECT_CHANNEL = 'threads:review-project'
 const THREADS_LIST_PROJECT_FILES_CHANNEL = 'threads:list-project-files'
 const THREADS_READ_PROJECT_FILE_CHANNEL = 'threads:read-project-file'
@@ -114,25 +123,9 @@ const portalStartSchema = z.discriminatedUnion('source', [
 ])
 const createThreadSchema = z.object({
   title: z.string().trim().min(1).max(200),
+  projectName: z.string().trim().min(1).max(200),
   projectPath: z.string().min(1).max(10_000).nullable(),
   model: z.string().min(1).max(200).nullable()
-})
-const workerProfileSchema = z.object({
-  projectPath: z.string().min(1).max(10_000),
-  mode: z.enum(['direct', 'container']),
-  runtime: z.enum(['docker', 'podman']).nullable(),
-  cpuLimit: z.number().min(0.5).max(128),
-  memoryMb: z.number().int().min(512).max(1_048_576),
-  image: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/).max(300),
-  network: z.enum(['none', 'bridge']),
-  maxConcurrentWorkers: z.number().int().min(1).max(32)
-}).superRefine((profile, context) => {
-  if (profile.mode === 'container' && !profile.runtime) {
-    context.addIssue({ code: 'custom', message: 'Un runtime est requis pour le mode conteneur.' })
-  }
-  if (profile.mode === 'direct' && profile.runtime) {
-    context.addIssue({ code: 'custom', message: 'Le mode direct ne doit pas définir de runtime.' })
-  }
 })
 let activeDownload: string | null = null
 let dictationActive = false
@@ -230,27 +223,26 @@ async function openThreadProject(threadId: string): Promise<ProjectTools> {
   }
 }
 
-async function resolveContainerGit(project: ProjectTools): Promise<{
+async function resolveContainerGit(project: ProjectTools, projectPath?: string): Promise<{
   directory: string
   commonDirectory: string
 } | null> {
-  if (!await project.isGitRepository()) return null
+  const managed = process.platform === 'win32' && projectPath && isManagedProjectWindowsPath(projectPath)
+  const runGit = (args: readonly string[]) => managed
+    ? runManagedWslCommand('git', ['-C', projectPath, ...args], { timeoutMs: 10_000, maxOutputBytes: 20_000 })
+    : project.runCommand('git', args, { timeoutMs: 10_000, maxOutputBytes: 20_000 })
+  const repository = await runGit(['rev-parse', '--is-inside-work-tree'])
+  if (repository.exitCode !== 0 || repository.stdout.trim() !== 'true') return null
   const [directory, commonDirectory] = await Promise.all([
-    project.runCommand('git', ['rev-parse', '--path-format=absolute', '--git-dir'], {
-      timeoutMs: 10_000,
-      maxOutputBytes: 20_000
-    }),
-    project.runCommand('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
-      timeoutMs: 10_000,
-      maxOutputBytes: 20_000
-    })
+    runGit(['rev-parse', '--path-format=absolute', '--git-dir']),
+    runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'])
   ])
   if (directory.exitCode !== 0 || commonDirectory.exitCode !== 0) {
     throw new Error('Les métadonnées Git du worktree ne peuvent pas être montées dans le worker.')
   }
   return {
-    directory: directory.stdout.trim(),
-    commonDirectory: commonDirectory.stdout.trim()
+    directory: managed ? managedLinuxPathToWindows(directory.stdout.trim()) : directory.stdout.trim(),
+    commonDirectory: managed ? managedLinuxPathToWindows(commonDirectory.stdout.trim()) : commonDirectory.stdout.trim()
   }
 }
 
@@ -284,13 +276,8 @@ async function defaultWorkerProfile(projectPath: string) {
 }
 
 async function resolveWorkerProfile(store: ThreadStore, projectPath: string) {
-  const current = store.getWorkerProfile(projectPath)
-  if (current?.mode === 'container') return current
   const defaults = await defaultWorkerProfile(projectPath)
-  if (defaults.mode === 'direct') return current ?? store.saveWorkerProfile(defaults)
-  return store.saveWorkerProfile(current
-    ? { ...current, mode: 'container', runtime: 'docker' }
-    : defaults)
+  return store.saveWorkerProfile(defaults)
 }
 
 function handle<T extends unknown[], R>(
@@ -390,7 +377,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
           }
           const directProject = await openThreadProject(thread.id)
-          const git = await resolveContainerGit(directProject)
+          const git = await resolveContainerGit(directProject, executionPath)
           const project = createAgentProjectTools(profile, thread.id, executionPath, directProject, git)
           await runCodingAgent({
             model: run.model,
@@ -440,6 +427,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                 const createdChild = store.createThread({
                   title: task.title,
                   parentThreadId: thread.id,
+                  projectName: thread.projectName,
                   projectPath: thread.projectPath,
                   workspacePath: thread.workspacePath,
                   workspaceMode: thread.workspaceMode,
@@ -762,32 +750,21 @@ app.whenReady().then(() => {
       timeoutMs: 10_000,
       maxOutputBytes: 20_000
     })
-    const kind = repository.exitCode === 0 && repository.stdout.trim() ? 'git' as const : 'folder' as const
+    let kind: 'git' | 'folder' = repository.exitCode === 0 && repository.stdout.trim() ? 'git' : 'folder'
     if (kind === 'git') {
       projectPath = repository.stdout.trim()
       await ProjectTools.create(projectPath)
     }
-    approvedProjectPaths.set(projectPath, kind)
-    return { path: projectPath, name: basename(projectPath) }
-  })
-  handle(WORKER_PROFILE_GET_CHANNEL, async (_event, input: unknown) => {
-    const projectPath = z.string().min(1).max(10_000).parse(input)
-    if (!isApprovedProject(projectPath)) throw new Error('Ce projet n’est pas autorisé.')
-    const store = getThreadStore()
-    return resolveWorkerProfile(store, projectPath)
-  })
-  handle(WORKER_PROFILE_SAVE_CHANNEL, async (_event, input: unknown) => {
-    const profile = workerProfileSchema.parse(input)
-    if (!isApprovedProject(profile.projectPath)) throw new Error('Ce projet n’est pas autorisé.')
-    if (profile.mode === 'container') {
-      const runtime = await getRuntimeInfo()
-      if (!profile.runtime || !runtime[profile.runtime].available) {
-        throw new Error(`Le runtime ${profile.runtime ?? 'conteneur'} n’est pas disponible.`)
-      }
+    const projectName = basename(projectPath)
+    if (process.platform === 'win32') {
+      sendRuntimeProgress({ step: 'Import du projet', detail: 'Copie dans un disque Linux privé de 20 Go…', percent: 80 })
+      const privateProject = await importPrivateProject(randomUUID(), projectPath)
+      projectPath = privateProject.repositoryPath
+      kind = 'git'
+      sendRuntimeProgress({ step: 'Projet privé prêt', detail: 'L’original restera inchangé.', percent: 100 })
     }
-    const saved = getThreadStore().saveWorkerProfile(profile)
-    workerScheduler.updateProjectLimit(profile.projectPath, profile.maxConcurrentWorkers)
-    return saved
+    approvedProjectPaths.set(projectPath, kind)
+    return { path: projectPath, name: projectName }
   })
   handle(THREADS_LIST_CHANNEL, () => getThreadStore().listThreads())
   handle(THREADS_SET_ACTIVE_CHANNEL, async (event, input: unknown) => {
@@ -816,19 +793,31 @@ app.whenReady().then(() => {
     const existingProjectThreads = store.listThreads().filter(
       (existing) => existing.id !== thread.id && existing.projectPath === parsed.projectPath
     )
+    const managedProject = process.platform === 'win32' && isManagedProjectWindowsPath(parsed.projectPath)
     const projectKind = approvedProjectPaths.get(parsed.projectPath)
       ?? (existingProjectThreads.some((existing) => existing.workspaceMode === 'worktree') ? 'git' : 'folder')
     if (projectKind === 'folder') {
+      if (process.platform === 'win32') {
+        store.transitionEnvironment(thread.id, 'terminated')
+        store.deleteThread(thread.id)
+        throw new Error('Réimportez ce projet pour créer son environnement privé isolé.')
+      }
       return store.activateEnvironment(thread.id, 'direct', null)
     }
     let workspacePath: string
     try {
-      workspacePath = await createThreadWorktree(
-        parsed.projectPath,
-        join(app.getPath('userData'), 'workspaces'),
-        thread.id
-      )
+      const workspaceRoot = managedProject
+        ? join(dirname(parsed.projectPath), 'worktrees')
+        : join(app.getPath('userData'), 'workspaces')
+      workspacePath = managedProject
+        ? await createThreadWorktree(parsed.projectPath, workspaceRoot, thread.id, 'HEAD', runManagedWslCommand)
+        : await createThreadWorktree(parsed.projectPath, workspaceRoot, thread.id)
     } catch (error) {
+      if (managedProject) {
+        store.transitionEnvironment(thread.id, 'terminated')
+        store.deleteThread(thread.id)
+        throw new Error(`L’environnement privé n’a pas pu être créé : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
+      }
       const owner = BrowserWindow.fromWebContents(event.sender)
       const options = {
         type: 'warning' as const,
@@ -892,7 +881,17 @@ app.whenReady().then(() => {
       const project = thread.environmentStatus === 'active'
         ? await openThreadProject(thread.id)
         : await ProjectTools.create(thread.workspacePath)
-      const status = await project.gitStatus()
+      const managedProject = process.platform === 'win32' && isManagedProjectWindowsPath(thread.workspacePath)
+      const managedStatus = managedProject
+        ? await runManagedWslCommand('git', ['-C', thread.workspacePath, '-c', 'core.fsmonitor=false', 'status', '--short'], {
+            timeoutMs: 10_000,
+            maxOutputBytes: 20_000
+          })
+        : null
+      if (managedStatus && managedStatus.exitCode !== 0) {
+        throw new Error(managedStatus.stderr.trim() || 'Impossible de lire les changements du projet privé.')
+      }
+      const status = managedStatus?.stdout ?? await project.gitStatus()
       let force = false
       if (status.trim()) {
         const owner = BrowserWindow.fromWebContents(event.sender)
@@ -913,11 +912,17 @@ app.whenReady().then(() => {
         force = true
       }
       try {
+        const workspaceRoot = process.platform === 'win32' && isManagedProjectWindowsPath(thread.projectPath)
+          ? join(dirname(thread.projectPath), 'worktrees')
+          : join(app.getPath('userData'), 'workspaces')
         await removeThreadWorktree(
           thread.projectPath,
-          join(app.getPath('userData'), 'workspaces'),
+          workspaceRoot,
           thread.id,
-          force
+          force,
+          process.platform === 'win32' && isManagedProjectWindowsPath(thread.projectPath)
+            ? runManagedWslCommand
+            : undefined
         )
       } catch (error) {
         if (thread.environmentStatus !== 'error') {
@@ -935,13 +940,61 @@ app.whenReady().then(() => {
     if (thread.projectPath) store.transitionEnvironment(thread.id, 'terminated')
     return store.deleteThread(threadId)
   })
+  handle(THREADS_EXPORT_PROJECT_CHANNEL, async (event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    const thread = requireActiveProjectThread(event.sender.id, threadId)
+    const source = thread.workspacePath ?? thread.projectPath
+    if (!source) throw new Error('Ce thread ne possède aucun projet à exporter.')
+
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    const options = {
+      title: 'Choisir où exporter le projet',
+      properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>
+    }
+    const selection = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options)
+    if (selection.canceled || !selection.filePaths[0]) return null
+
+    const selectedRoot = resolve(selection.filePaths[0])
+    const sourceRoot = resolve(source)
+    const selectedFromSource = relative(sourceRoot, selectedRoot)
+    if (!selectedFromSource.startsWith('..') && !isAbsolute(selectedFromSource)) {
+      throw new Error('Choisissez un dossier situé hors du projet privé.')
+    }
+
+    const safeName = (thread.projectName ?? 'Projet')
+      .normalize('NFKD')
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80) || 'Projet'
+    const destination = join(selectedRoot, `${safeName}-${new Date().toISOString().slice(0, 10)}-${thread.id.slice(0, 8)}`)
+    await cp(sourceRoot, destination, {
+      recursive: true,
+      force: false,
+      errorOnExist: true,
+      filter: async (currentSource) => {
+        const currentRelative = relative(sourceRoot, currentSource)
+        if (currentRelative.split(/[\\/]/).includes('.git')) return false
+        return !(await lstat(currentSource)).isSymbolicLink()
+      }
+    })
+    const openError = await shell.openPath(destination)
+    if (openError) throw new Error(`Le projet est exporté, mais son dossier n’a pas pu être ouvert : ${openError}`)
+    return destination
+  })
   handle(THREADS_REVIEW_PROJECT_CHANNEL, async (event, input: unknown) => {
     const threadId = requestIdSchema.parse(input)
     const thread = requireActiveProjectThread(event.sender.id, threadId)
     const project = await openThreadProject(thread.id)
-    const isGitRepository = await project.isGitRepository()
-    const [status, diff] = isGitRepository
-      ? await Promise.all([project.gitStatus(), project.gitDiff()])
+    const executionPath = thread.workspacePath ?? thread.projectPath
+    const profile = thread.projectPath ? await resolveWorkerProfile(getThreadStore(), thread.projectPath) : null
+    const git = executionPath ? await resolveContainerGit(project, executionPath) : null
+    const reviewProject = executionPath
+      ? createAgentProjectTools(profile, thread.id, executionPath, project, git)
+      : project
+    const [status, diff] = git
+      ? await Promise.all([reviewProject.gitStatus(), reviewProject.gitDiff()])
       : ['', '']
     return {
       status,
@@ -984,7 +1037,7 @@ app.whenReady().then(() => {
     }
     const profile = await resolveWorkerProfile(store, thread.projectPath)
     if (profile.mode === 'container' && profile.runtime) {
-      const git = await resolveContainerGit(project)
+      const git = await resolveContainerGit(project, cwd)
       await ensureWorkerContainer({
         runtime: profile.runtime,
         threadId: thread.id,
@@ -1193,8 +1246,6 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(MODEL_PULL_CHANNEL)
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
-  ipcMain.removeHandler(WORKER_PROFILE_GET_CHANNEL)
-  ipcMain.removeHandler(WORKER_PROFILE_SAVE_CHANNEL)
   ipcMain.removeHandler(CHAT_START_CHANNEL)
   ipcMain.removeHandler(CHAT_CANCEL_CHANNEL)
   ipcMain.removeHandler(CHAT_LIST_ACTIVE_CHANNEL)
@@ -1207,6 +1258,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(THREADS_CREATE_CHANNEL)
   ipcMain.removeHandler(THREADS_MESSAGES_CHANNEL)
   ipcMain.removeHandler(THREADS_DELETE_CHANNEL)
+  ipcMain.removeHandler(THREADS_EXPORT_PROJECT_CHANNEL)
   ipcMain.removeHandler(THREADS_REVIEW_PROJECT_CHANNEL)
   ipcMain.removeHandler(THREADS_LIST_PROJECT_FILES_CHANNEL)
   ipcMain.removeHandler(THREADS_READ_PROJECT_FILE_CHANNEL)

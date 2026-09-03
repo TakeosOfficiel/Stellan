@@ -169,7 +169,12 @@ export function App(): React.JSX.Element {
     }
   }
 
-  useEffect(() => window.localAgent.onRuntimeProgress(setRuntimeProgress), [])
+  useEffect(() => window.localAgent.onRuntimeProgress((progress) => {
+    setRuntimeProgress(progress)
+    if (progress.percent >= 100) {
+      setTimeout(() => setRuntimeProgress((current) => current === progress ? null : current), 600)
+    }
+  }), [])
 
   const runtimeBusy = startingOllama || checkingOllama || activatingRuntime
   useEffect(() => {
@@ -223,7 +228,7 @@ export function App(): React.JSX.Element {
   }, [firstRun, isModelReady])
 
   const firstModelDownload = firstRun && Boolean(downloadingModel)
-  const startupVisible = runtimeBusy || isLoading || !resolvedStatus?.available || firstModelDownload
+  const startupVisible = runtimeProgress !== null || runtimeBusy || isLoading || !resolvedStatus?.available || firstModelDownload
   const startupPercent = firstModelDownload
     ? pullProgress?.percent ?? 0
     : runtimeProgress?.percent ?? (resolvedStatus?.available ? 100 : 2)

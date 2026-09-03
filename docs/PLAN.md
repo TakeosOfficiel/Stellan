@@ -46,17 +46,17 @@ Après l'installation d'un modèle, le cœur du produit doit rester utilisable s
 | --- | --- |
 | Application | Electron |
 | Interface | React et TypeScript |
-| Styles | Tailwind CSS |
-| État de l'interface | Zustand |
-| Agent | TypeScript dans un processus séparé |
+| Styles | CSS applicatif |
+| État de l'interface | État React et processus principal |
+| Agent | TypeScript dans le processus principal Electron |
 | Inférence | Ollama derrière une interface interchangeable |
 | Dictée | Whisper large-v3-turbo quantifié via Transformers.js |
 | Persistance | SQLite avec migrations |
 | Terminal | xterm.js |
-| Isolation | Docker ou Podman et Git worktrees |
+| Isolation | WSL 2 privé, Docker headless, disques ext4 et Git worktrees |
 | Validation | Zod |
 | Tests | Vitest et Playwright |
-| Monorepo | pnpm workspaces |
+| Paquet | pnpm |
 
 Electron est retenu pour privilégier une implémentation cohérente en TypeScript et un accès mature aux fichiers, terminaux et processus sur Windows et Linux. Le moteur d'agent reste découplé de l'interface afin de permettre un futur client terminal ou web.
 
@@ -124,7 +124,7 @@ Les opérations déterministes restent confiées aux outils classiques plutôt q
 
 ## 5. Environnements de travail locaux
 
-Chaque thread peut posséder un Git worktree indépendant et, lorsque disponible, un conteneur. Le cycle de vie d'un environnement est `création`, `actif`, `suspendu`, `terminé` ou `erreur`.
+Chaque conversation principale possède un Git worktree indépendant et un conteneur persistant. Ses workers enfants partagent ce worktree avec des listes de fichiers exclusives. Le cycle de vie persisté d'un environnement est `création`, `actif`, `terminé` ou `erreur`.
 
 Trois cibles sont prévues :
 
@@ -136,14 +136,14 @@ Le conteneur worker ne reçoit pas le socket du moteur, les secrets du système 
 
 ## 6. Adaptation au matériel
 
-L'assistant de démarrage détecte :
+Le démarrage détecte automatiquement :
 
 - le système d'exploitation, le processeur et la RAM ;
 - le GPU et la VRAM lorsqu'ils sont détectables ;
-- Ollama, Git, Docker et Podman ;
+- WSL 2, le runtime privé, Ollama et les modèles installés ;
 - les modèles déjà installés.
 
-Il propose ensuite un profil ajustable :
+L’application calcule des limites CPU/RAM prudentes sans exposer un profil technique à régler. Elle propose des modèles classés selon le matériel :
 
 | Profil | Modèle indicatif |
 | --- | --- |
@@ -175,9 +175,9 @@ Les secrets sont placés dans le coffre sécurisé du système d'exploitation, j
 - restriction des opérations aux projets explicitement ouverts ;
 - refus des écritures hors projet et journalisation des outils, commandes et résultats ;
 - aucun secret injecté automatiquement dans les conteneurs ;
-- processus agent séparé pour éviter qu'un calcul bloque l'interface.
+- boucle agent asynchrone dans le processus principal, sans API Node exposée au renderer.
 
-L’application ne promet pas une sécurité de machine virtuelle : le projet est monté en lecture-écriture dans le worker afin que les modifications restent visibles sur l’hôte.
+L’application ne promet pas une sécurité de machine virtuelle. Sous Windows, le dossier choisi est importé dans un disque ext4 privé plafonné à 20 Go puis laissé intact ; le worktree correspondant est le seul projet monté en lecture-écriture dans le worker. Une exportation explicite produit une copie Windows sans `.git` ni liens symboliques.
 
 ## 9. Phases de réalisation
 
@@ -218,7 +218,7 @@ La dictée utilise directement le microphone du renderer avec une permission Ele
 - limites de ressources et politiques réseau ;
 - suspension, reprise et nettoyage des environnements.
 
-État actuel : les worktrees sont actifs. Sous Windows, l’application télécharge et vérifie Alpine, importe la distribution `LocalAgentRuntime`, installe Moby/Docker Engine sans interface et pilote toutes ses commandes via `wsl.exe`. Sous Linux, Docker Engine direct reste utilisé. Un profil persistant par projet configure l’image, les limites CPU/RAM, le réseau et le plafond de workers. Chaque thread possède un conteneur persistant durci ; lectures, recherches, écritures, Git, commandes et terminal y sont exécutés. Un volume `local-agent-worker-data-<thread>` conserve ses données internes et est supprimé avec le thread. Le projet reste un montage du worktree hôte. Aucune limite disque dure portable n’est annoncée.
+État actuel : sous Windows, l’application télécharge et vérifie Alpine, importe la distribution `LocalAgentRuntime`, installe Docker Engine sans interface et pilote toutes ses commandes via `wsl.exe`. Chaque projet importé reçoit un fichier ext4 sparse plafonné à 20 Go ; son dépôt et tous ses worktrees y résident, sans écrire dans le dossier Windows original. Chaque conversation principale reçoit un worktree et un conteneur persistant durci ; lectures, recherches, écritures, Git, commandes et terminal y sont exécutés. CPU/RAM et nombre de workers sont calculés automatiquement, le réseau worker est fermé par défaut, et le volume interne `local-agent-worker-data-<thread>` est supprimé avec le thread. Sous Linux, Docker Engine direct et les worktrees hôte restent utilisés. Podman reste un backend ultérieur.
 
 ### Phase 4 — Fiabilité et expérience
 
@@ -255,11 +255,11 @@ Les mises à jour automatiques signées, la signature des artefacts, les smoke t
 - plugins avec permissions déclaratives ;
 - contrôle à distance et partage de threads.
 
-Première tranche réalisée pour les agents parallèles locaux : chaque profil projet persiste un plafond de workers simultanés, initialisé prudemment depuis les cœurs CPU et la RAM détectés. Un ordonnanceur FIFO par projet dans le processus principal applique ce plafond et conserve l’invariant d’une génération active par thread. Les événements IPC portent l’identifiant du thread et de la requête ; le renderer conserve donc séparément les états `queued`/`running`, les sorties partielles et l’activité des outils pendant les changements de thread. L’annulation retire une entrée de file ou interrompt son worker, et la suppression d’un thread refuse de nettoyer son environnement tant que l’un de ces états existe.
+Première tranche réalisée pour les agents parallèles locaux : le plafond de workers simultanés est initialisé prudemment depuis les cœurs CPU et la RAM détectés. Un ordonnanceur FIFO conserve l’invariant d’une génération active par conversation, sans mettre les autres conversations du projet dans la même file. Les événements IPC portent l’identifiant du thread et de la requête ; le renderer conserve donc séparément les états `queued`/`running`, les sorties partielles et l’activité des outils pendant les changements de thread. L’annulation retire une entrée de file ou interrompt son worker, et la suppression d’un thread refuse de nettoyer son environnement tant que l’un de ces états existe.
 
 Tranche suivante réalisée pour la conversation en file : plusieurs messages peuvent être persistés pendant qu’un run du même thread travaille. SQLite conserve leur ordre et leur contenu ; une entrée en attente reste hors de la conversation et n’y apparaît qu’au démarrage réel de son run. Le processus principal permet de modifier ou supprimer uniquement cette entrée encore en attente, de la placer en tête avec **Envoyer maintenant**, puis d’interrompre le run courant avant de la démarrer. Le contexte de chaque run est reconstruit jusqu’à son propre message et exclut les demandes futures. L’interface affiche la file directement au-dessus du compositeur avec ses actions, tandis qu’un bouton séparé ouvre l’historique des états en cours, terminés, interrompus et en erreur.
 
-Après une fermeture ou un redémarrage, le journal marque uniquement les runs réellement actifs comme interrompus ; les entrées en attente restent durables et sont replanifiées au chargement suivant. Un profil ou runtime invalide bloque leur démarrage sans basculer vers l'hôte. Les threads en worktree sont parallélisables ; ceux qui partagent le même dossier projet sont sérialisés. Le plafond ne promet pas une exécution simultanée du modèle : Ollama garde sa propre politique de concurrence et de chargement. Restent hors de ces tranches la réservation dynamique de ressources entre Ollama et les workers, la suspension de workers, plusieurs modèles coordonnés et l’exécution distante.
+Après une fermeture ou un redémarrage, le journal marque uniquement les runs réellement actifs comme interrompus ; les entrées en attente restent durables et sont replanifiées au chargement suivant. Un profil ou runtime invalide bloque leur démarrage sans basculer vers l'hôte. Les conversations principales en worktrees distincts sont parallélisables et ne partagent plus leur file. Le plafond ne promet pas une exécution simultanée du modèle : Ollama garde sa propre politique de concurrence et de chargement. Restent hors de ces tranches la réservation dynamique de ressources entre Ollama et les workers, la suspension de workers, plusieurs modèles coordonnés et l’exécution distante.
 
 ## 10. Stratégie de vérification
 
