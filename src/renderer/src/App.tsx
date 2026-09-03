@@ -246,19 +246,12 @@ export function App(): React.JSX.Element {
     setView('agent')
   }, [firstRun, isModelReady])
 
-  const firstModelDownload = firstRun && Boolean(downloadingModel)
-  const startupVisible = runtimeProgress !== null || runtimeBusy || isLoading || !resolvedStatus?.available || firstModelDownload
-  const startupPercent = firstModelDownload
-    ? pullProgress?.percent ?? 0
-    : runtimeProgress?.percent ?? (resolvedStatus?.available ? 100 : 2)
-  const startupStep = firstModelDownload
-    ? 'Installation du modèle'
-    : runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Stellan')
-  const startupDetail = firstModelDownload
-    ? pullProgress?.status ?? 'Préparation du téléchargement…'
-    : runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
-      ? 'Environnement local prêt.'
-      : resolvedStatus?.reason ?? 'Préparation de l’environnement privé…')
+  const startupVisible = runtimeProgress !== null || runtimeBusy || isLoading || !resolvedStatus?.available
+  const startupPercent = runtimeProgress?.percent ?? (resolvedStatus?.available ? 100 : 2)
+  const startupStep = runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Stellan')
+  const startupDetail = runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
+    ? 'Environnement local prêt.'
+    : resolvedStatus?.reason ?? 'Préparation de l’environnement privé…')
 
   useEffect(() => {
     if (startupVisible) startupCardRef.current?.focus()
@@ -285,7 +278,9 @@ export function App(): React.JSX.Element {
       const result = await window.localAgent.pullModel(model.id)
       if (!result.success) setPullError(result.reason)
       else {
-        await refreshStatus()
+        const nextStatus = await window.localAgent.getOllamaStatus()
+        setStatus(nextStatus)
+        if (nextStatus.available) setInstallationEvidence('detected')
         setPullProgress(null)
       }
     } catch {
@@ -307,7 +302,7 @@ export function App(): React.JSX.Element {
             aria-modal="true"
             aria-label="Préparation de Stellan"
             aria-live="polite"
-            aria-busy={runtimeBusy || firstModelDownload}
+            aria-busy={runtimeBusy}
             tabIndex={-1}
           >
             <div className="startup-orbit" aria-hidden="true"><i /><i /><i /><span><LoaderCircle /></span></div>
@@ -321,7 +316,7 @@ export function App(): React.JSX.Element {
             <progress max="100" value={startupPercent} />
             <p>{STARTUP_PHRASES[Math.min(STARTUP_PHRASES.length - 1, Math.floor(startupPercent / 26))]}</p>
             <small className="startup-detail" title={startupDetail}>{startupDetail}</small>
-            {!runtimeBusy && !firstModelDownload && !resolvedStatus?.available && (
+            {!runtimeBusy && !resolvedStatus?.available && (
               <div className="startup-card-actions">
                 {ollamaSetup.canOpenDownload && <button type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>Activer WSL 2</button>}
                 <button type="button" disabled={checkingOllama || startingOllama} onClick={() => void refreshStatus()}>Réessayer</button>
