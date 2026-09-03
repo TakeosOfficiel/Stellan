@@ -2,7 +2,15 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { compactConversation, MAX_CONVERSATION_CHARACTERS, normalizeWorkerPath, runCodingAgent, type WorkerTask } from './agent'
+import {
+  buildCodingAgentSystemPrompt,
+  commandDenialReason,
+  compactConversation,
+  MAX_CONVERSATION_CHARACTERS,
+  normalizeWorkerPath,
+  runCodingAgent,
+  type WorkerTask
+} from './agent'
 import { ProjectTools } from './project-tools'
 
 const temporaryDirectories: string[] = []
@@ -12,6 +20,43 @@ describe('normalizeWorkerPath', () => {
     expect(normalizeWorkerPath('./Src/Index.ts. ', 'win32')).toBe('src/index.ts')
     expect(normalizeWorkerPath('src\\INDEX.ts', 'win32')).toBe('src/index.ts')
     expect(normalizeWorkerPath('Src/Index.ts', 'linux')).toBe('Src/Index.ts')
+  })
+})
+
+describe('agent guardrails', () => {
+  it('builds a focused Stellan prompt with coordinator and child-worker rules', () => {
+    const coordinator = buildCodingAgentSystemPrompt({
+      isGitRepository: true,
+      spawnWorkers: vi.fn(),
+      writeScope: undefined
+    })
+    const child = buildCodingAgentSystemPrompt({
+      isGitRepository: true,
+      spawnWorkers: undefined,
+      writeScope: new Set(['src/index.ts'])
+    })
+
+    expect(coordinator).toContain('Tu es Stellan')
+    expect(coordinator).toContain('Aucun fichier ne doit appartenir à deux workers')
+    expect(coordinator).toContain('Ne crée un commit ou un push que si l’utilisateur le demande explicitement')
+    expect(child).toContain('tu ne modifies que les fichiers attribués')
+    expect(coordinator.length).toBeLessThan(10_000)
+  })
+
+  it('blocks destructive command bypasses and gates Git writes', () => {
+    const none = { gitCommit: false, gitPush: false }
+
+    expect(commandDenialReason('rm', ['-rf', '.'], none)).toMatch(/bloquée/)
+    expect(commandDenialReason('rm.exe', ['-rf', '.'], none)).toMatch(/bloquée/)
+    expect(commandDenialReason('busybox', ['rm', '-rf', '.'], none)).toMatch(/bloquée/)
+    expect(commandDenialReason('powershell.exe', ['-Command', 'Remove-Item'], none)).toMatch(/bloquée/)
+    expect(commandDenialReason('node', ['--eval', 'deleteEverything()'], none)).toMatch(/bloquée/)
+    expect(commandDenialReason('find', ['.', '-delete'], none)).toMatch(/bloquées/)
+    expect(commandDenialReason('git', ['status'], none)).toBeNull()
+    expect(commandDenialReason('git', ['commit', '-m', 'change'], none)).toMatch(/explicitement/)
+    expect(commandDenialReason('git', ['commit', '-m', 'change'], { ...none, gitCommit: true })).toBeNull()
+    expect(commandDenialReason('git', ['push'], { ...none, gitPush: true })).toBeNull()
+    expect(commandDenialReason('git', ['reset', '--hard'], { gitCommit: true, gitPush: true })).toMatch(/n’est pas autorisée/)
   })
 })
 
@@ -119,6 +164,40 @@ describe('runCodingAgent', () => {
 
     expect(authorize).toHaveBeenCalledWith('delete_file', 'Supprimer obsolete.css')
     await expect(readFile(join(projectPath, 'obsolete.css'), 'utf8')).rejects.toThrow()
+  })
+
+  it('limits the number of files deleted by one agent request', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const paths = Array.from({ length: 21 }, (_, index) => `file-${index}.txt`)
+    await Promise.all(paths.map((file) => writeFile(join(projectPath, file), 'content\n')))
+    const project = await ProjectTools.create(projectPath)
+    const toolCalls = paths.map((file) => ({
+      function: { name: 'delete_file', arguments: { path: file } }
+    }))
+    const onToolEvent = vi.fn()
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{ message: { tool_calls: toolCalls }, done: true }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Suppression partielle terminée.' }, done: true }])))
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Supprime ces fichiers.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      onToolEvent,
+      authorize: vi.fn().mockResolvedValue(true)
+    })
+
+    await expect(readFile(join(projectPath, paths[19] as string), 'utf8')).rejects.toThrow()
+    await expect(readFile(join(projectPath, paths[20] as string), 'utf8')).resolves.toBe('content\n')
+    expect(onToolEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'finished',
+      status: 'denied',
+      result: expect.stringContaining('20 suppressions')
+    }))
   })
 
   it('does not expose Git tools for an ordinary folder', async () => {
@@ -400,6 +479,148 @@ describe('runCodingAgent', () => {
       ['test'],
       expect.objectContaining({ timeoutMs: 120_000 })
     )
+  })
+
+  it('allows a Git commit only when the current user message explicitly requests it', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const workerCommand = vi.fn().mockResolvedValue({ exitCode: 0, stdout: 'commit créé' })
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'run_command', arguments: { command: 'git', args: ['commit', '-m', 'change'] } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Commit créé.' }, done: true }])))
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Fais un commit avec ces changements.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      runCommand: workerCommand
+    })
+
+    expect(workerCommand).toHaveBeenCalledWith(
+      'git',
+      ['commit', '-m', 'change'],
+      expect.objectContaining({ timeoutMs: 120_000 })
+    )
+  })
+
+  it('does not treat an explicit refusal as permission to commit', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const workerCommand = vi.fn()
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'run_command', arguments: { command: 'git', args: ['commit', '-m', 'change'] } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le commit a été refusé.' }, done: true }])))
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Applique les changements mais ne commit pas.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      runCommand: workerCommand
+    })
+
+    expect(workerCommand).not.toHaveBeenCalled()
+  })
+
+  it('refuses a destructive command before authorization or execution', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const workerCommand = vi.fn()
+    const authorize = vi.fn().mockResolvedValue(true)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'run_command', arguments: { command: 'rm', args: ['-rf', '.'] } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'La commande a été refusée.' }, done: true }])))
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Nettoie le projet.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize,
+      runCommand: workerCommand
+    })
+
+    expect(authorize).not.toHaveBeenCalled()
+    expect(workerCommand).not.toHaveBeenCalled()
+  })
+
+  it('enforces the worker write scope in code', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const authorize = vi.fn().mockResolvedValue(true)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'write_file', arguments: { path: 'outside.txt', content: 'refusé' } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le fichier est hors périmètre.' }, done: true }])))
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Modifie le fichier.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize,
+      writeScope: new Set(['allowed.txt']),
+      allowRunCommand: false
+    })
+
+    expect(authorize).not.toHaveBeenCalled()
+    await expect(readFile(join(projectPath, 'outside.txt'), 'utf8')).rejects.toThrow()
+  })
+
+  it('rejects worker plans containing paths outside the project', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const spawnWorkers = vi.fn()
+    const tasks = [
+      { title: 'Valide', instructions: 'Travaille ici.', files: ['src/index.ts'] },
+      { title: 'Invalide', instructions: 'Sors du projet.', files: ['../secret.txt'] }
+    ]
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'create_workers', arguments: { tasks } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le plan invalide a été refusé.' }, done: true }])))
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Utilise deux workers.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      spawnWorkers
+    })
+
+    expect(spawnWorkers).not.toHaveBeenCalled()
   })
 
   it('delegates disjoint files to automatic workers and returns their results', async () => {

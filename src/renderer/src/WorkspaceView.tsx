@@ -713,8 +713,8 @@ export function WorkspaceView({
           {
             role: 'system',
             content: project
-              ? `Tu es un assistant de développement local. Le projet sélectionné est ${project.name}.`
-              : 'Tu es un assistant local utile, précis et concis. Aucun projet n’est ouvert. Si une demande nécessite de créer ou modifier des fichiers, demande d’abord à l’utilisateur d’ouvrir un projet et ne présente jamais du code collé dans le chat comme une modification réellement effectuée.'
+              ? `Tu es Stellan, un agent de développement local. Le projet sélectionné est ${project.name}.`
+              : 'Tu es Stellan, un assistant local utile, précis et concis. Aucun projet n’est ouvert. Si une demande nécessite de créer ou modifier des fichiers, demande d’abord à l’utilisateur d’ouvrir un projet et ne présente jamais du code collé dans le chat comme une modification réellement effectuée.'
           },
           ...history,
           { role: 'user', content }

@@ -607,7 +607,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             compactConversation([
               {
                 role: 'system',
-                content: 'Tu es un assistant local utile, précis et concis. Aucun projet n’est ouvert. Si une demande nécessite de créer ou modifier des fichiers, demande d’abord à l’utilisateur d’ouvrir un projet. Ne présente jamais du code collé dans le chat comme une modification réellement effectuée.'
+                content: 'Tu es Stellan, un assistant local utile, précis et concis. Aucun projet n’est ouvert. Réponds directement aux questions générales. Si une demande nécessite de lire, créer ou modifier des fichiers, demande à l’utilisateur d’ouvrir un projet. Ne présente jamais du code collé dans le chat comme une modification réellement effectuée et n’invente aucune action.'
               },
               ...promptMessages.filter((message) => message.role !== 'system')
             ]),
