@@ -1,6 +1,7 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
+import { RotateCcw, SquareTerminal, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
 const TERMINAL_WELCOME = [
@@ -132,15 +133,15 @@ export function TerminalPanel({ threadId, projectName, onClose }: {
     <section className="terminal-panel" aria-label={`Terminal du projet ${projectName}`}>
       <header>
         <div>
-          <span aria-hidden="true">›_</span>
+          <SquareTerminal aria-hidden="true" />
           <strong>Terminal</strong>
           <small>{mode === 'container' ? 'Conteneur du worker' : 'Environnement du thread'}</small>
         </div>
         <div>
           {exited && (
-            <button type="button" onClick={() => setGeneration((current) => current + 1)}>Redémarrer</button>
+            <button type="button" onClick={() => setGeneration((current) => current + 1)}><RotateCcw aria-hidden="true" /> Redémarrer</button>
           )}
-          <button type="button" aria-label="Fermer le terminal" onClick={onClose}>×</button>
+          <button type="button" aria-label="Fermer le terminal" onClick={onClose}><X aria-hidden="true" /></button>
         </div>
       </header>
       {error && <p role="alert">{error}</p>}

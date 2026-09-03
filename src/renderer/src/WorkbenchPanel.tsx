@@ -1,4 +1,28 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  ChevronRight,
+  ExternalLink,
+  FileCode2,
+  FileDiff,
+  FileX2,
+  Folder,
+  FolderOpen,
+  FolderTree,
+  Globe2,
+  ListChecks,
+  Maximize2,
+  Minimize2,
+  MonitorSmartphone,
+  MoreHorizontal,
+  Orbit,
+  PanelsTopLeft,
+  Plus,
+  RefreshCw,
+  SquareTerminal
+} from 'lucide-react'
 import type { PortalInfo, ProjectFilePreview, ProjectReview, StoredThread } from '../../shared/contracts'
 import { buildFileTree, type FileTreeNode } from './file-tree'
 import { TerminalPanel } from './TerminalPanel'
@@ -9,48 +33,36 @@ type PortalDevice = 'desktop' | 'tablet' | 'mobile'
 type BrowserIconName = 'back' | 'forward' | 'reload' | 'globe' | 'device' | 'external' | 'more'
 
 const TABS: Array<{ id: WorkbenchTab; label: string; disabled?: boolean }> = [
-  { id: 'changes', label: 'Changes' },
-  { id: 'portals', label: 'Portals' },
-  { id: 'files', label: 'Files' },
+  { id: 'changes', label: 'Modifications' },
+  { id: 'portals', label: 'Portails' },
+  { id: 'files', label: 'Fichiers' },
   { id: 'terminal', label: 'Terminal' },
-  { id: 'space', label: 'Space', disabled: true }
+  { id: 'space', label: 'Espace', disabled: true }
 ]
 
 function TabIcon({ tab }: { tab: WorkbenchTab }): React.JSX.Element {
-  if (tab === 'changes') return <svg viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zm3-12h6m-3 3V7M9 17h6" /></svg>
-  if (tab === 'portals') return <svg viewBox="0 0 24 24"><path d="M12 2 21.5 16.9 12 22Z" /><path d="M12 2 2.5 16.9 12 22" /></svg>
-  if (tab === 'files') return <svg viewBox="0 0 24 24"><path d="M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Zm0 11a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.9a1 1 0 0 1-.88-.55l-.42-.85a1 1 0 0 0-.92-.6H13a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1ZM3 5a2 2 0 0 0 2 2h3" /><path d="M3 3v13a2 2 0 0 0 2 2h3" /></svg>
-  if (tab === 'terminal') return <svg viewBox="0 0 24 24"><path d="m7 11 2-2-2-2m4 6h4" /><rect width="18" height="18" x="3" y="3" rx="2" /></svg>
-  return <svg viewBox="0 0 24 24"><path d="M20.341 6.484A10 10 0 0 1 10.266 21.85m-6.607-4.334A10 10 0 0 1 13.74 2.152" /><circle cx="12" cy="12" r="3" /><circle cx="19" cy="5" r="2" /><circle cx="5" cy="19" r="2" /></svg>
-}
-
-function ReviewIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24"><path d="M13 5h8m-8 7h8m-8 7h8M3 17l2 2 4-4M3 7l2 2 4-4" /></svg>
-}
-
-function RefreshIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5m-5 4a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5" /></svg>
-}
-
-function FocusIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24"><path d="M15 3h6v6m0-6-7 7M3 21l7-7m-1 7H3v-6" /></svg>
+  if (tab === 'changes') return <FileDiff aria-hidden="true" />
+  if (tab === 'portals') return <PanelsTopLeft aria-hidden="true" />
+  if (tab === 'files') return <FolderTree aria-hidden="true" />
+  if (tab === 'terminal') return <SquareTerminal aria-hidden="true" />
+  return <Orbit aria-hidden="true" />
 }
 
 function BrowserIcon({ name }: { name: BrowserIconName }): React.JSX.Element {
-  if (name === 'back') return <svg viewBox="0 0 24 24"><path d="m12 19-7-7 7-7m7 7H5" /></svg>
-  if (name === 'forward') return <svg viewBox="0 0 24 24"><path d="m12 5 7 7-7 7M5 12h14" /></svg>
-  if (name === 'reload') return <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-15.5-2M4 4v5h5m-5 4a8 8 0 0 0 15.5 2m.5 5v-5h-5" /></svg>
-  if (name === 'globe') return <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20" /></svg>
-  if (name === 'device') return <svg viewBox="0 0 24 24"><rect width="10" height="14" x="3" y="8" rx="2" /><path d="M5 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2h-2.4M8 18h.01" /></svg>
-  if (name === 'external') return <svg viewBox="0 0 24 24"><path d="M15 3h6v6m-11 5L21 3m-3 10v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></svg>
-  return <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg>
+  if (name === 'back') return <ArrowLeft aria-hidden="true" />
+  if (name === 'forward') return <ArrowRight aria-hidden="true" />
+  if (name === 'reload') return <RefreshCw aria-hidden="true" />
+  if (name === 'globe') return <Globe2 aria-hidden="true" />
+  if (name === 'device') return <MonitorSmartphone aria-hidden="true" />
+  if (name === 'external') return <ExternalLink aria-hidden="true" />
+  return <MoreHorizontal aria-hidden="true" />
 }
 
 function FileTreeIcon({ type, expanded }: { type: FileTreeNode['type']; expanded?: boolean }): React.JSX.Element {
   if (type === 'directory') {
-    return <svg className="file-kind-icon" viewBox="0 0 24 24"><path d={expanded ? 'M3 7h6l2 2h10l-2 10H3zM3 7v12' : 'M3 6h6l2 2h10v11H3z'} /></svg>
+    return expanded ? <FolderOpen className="file-kind-icon" aria-hidden="true" /> : <Folder className="file-kind-icon" aria-hidden="true" />
   }
-  return <svg className="file-kind-icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h4" /><path className="file-code-mark" d="m10 12-2 2 2 2m4-4 2 2-2 2" /></svg>
+  return <FileCode2 className="file-kind-icon" aria-hidden="true" />
 }
 
 export function WorkbenchPanel({
@@ -82,12 +94,25 @@ export function WorkbenchPanel({
   const [portal, setPortal] = useState<PortalInfo | null>(null)
   const [portalDuration, setPortalDuration] = useState<PortalDuration>(null)
   const [portalMenuOpen, setPortalMenuOpen] = useState(false)
+  const portalMenuButtonRef = useRef<HTMLButtonElement>(null)
   const [portalDevice, setPortalDevice] = useState<PortalDevice>('desktop')
   const [portalReloadKey, setPortalReloadKey] = useState(0)
   const [portalBusy, setPortalBusy] = useState<'starting' | 'stopping' | null>(null)
   const [portalError, setPortalError] = useState<string | null>(null)
   const [terminalStartedForThreadId, setTerminalStartedForThreadId] = useState<string | null>(null)
   const ready = Boolean(thread?.projectPath && thread.environmentStatus === 'active')
+
+  useEffect(() => {
+    if (!portalMenuOpen) return
+    const closeMenu = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setPortalMenuOpen(false)
+      portalMenuButtonRef.current?.focus()
+    }
+    window.addEventListener('keydown', closeMenu)
+    return () => window.removeEventListener('keydown', closeMenu)
+  }, [portalMenuOpen])
 
   async function refreshChanges(): Promise<void> {
     if (!thread || !ready) return
@@ -279,7 +304,7 @@ export function WorkbenchPanel({
             onClick={() => node.type === 'directory' ? toggleFolder(node.path) : void openFile(node.path)}
           >
             {node.type === 'directory'
-              ? <svg className={`file-chevron${expanded ? ' expanded' : ''}`} viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+              ? <ChevronRight className={`file-chevron${expanded ? ' expanded' : ''}`} aria-hidden="true" />
               : <span className="file-chevron-spacer" />}
             <FileTreeIcon type={node.type} expanded={expanded} />
             <span className="file-tree-name">{node.name}</span>
@@ -294,48 +319,50 @@ export function WorkbenchPanel({
   return (
     <aside className={focused ? 'workbench focused' : 'workbench'} aria-label="Espace de travail du projet">
       <div className="workbench-titlebar">
-        <nav className="workbench-tabs" aria-label="Outils du projet">
+        <nav className="workbench-tabs" aria-label="Outils du projet" role="tablist">
           {TABS.map((item) => (
             <button
               className={tab === item.id ? 'active' : ''}
               type="button"
-              aria-pressed={tab === item.id}
-              disabled={item.disabled}
-              title={item.disabled ? 'Bientôt disponible' : undefined}
+              role="tab"
+              aria-selected={tab === item.id}
+              aria-controls={ready && !item.disabled ? `workbench-${item.id}` : undefined}
+              disabled={item.disabled || !ready}
+              title={item.disabled ? 'Bientôt disponible' : !ready ? 'Ouvrez d’abord un projet' : undefined}
               onClick={() => selectTab(item.id)}
               key={item.id}
             ><TabIcon tab={item.id} />{item.label}</button>
           ))}
         </nav>
-        <button className="workbench-focus" type="button" aria-label={focused ? 'Quitter le mode focus' : 'Focus Pane'} aria-pressed={focused} onClick={() => setFocused((value) => !value)}><FocusIcon /></button>
+        <button className="workbench-focus" type="button" aria-label={focused ? 'Quitter le mode plein écran' : 'Agrandir les outils du projet'} aria-pressed={focused} onClick={() => setFocused((value) => !value)}>{focused ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}</button>
       </div>
 
       {!ready ? (
         <div className="workbench-empty">
-          <span aria-hidden="true">＋</span>
+          <span aria-hidden="true"><Plus /></span>
           <strong>Aucun projet actif</strong>
           <p>Ouvrez un projet pour que l’agent modifie de vrais fichiers et affiche ses changements ici.</p>
           <button type="button" onClick={onChooseProject}>Ouvrir un projet</button>
         </div>
       ) : (
         <div className="workbench-content">
-          <section className={tab === 'changes' ? 'workbench-pane active' : 'workbench-pane'} aria-label="Changements">
+          <section id="workbench-changes" role="tabpanel" className={tab === 'changes' ? 'workbench-pane active' : 'workbench-pane'} aria-label="Modifications">
             <header className="changes-toolbar">
               <div>
-                <button className={reviewOpen ? 'active' : ''} type="button" aria-pressed={reviewOpen} onClick={() => setReviewOpen((value) => !value)}><ReviewIcon />Review</button>
+                <button className={reviewOpen ? 'active' : ''} type="button" aria-pressed={reviewOpen} onClick={() => setReviewOpen((value) => !value)}><ListChecks aria-hidden="true" />Relire</button>
               </div>
-              <button className="icon-button" type="button" aria-label="Actualiser les changements" onClick={() => void refreshChanges()}><RefreshIcon /></button>
+              <button className="icon-button" type="button" aria-label="Actualiser les modifications" onClick={() => void refreshChanges()}><RefreshCw aria-hidden="true" /></button>
             </header>
             {reviewError && <p className="workbench-error" role="alert">{reviewError}</p>}
             <small>{review?.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
             {reviewLoading ? <div className="workbench-zero"><p>Lecture des changements…</p></div> : reviewOpen ? (
-              review?.diff ? <pre className="workbench-diff">{review.diff}</pre> : <div className="workbench-zero"><span aria-hidden="true">✓</span><p>Rien à relire pour le moment</p></div>
+              review?.diff ? <pre className="workbench-diff">{review.diff}</pre> : <div className="workbench-zero"><span aria-hidden="true"><Check /></span><p>Rien à relire pour le moment</p></div>
             ) : statusLines.length > 0 ? (
               <div className="change-list">{statusLines.map((line) => <code key={line}>{line}</code>)}</div>
-            ) : <div className="workbench-zero"><span aria-hidden="true">＋</span><p>Aucun changement</p></div>}
+            ) : <div className="workbench-zero"><span aria-hidden="true"><Plus /></span><p>Aucune modification</p></div>}
           </section>
 
-          <section className={tab === 'portals' ? 'workbench-pane active portals-pane' : 'workbench-pane portals-pane'} aria-label="Portails">
+          <section id="workbench-portals" role="tabpanel" className={tab === 'portals' ? 'workbench-pane active portals-pane' : 'workbench-pane portals-pane'} aria-label="Portails">
             <div className="portal-browser">
               <div className="portal-browser-toolbar">
                 <div className="portal-history-controls">
@@ -357,9 +384,9 @@ export function WorkbenchPanel({
                 ><BrowserIcon name="device" /></button>
                 <button type="button" disabled={!portal} title="Ouvrir dans le navigateur" aria-label="Ouvrir dans le navigateur" onClick={() => void usePortal('open')}><BrowserIcon name="external" /></button>
                 <div className="portal-options">
-                  <button type="button" aria-label="Options du portail" aria-expanded={portalMenuOpen} onClick={() => setPortalMenuOpen((open) => !open)}><BrowserIcon name="more" /></button>
+                  <button ref={portalMenuButtonRef} type="button" aria-label="Options du portail" aria-expanded={portalMenuOpen} aria-haspopup="dialog" aria-controls="portal-options-dialog" onClick={() => setPortalMenuOpen((open) => !open)}><BrowserIcon name="more" /></button>
                 {portalMenuOpen && (
-                  <div className="portal-options-menu">
+                  <div id="portal-options-dialog" className="portal-options-menu" role="dialog" aria-label="Options du portail">
                     <label><span>Accès</span><select value="private" disabled><option value="private">Privé · cet ordinateur</option><option value="public">Public</option></select></label>
                     <small>Le partage public nécessite un service de tunnel et n’est pas disponible hors ligne.</small>
                     <label><span>Durée</span><select value={portalDuration ?? 'session'} onChange={(event) => setPortalDuration(event.target.value === 'session' ? null : Number(event.target.value) as PortalDuration)} disabled={Boolean(portal)}><option value="session">Jusqu’à l’arrêt</option><option value="15">15 minutes</option><option value="60">1 heure</option><option value="240">4 heures</option></select></label>
@@ -391,11 +418,11 @@ export function WorkbenchPanel({
             </div>
           </section>
 
-          <section className={tab === 'files' ? 'workbench-pane active files-pane' : 'workbench-pane files-pane'} aria-label="Fichiers">
+          <section id="workbench-files" role="tabpanel" className={tab === 'files' ? 'workbench-pane active files-pane' : 'workbench-pane files-pane'} aria-label="Fichiers">
             {filesError && <p className="workbench-error" role="alert">{filesError}</p>}
             {filePreview ? (
               <div className="file-preview">
-                <header><button type="button" aria-label="Retour aux fichiers" onClick={() => setFilePreview(null)}>‹</button><code>{filePreview.path}</code>{filePreview.truncated && <small>Aperçu tronqué</small>}</header>
+                <header><button type="button" aria-label="Retour aux fichiers" onClick={() => setFilePreview(null)}><ArrowLeft aria-hidden="true" /></button><code>{filePreview.path}</code>{filePreview.truncated && <small>Aperçu tronqué</small>}</header>
                 <pre>{filePreview.content}</pre>
               </div>
             ) : (
@@ -404,13 +431,13 @@ export function WorkbenchPanel({
                   ? <div className="workbench-zero"><p>Lecture des fichiers…</p></div>
                   : fileTree.length > 0
                     ? renderFileNodes(fileTree)
-                    : <div className="workbench-zero"><span aria-hidden="true">▧</span><p>Aucun fichier</p></div>}
+                    : <div className="workbench-zero"><span aria-hidden="true"><FileX2 /></span><p>Aucun fichier</p></div>}
                 {filesTruncated && <small>Liste limitée aux 5 000 premiers fichiers.</small>}
               </div>
             )}
           </section>
 
-          <section className={tab === 'terminal' ? 'workbench-pane active terminal-pane' : 'workbench-pane terminal-pane'} aria-label="Terminal">
+          <section id="workbench-terminal" role="tabpanel" className={tab === 'terminal' ? 'workbench-pane active terminal-pane' : 'workbench-pane terminal-pane'} aria-label="Terminal">
             {thread && terminalStartedForThreadId === thread.id && <TerminalPanel threadId={thread.id} projectName={projectName} onClose={() => {
               void window.localAgent.closeTerminal(thread.id)
               setTerminalStartedForThreadId(null)

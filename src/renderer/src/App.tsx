@@ -1,4 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Bot,
+  Boxes,
+  ChevronLeft,
+  KeyRound,
+  LoaderCircle,
+  Minus,
+  Settings2,
+  Square,
+  X
+} from 'lucide-react'
 import type {
   CatalogModel,
   ModelCategory,
@@ -67,22 +78,24 @@ function TitleBar({ view, onViewChange }: {
   return (
     <header className="titlebar" onDoubleClick={() => void window.localAgent.toggleMaximizeWindow()}>
       <div className="titlebar-brand">
-        <span aria-hidden="true">◒</span>
+        <span aria-hidden="true"><Bot /></span>
         <strong>Local Agent</strong>
       </div>
+      <h1 className="sr-only">Local Agent</h1>
       <nav className="titlebar-nav" aria-label="Navigation principale" onDoubleClick={(event) => event.stopPropagation()}>
-        <button className={view === 'agent' ? 'active' : ''} type="button" onClick={() => onViewChange('agent')}>Agent</button>
+        <button className={view === 'agent' ? 'active' : ''} type="button" aria-current={view === 'agent' ? 'page' : undefined} onClick={() => onViewChange('agent')}>Agent</button>
         <button
           className={view === 'setup' ? 'active' : ''}
           type="button"
+          aria-current={view === 'setup' ? 'page' : undefined}
           aria-keyshortcuts="Control+, Meta+,"
           onClick={() => onViewChange('setup')}
         >Modèles</button>
       </nav>
       <div className="window-controls" onDoubleClick={(event) => event.stopPropagation()}>
-        <button type="button" aria-label="Réduire" onClick={() => void window.localAgent.minimizeWindow()}>—</button>
-        <button type="button" aria-label="Agrandir" onClick={() => void window.localAgent.toggleMaximizeWindow()}>□</button>
-        <button className="close" type="button" aria-label="Fermer" onClick={() => void window.localAgent.closeWindow()}>×</button>
+        <button type="button" aria-label="Réduire" onClick={() => void window.localAgent.minimizeWindow()}><Minus /></button>
+        <button type="button" aria-label="Agrandir" onClick={() => void window.localAgent.toggleMaximizeWindow()}><Square /></button>
+        <button className="close" type="button" aria-label="Fermer" onClick={() => void window.localAgent.closeWindow()}><X /></button>
       </div>
     </header>
   )
@@ -297,7 +310,7 @@ export function App(): React.JSX.Element {
             aria-busy={runtimeBusy || firstModelDownload}
             tabIndex={-1}
           >
-            <div className="startup-orbit" aria-hidden="true"><i /><i /><i /><span>◒</span></div>
+            <div className="startup-orbit" aria-hidden="true"><i /><i /><i /><span><LoaderCircle /></span></div>
             <div className="startup-card-heading">
               <div>
                 <small>{firstRun ? 'PREMIÈRE MISE EN PLACE' : 'ENVIRONNEMENT LOCAL'}</small>
@@ -335,16 +348,16 @@ export function App(): React.JSX.Element {
       <div className="setup-view">
       <aside className="settings-sidebar">
         <div>
-          <span className="agent-mark">◒</span>
+          <span className="agent-mark"><Settings2 aria-hidden="true" /></span>
           <strong>Réglages</strong>
         </div>
         <nav aria-label="Réglages">
-          <button className="active" type="button"><span>◉</span> Modèles locaux</button>
-          <button type="button" disabled><span>◇</span> Profils workers <small>Bientôt</small></button>
-          <button type="button" disabled><span>⌁</span> Accès et portails <small>Bientôt</small></button>
+          <button className="active" type="button" aria-current="page"><span><Boxes aria-hidden="true" /></span> Modèles locaux</button>
+          <button type="button" disabled><span><Bot aria-hidden="true" /></span> Profils workers <small>Bientôt</small></button>
+          <button type="button" disabled><span><KeyRound aria-hidden="true" /></span> Accès et portails <small>Bientôt</small></button>
         </nav>
         <button className="settings-back" type="button" onClick={firstRun ? finishOnboarding : () => setView('agent')}>
-          {firstRun ? 'Configurer plus tard' : '← Retour aux threads'}
+          {!firstRun && <ChevronLeft aria-hidden="true" />}{firstRun ? 'Configurer plus tard' : 'Retour aux threads'}
         </button>
       </aside>
 

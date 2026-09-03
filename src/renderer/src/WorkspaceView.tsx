@@ -1,4 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ArrowDown,
+  ArrowUp,
+  Bot,
+  Box,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  CircleAlert,
+  ExternalLink,
+  FolderOpen,
+  Import,
+  ListTree,
+  LockKeyhole,
+  MessageSquare,
+  MessageSquarePlus,
+  Mic,
+  MoreHorizontal,
+  PanelLeft,
+  PanelRight,
+  Pencil,
+  Plus,
+  Settings2,
+  SlidersHorizontal,
+  Square,
+  Trash2,
+  X
+} from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type {
@@ -118,34 +147,6 @@ function projectName(projectPath: string): string {
   return projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? projectPath
 }
 
-function TrashIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
-}
-
-function PencilIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.17 6.81a2.82 2.82 0 0 0-3.98-3.98L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.63L7 20.66a2 2 0 0 0 .83-.5zM15 5l4 4" /></svg>
-}
-
-function ArrowUpIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 19V5" /></svg>
-}
-
-function OutlineIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13" /></svg>
-}
-
-function ArrowDownIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m7-7-7 7-7-7" /></svg>
-}
-
-function StopIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
-}
-
-function MicrophoneIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19v3m7-12v2a7 7 0 0 1-14 0v-2M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /></svg>
-}
-
 function MarkdownMessage({ content }: { content: string }): React.JSX.Element {
   return (
     <div className="message-markdown">
@@ -200,6 +201,7 @@ export function WorkspaceView({
   const [fileReveal, setFileReveal] = useState<{ threadId: string; path: string; nonce: number } | null>(null)
   const [threadMenuOpen, setThreadMenuOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [mobileWorkbenchOpen, setMobileWorkbenchOpen] = useState(false)
   const [thinkingElapsed, setThinkingElapsed] = useState(0)
   const [dictationState, setDictationState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
   const [dictationProgress, setDictationProgress] = useState<DictationProgress | null>(null)
@@ -210,6 +212,8 @@ export function WorkspaceView({
   const projectSwitcherRef = useRef<HTMLButtonElement>(null)
   const threadMenuButtonRef = useRef<HTMLButtonElement>(null)
   const runHistoryTriggerRef = useRef<HTMLButtonElement>(null)
+  const dialogRef = useRef<HTMLElement>(null)
+  const dialogTriggerRef = useRef<HTMLElement | null>(null)
   const messagesScrollRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
   const bufferedContentRef = useRef(new Map<string, ContentEvent>())
@@ -386,6 +390,18 @@ export function WorkspaceView({
     const handleEscape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
 
+      if (newProjectName !== null && !creatingProject) {
+        event.preventDefault()
+        setNewProjectName(null)
+        return
+      }
+
+      if (resourceSettings && !savingResources) {
+        event.preventDefault()
+        setResourceSettings(null)
+        return
+      }
+
       if (threadMenuOpen) {
         event.preventDefault()
         setThreadMenuOpen(false)
@@ -402,7 +418,37 @@ export function WorkspaceView({
 
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [runHistoryOpen, threadMenuOpen])
+  }, [creatingProject, newProjectName, resourceSettings, runHistoryOpen, savingResources, threadMenuOpen])
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    const focusable = (): HTMLElement[] => Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+    ))
+    const initialFocus = dialog.querySelector<HTMLElement>('[data-dialog-initial]') ?? focusable()[0]
+    initialFocus?.focus()
+    const trapFocus = (event: KeyboardEvent): void => {
+      if (event.key !== 'Tab') return
+      const elements = focusable()
+      if (elements.length === 0) return
+      const first = elements[0]!
+      const last = elements[elements.length - 1]!
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    dialog.addEventListener('keydown', trapFocus)
+    return () => {
+      dialog.removeEventListener('keydown', trapFocus)
+      dialogTriggerRef.current?.focus()
+      dialogTriggerRef.current = null
+    }
+  }, [newProjectName !== null, resourceSettings !== null])
 
   useEffect(() => {
     if (!shortcut || handledShortcutRef.current === shortcut) return
@@ -543,6 +589,7 @@ export function WorkspaceView({
   async function newThread(): Promise<void> {
     closeThreadMenu()
     if (!project) {
+      dialogTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
       setCreateProjectError(null)
       setNewProjectName('')
       return
@@ -581,6 +628,7 @@ export function WorkspaceView({
 
   async function openResources(): Promise<void> {
     if (!activeThread) return
+    dialogTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setResourceError(null)
     try {
       setResourceSettings(await window.localAgent.getProjectResources(activeThread.id))
@@ -788,7 +836,7 @@ export function WorkspaceView({
               <span>{toolActivityLabel(activity)}</span>
               {activity.status === 'denied' && <small>refusé</small>}
               {activity.status === 'error' && <small>erreur</small>}
-              <span className="tool-activity-arrow" aria-hidden="true">›</span>
+              <ChevronRight className="tool-activity-arrow" aria-hidden="true" />
             </button>
             {activity.expanded && (
               <div className="tool-activity-details">
@@ -813,7 +861,7 @@ export function WorkspaceView({
             >
               <span>{activeFileEdits ? 'Modification de' : 'Mis à jour'} {fileEdits.length} fichier{fileEdits.length > 1 ? 's' : ''} <strong className="added">+{linesAdded}</strong> <strong className="removed">-{linesRemoved}</strong>{activeFileEdits > 0 && <small>, {activeFileEdits} actif{activeFileEdits > 1 ? 's' : ''}</small>}</span>
               <span />
-              <span className="tool-activity-arrow" aria-hidden="true">›</span>
+              <ChevronRight className="tool-activity-arrow" aria-hidden="true" />
             </button>
             {fileEditsExpanded && (
               <div className="tool-activity-details edit-details">
@@ -823,7 +871,7 @@ export function WorkspaceView({
                       <span>{edit.active ? 'Modification de ' : edit.deleted ? 'Supprimé ' : 'Mis à jour '}<code>{edit.path}</code></span>
                       {!edit.active && <span><strong className="added">+{edit.added}</strong> <strong className="removed">-{edit.removed}</strong></span>}
                     </button>
-                    {!edit.deleted && <button type="button" className="edit-file-open" aria-label={`Ouvrir ${edit.path}`} title="Ouvrir avec l’application associée" onClick={() => activeThreadId && void window.localAgent.openProjectFile({ threadId: activeThreadId, path: edit.path })}>↗</button>}
+                    {!edit.deleted && <button type="button" className="edit-file-open" aria-label={`Ouvrir ${edit.path}`} title="Ouvrir avec l’application associée" onClick={() => activeThreadId && void window.localAgent.openProjectFile({ threadId: activeThreadId, path: edit.path })}><ExternalLink aria-hidden="true" /></button>}
                   </div>
                 ))}
               </div>
@@ -840,7 +888,7 @@ export function WorkspaceView({
   const workbenchRefreshKey = activeRunHistory.map((run) => `${run.requestId}:${run.status}:${run.finishedAt ?? ''}`).join('|')
 
   return (
-    <section className="workspace-view">
+    <section className={`workspace-view${mobileWorkbenchOpen ? ' show-mobile-workbench' : ''}`}>
       <nav className="app-rail" aria-label="Sections de Local Agent">
         <div className="rail-main">
           <button
@@ -850,11 +898,19 @@ export function WorkspaceView({
             aria-expanded={sidebarOpen}
             title="Threads"
             onClick={() => setSidebarOpen((open) => !open)}
-          >⌁</button>
-          <button type="button" aria-label="Importer un projet" aria-keyshortcuts="Control+O Meta+O" title="Importer un projet" onClick={() => void chooseProject()}>◇</button>
-          <button type="button" aria-label="Nouveau thread" aria-keyshortcuts="Control+N Meta+N" title="Nouveau thread" onClick={newThread}>＋</button>
+          ><PanelLeft aria-hidden="true" /></button>
+          <button type="button" aria-label="Importer un projet" aria-keyshortcuts="Control+O Meta+O" title="Importer un projet" onClick={() => void chooseProject()}><Import aria-hidden="true" /></button>
+          <button type="button" aria-label="Nouveau thread" aria-keyshortcuts="Control+N Meta+N" title="Nouveau thread" onClick={newThread}><MessageSquarePlus aria-hidden="true" /></button>
+          <button
+            className="mobile-workbench-toggle"
+            type="button"
+            aria-label={mobileWorkbenchOpen ? 'Afficher la conversation' : 'Afficher les outils du projet'}
+            aria-pressed={mobileWorkbenchOpen}
+            title={mobileWorkbenchOpen ? 'Conversation' : 'Outils du projet'}
+            onClick={() => setMobileWorkbenchOpen((open) => !open)}
+          >{mobileWorkbenchOpen ? <MessageSquare aria-hidden="true" /> : <PanelRight aria-hidden="true" />}</button>
         </div>
-        <button type="button" aria-label="Modèles et réglages" aria-keyshortcuts="Control+, Meta+," title="Modèles et réglages" onClick={onOpenSetup}>⚙</button>
+        <button type="button" aria-label="Modèles et réglages" aria-keyshortcuts="Control+, Meta+," title="Modèles et réglages" onClick={onOpenSetup}><Settings2 aria-hidden="true" /></button>
       </nav>
 
       <aside className={`workspace-sidebar${sidebarOpen ? ' open' : ''}`}>
@@ -866,22 +922,22 @@ export function WorkspaceView({
           aria-keyshortcuts="Control+O Meta+O"
           onClick={() => void chooseProject()}
         >
-          <span className="project-icon" aria-hidden="true">◇</span>
+          <span className="project-icon" aria-hidden="true"><Box /></span>
           <span>
             <small>ESPACE LOCAL</small>
             <strong>{project?.name ?? 'Tous les projets'}</strong>
           </span>
-          <span aria-hidden="true">⌄</span>
+          <ChevronDown aria-hidden="true" />
         </button>
 
         <button ref={newThreadButtonRef} className="new-thread-button" type="button" aria-label="Nouveau thread" aria-keyshortcuts="Control+N Meta+N" onClick={newThread}>
-          <span aria-hidden="true">＋</span> Nouveau thread
+          <Plus aria-hidden="true" /> Nouveau thread
           <kbd>Ctrl/Cmd N</kbd>
         </button>
 
         <div className="thread-list">
           <div className="thread-group-heading">
-            <span className="agent-mark">◒</span>
+            <span className="agent-mark"><Bot aria-hidden="true" /></span>
             <strong>Agent de programmation</strong>
             <span>{threads.length}</span>
           </div>
@@ -890,27 +946,27 @@ export function WorkspaceView({
             {rootThreads.map((thread) => (
               <div className="thread-family" key={thread.id}>
                 <div className={`thread-row ${activeThreadId === thread.id ? 'active' : ''}`}>
-                  <span className="branch" aria-hidden="true">├</span>
+                  <span className="branch" aria-hidden="true" />
                   <span className={`thread-agent ${runsByThread[thread.id]?.status ?? ''}`} aria-label={runsByThread[thread.id]
                     ? runsByThread[thread.id]?.status === 'queued' ? 'Worker en attente' : 'Worker en cours'
-                    : undefined}>●</span>
-                  <button type="button" title={thread.title} onClick={() => void openThread(thread)}>{thread.title}</button>
+                    : 'Worker inactif'}><Circle aria-hidden="true" /></span>
+                  <button type="button" title={thread.title} onClick={() => { setMobileWorkbenchOpen(false); void openThread(thread) }}>{thread.title}</button>
                   <button
                     className="thread-delete"
                     type="button"
                     aria-label={`Supprimer ${thread.title}`}
                     disabled={Boolean(runsByThread[thread.id])}
                     onClick={() => void removeThread(thread.id)}
-                  >×</button>
+                  ><X aria-hidden="true" /></button>
                 </div>
                 {threads.filter((child) => child.parentThreadId === thread.id).map((child, childIndex, children) => (
                   <div className={`thread-row child ${activeThreadId === child.id ? 'active' : ''}`} key={child.id}>
-                    <span className="branch" aria-hidden="true">{childIndex === children.length - 1 ? '└' : '├'}</span>
+                    <span className={`branch${childIndex === children.length - 1 ? ' last' : ''}`} aria-hidden="true" />
                     <span className={`thread-agent ${runsByThread[child.id]?.status ?? ''}`} aria-label={runsByThread[child.id]
                       ? runsByThread[child.id]?.status === 'queued' ? 'Worker en attente' : 'Worker en cours'
-                      : 'Worker terminé'}>●</span>
-                    <button type="button" title={child.title} onClick={() => void openThread(child)}>{child.title}</button>
-                    <button className="thread-delete" type="button" aria-label={`Supprimer ${child.title}`} disabled={Boolean(runsByThread[child.id])} onClick={() => void removeThread(child.id)}>×</button>
+                      : 'Worker terminé'}><Circle aria-hidden="true" /></span>
+                    <button type="button" title={child.title} onClick={() => { setMobileWorkbenchOpen(false); void openThread(child) }}>{child.title}</button>
+                    <button className="thread-delete" type="button" aria-label={`Supprimer ${child.title}`} disabled={Boolean(runsByThread[child.id])} onClick={() => void removeThread(child.id)}><X aria-hidden="true" /></button>
                   </div>
                 ))}
               </div>
@@ -932,10 +988,10 @@ export function WorkspaceView({
           {activeThread?.workspaceMode === 'worktree' && (
             <>
               <button className="resource-project-button" type="button" onClick={() => void openResources()}>
-                Ressources du projet
+                <SlidersHorizontal aria-hidden="true" /> Ressources du projet
               </button>
               <button className="export-project-button" type="button" disabled={exportingProject} onClick={() => void exportProject()}>
-                {exportingProject ? 'Export en cours…' : 'Exporter ce projet'}
+                <ExternalLink aria-hidden="true" /> {exportingProject ? 'Export en cours…' : 'Exporter ce projet'}
               </button>
               {exportProjectError && <small className="export-project-error" role="alert">{exportProjectError}</small>}
             </>
@@ -958,28 +1014,32 @@ export function WorkspaceView({
       </aside>
 
       {newProjectName !== null && (
-        <div className="project-create-backdrop" role="presentation" onMouseDown={(event) => {
+        <div className="dialog-backdrop project-create-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !creatingProject) setNewProjectName(null)
         }}>
-          <form className="project-create-dialog" onSubmit={(event) => { event.preventDefault(); void createProject() }}>
-            <small>NOUVEL ESPACE PRIVÉ</small>
-            <h3>Créer un projet</h3>
+          <section ref={dialogRef} className="dialog-surface project-create-dialog" role="dialog" aria-modal="true" aria-labelledby="project-create-title">
+            <form className="project-create-form" onSubmit={(event) => { event.preventDefault(); void createProject() }}>
+            <header>
+              <div><small>NOUVEL ESPACE PRIVÉ</small><h2 id="project-create-title">Créer un projet</h2></div>
+              <button className="icon-button" type="button" aria-label="Fermer" disabled={creatingProject} onClick={() => setNewProjectName(null)}><X aria-hidden="true" /></button>
+            </header>
             <p>Le projet sera créé directement dans l’environnement isolé. Aucun dossier Windows ne doit être choisi.</p>
-            <label>Nom du projet<input autoFocus maxLength={100} value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} placeholder="Mon projet" /></label>
+            <label>Nom du projet<input data-dialog-initial maxLength={100} value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} placeholder="Mon projet" /></label>
             {createProjectError && <p className="resource-error" role="alert">{createProjectError}</p>}
             <footer><button type="button" disabled={creatingProject} onClick={() => setNewProjectName(null)}>Annuler</button><button type="submit" disabled={creatingProject || !newProjectName.trim()}>{creatingProject ? 'Création…' : 'Créer'}</button></footer>
-          </form>
+            </form>
+          </section>
         </div>
       )}
 
       {resourceSettings && (
-        <div className="resource-dialog-backdrop" role="presentation" onMouseDown={(event) => {
+        <div className="dialog-backdrop resource-dialog-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !savingResources) setResourceSettings(null)
         }}>
-          <section className="resource-dialog" role="dialog" aria-modal="true" aria-labelledby="resource-title">
+          <section ref={dialogRef} className="dialog-surface resource-dialog" role="dialog" aria-modal="true" aria-labelledby="resource-title">
             <header>
-              <div><small>PROJET PRIVÉ</small><h3 id="resource-title">Ressources</h3></div>
-              <button type="button" aria-label="Fermer" disabled={savingResources} onClick={() => setResourceSettings(null)}>×</button>
+              <div><small>PROJET PRIVÉ</small><h2 id="resource-title">Ressources</h2></div>
+              <button className="icon-button" type="button" aria-label="Fermer" disabled={savingResources} onClick={() => setResourceSettings(null)}><X aria-hidden="true" /></button>
             </header>
             <label className="resource-auto">
               <input type="checkbox" checked={resourceSettings.automaticCpuMemory} onChange={(event) => setResourceSettings({
@@ -1004,7 +1064,7 @@ export function WorkspaceView({
           <div className="thread-identity">
             <span>{project?.name ?? 'Local'}</span>
             <span aria-hidden="true">/</span>
-            <h3>{activeThread?.title ?? 'Nouveau thread'}</h3>
+            <h2>{activeThread?.title ?? 'Nouveau thread'}</h2>
           </div>
           <div className="chat-header-actions">
             <div className="thread-menu">
@@ -1014,13 +1074,14 @@ export function WorkspaceView({
                 type="button"
                 aria-label="Options du thread"
                 aria-expanded={threadMenuOpen}
+                aria-haspopup="menu"
                 aria-controls="thread-menu-popover"
                 onClick={() => setThreadMenuOpen((open) => !open)}
-              >•••</button>
-              {threadMenuOpen && <div id="thread-menu-popover" className="thread-menu-popover">
-                <div><span aria-hidden="true">⌁</span><span>Accès</span><small>Privé · local</small></div>
-                <button type="button" onClick={newThread}><span aria-hidden="true">＋</span><span>Nouveau thread</span></button>
-                <button type="button" onClick={onOpenSetup}><span aria-hidden="true">⚙</span><span>Réglages du modèle</span></button>
+              ><MoreHorizontal aria-hidden="true" /></button>
+              {threadMenuOpen && <div id="thread-menu-popover" className="thread-menu-popover" role="menu">
+                <div role="status"><LockKeyhole aria-hidden="true" /><span>Accès</span><small>Privé · local</small></div>
+                <button type="button" role="menuitem" onClick={newThread}><Plus aria-hidden="true" /><span>Nouveau thread</span></button>
+                <button type="button" role="menuitem" onClick={onOpenSetup}><Settings2 aria-hidden="true" /><span>Réglages du modèle</span></button>
               </div>}
             </div>
           </div>
@@ -1029,7 +1090,7 @@ export function WorkspaceView({
         <div
           ref={messagesScrollRef}
           className="messages"
-          aria-live="polite"
+          aria-label="Conversation"
           onScroll={(event) => {
             const element = event.currentTarget
             const awayFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight > 72
@@ -1040,7 +1101,7 @@ export function WorkspaceView({
           <div className="conversation-column">
             {messages.length === 0 ? (
               <div className="empty-chat">
-                <span className="agent-mark large">◒</span>
+                <span className="agent-mark large"><Bot aria-hidden="true" /></span>
                 <h2>{project ? 'Que voulez-vous construire ?' : 'Ouvrez d’abord un projet'}</h2>
                 <p>{project ? 'Local Agent travaille dans votre projet avec votre modèle Ollama.' : 'Créez un espace privé ou importez un dossier existant.'}</p>
                 {project ? (
@@ -1049,7 +1110,7 @@ export function WorkspaceView({
                     <button type="button" onClick={() => setPrompt('Trouve et corrige le problème principal de ce projet.')}>Corriger un problème</button>
                     <button type="button" onClick={() => setPrompt('Ajoute les tests manquants les plus importants.')}>Ajouter des tests</button>
                   </div>
-                ) : <div className="empty-project-actions"><button className="empty-project-button" type="button" onClick={() => setNewProjectName('')}>Créer un projet</button><button className="empty-project-button secondary" type="button" onClick={() => void chooseProject()}>Importer un dossier</button></div>}
+                ) : <div className="empty-project-actions"><button className="empty-project-button" type="button" onClick={(event) => { dialogTriggerRef.current = event.currentTarget; setNewProjectName('') }}><Plus aria-hidden="true" /> Créer un projet</button><button className="empty-project-button secondary" type="button" onClick={() => void chooseProject()}><FolderOpen aria-hidden="true" /> Importer un dossier</button></div>}
               </div>
             ) : messages.map((message) => {
               const requestActivities = message.role === 'assistant'
@@ -1074,6 +1135,9 @@ export function WorkspaceView({
               )
             })}
           </div>
+          <span className="sr-only" role="status" aria-live="polite">
+            {activeRun?.status === 'queued' ? 'Message ajouté à la file d’attente.' : activeRun?.status === 'running' ? 'L’agent travaille.' : ''}
+          </span>
         </div>
 
         {activeThreadId && activeRunHistory.length > 0 && (
@@ -1092,9 +1156,9 @@ export function WorkspaceView({
                       <>
                         <p title={run.userContent}>{run.userContent}</p>
                         <div className="queued-message-actions">
-                          <button type="button" aria-label="Supprimer le message en attente" title="Supprimer" onClick={() => void deleteQueuedMessage(run.requestId)}><TrashIcon /></button>
-                          <button type="button" aria-label="Modifier le message en attente" title="Modifier" onClick={() => { setEditingRequestId(run.requestId); setEditingContent(run.userContent) }}><PencilIcon /></button>
-                          <button className="send-now" type="button" aria-label="Envoyer ce message maintenant" title="Envoyer maintenant" onClick={() => void sendQueuedMessageNow(run.requestId)}><ArrowUpIcon /></button>
+                          <button type="button" aria-label="Supprimer le message en attente" title="Supprimer" onClick={() => void deleteQueuedMessage(run.requestId)}><Trash2 aria-hidden="true" /></button>
+                          <button type="button" aria-label="Modifier le message en attente" title="Modifier" onClick={() => { setEditingRequestId(run.requestId); setEditingContent(run.userContent) }}><Pencil aria-hidden="true" /></button>
+                          <button className="send-now" type="button" aria-label="Envoyer ce message maintenant" title="Envoyer maintenant" onClick={() => void sendQueuedMessageNow(run.requestId)}><ArrowUp aria-hidden="true" /></button>
                         </div>
                       </>
                     )}
@@ -1112,7 +1176,7 @@ export function WorkspaceView({
               title="Historique"
               onClick={() => setRunHistoryOpen((open) => !open)}
             >
-              <OutlineIcon />
+              <ListTree aria-hidden="true" />
               {queuedRuns.length > 0 && <strong>{queuedRuns.length}</strong>}
             </button>
             {showScrollToBottom && (
@@ -1126,7 +1190,7 @@ export function WorkspaceView({
                   setShowScrollToBottom(false)
                   messagesScrollRef.current?.scrollTo({ top: messagesScrollRef.current.scrollHeight, behavior: 'smooth' })
                 }}
-              ><ArrowDownIcon /></button>
+              ><ArrowDown aria-hidden="true" /></button>
             )}
             {runHistoryOpen && (
               <section id="run-history-panel" className="run-history-panel" aria-label="Historique des messages">
@@ -1134,7 +1198,7 @@ export function WorkspaceView({
                 {historyRuns.map((run) => (
                   <article className={`run-history-item ${run.status}`} key={run.requestId}>
                     <div className="run-history-status">
-                      <span aria-hidden="true">{run.status === 'running' ? '●' : run.status === 'completed' ? '✓' : '!'}</span>
+                      <span aria-hidden="true">{run.status === 'running' ? <Circle /> : run.status === 'completed' ? <Check /> : <CircleAlert />}</span>
                       <strong>{run.status === 'running' ? 'En cours' : run.status === 'completed' ? 'Terminé' : run.status === 'interrupted' ? 'Interrompu' : 'Erreur'}</strong>
                     </div>
                     <p>{run.userContent}</p>
@@ -1164,12 +1228,12 @@ export function WorkspaceView({
             />
             <div className="composer-toolbar">
               <span>{dictationState === 'recording'
-                ? '● Écoute… cliquez pour terminer'
+                ? <><Circle className="recording-indicator" aria-hidden="true" /> Écoute… cliquez pour terminer</>
                 : dictationState === 'transcribing'
                   ? dictationProgress?.status === 'downloading'
                     ? `Whisper se télécharge${dictationProgress.percent === undefined ? '…' : ` · ${dictationProgress.percent}%`}`
                     : 'Transcription locale…'
-                  : project ? `◇ ${project.name}` : 'Aucun projet'}</span>
+                  : project ? <><Box aria-hidden="true" /> {project.name}</> : 'Aucun projet'}</span>
               <div className="composer-actions">
                 <button
                   className={dictationState === 'recording' ? 'dictation-button recording' : 'dictation-button'}
@@ -1178,11 +1242,11 @@ export function WorkspaceView({
                   title={dictationState === 'recording' ? 'Arrêter la dictée' : 'Dictée locale avec Whisper'}
                   disabled={!effectiveModel || !project || !activeThreadId || dictationState === 'transcribing'}
                   onClick={() => void (dictationState === 'recording' ? stopDictation() : startDictation())}
-                >{dictationState === 'recording' ? <StopIcon /> : <MicrophoneIcon />}</button>
+                >{dictationState === 'recording' ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}</button>
                 {activeRequest && !prompt.trim() ? (
-                  <button className="stop-button" type="button" aria-label="Arrêter l’agent" title="Arrêter" onClick={() => void window.localAgent.cancelChat(activeRequest)}><StopIcon /></button>
+                  <button className="stop-button" type="button" aria-label="Arrêter l’agent" title="Arrêter" onClick={() => void window.localAgent.cancelChat(activeRequest)}><Square aria-hidden="true" /></button>
                 ) : (
-                  <button type="submit" aria-label={activeRequest ? 'Ajouter à la file d’attente' : 'Envoyer'} disabled={!prompt.trim() || !effectiveModel}><ArrowUpIcon /></button>
+                  <button type="submit" aria-label={activeRequest ? 'Ajouter à la file d’attente' : 'Envoyer'} disabled={!prompt.trim() || !effectiveModel}><ArrowUp aria-hidden="true" /></button>
                 )}
               </div>
             </div>
