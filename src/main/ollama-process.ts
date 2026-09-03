@@ -91,22 +91,37 @@ export async function startOllamaServer(
     '--cap-drop', 'ALL',
     '--pids-limit', '1024'
   ]
-  const run = async (gpu: boolean): Promise<CommandResult> => runner('docker', [
-    ...baseArgs,
-    ...(gpu ? ['--gpus', 'all'] : []),
-    OLLAMA_IMAGE
-  ], { timeoutMs: 600_000, maxOutputBytes: 50_000 })
+  const run = async (gpu: boolean, percent: number): Promise<CommandResult> => {
+    const startedAt = Date.now()
+    const elapsedProgress = setInterval(() => {
+      const elapsedSeconds = Math.max(5, Math.round((Date.now() - startedAt) / 1_000))
+      options.onProgress?.({
+        step: 'Préparation d’Ollama',
+        detail: `Téléchargement ou lancement en cours — ${elapsedSeconds} s écoulées. La première installation télécharge plusieurs Go.`,
+        percent
+      })
+    }, 5_000)
+    try {
+      return await runner('docker', [
+        ...baseArgs,
+        ...(gpu ? ['--gpus', 'all'] : []),
+        OLLAMA_IMAGE
+      ], { timeoutMs: 600_000, maxOutputBytes: 50_000 })
+    } finally {
+      clearInterval(elapsedProgress)
+    }
+  }
 
   options.onProgress?.({
     step: 'Préparation d’Ollama',
-    detail: 'Téléchargement de l’image si nécessaire, puis lancement invisible du service…',
+    detail: 'Téléchargement de l’image Ollama si nécessaire. La première installation peut durer plusieurs minutes…',
     percent: 88
   })
-  let created = await run(Boolean(options.useNvidiaGpu))
+  let created = await run(Boolean(options.useNvidiaGpu), 88)
   if (created.exitCode !== 0 && options.useNvidiaGpu) {
     options.onProgress?.({ step: 'Nouvel essai sans GPU', detail: 'Le mode GPU est indisponible, démarrage automatique sur le processeur…', percent: 89 })
     await removeFailedContainer(runner)
-    created = await run(false)
+    created = await run(false, 89)
   }
   if (created.exitCode !== 0 || created.timedOut) {
     await removeFailedContainer(runner)
