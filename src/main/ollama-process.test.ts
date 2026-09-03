@@ -51,7 +51,7 @@ describe('startOllamaServer', () => {
     })
   })
 
-  it('does not take over a container that Local Agent does not manage', async () => {
+  it('does not take over a container that Stellan does not manage', async () => {
     const runner = vi.fn<CommandRunner>()
       .mockResolvedValueOnce(result(0, '27.0.0'))
       .mockResolvedValueOnce(result(0, 'true|||ollama/ollama:latest'))

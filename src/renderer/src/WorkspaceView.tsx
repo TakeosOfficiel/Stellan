@@ -899,7 +899,7 @@ export function WorkspaceView({
       className={`workspace-view${mobileWorkbenchOpen ? ' show-mobile-workbench' : ''}${visible ? '' : ' app-view-hidden'}`}
       aria-hidden={!visible}
     >
-      <nav className="app-rail" aria-label="Sections de Local Agent">
+      <nav className="app-rail" aria-label="Sections de Stellan">
         <div className="rail-main">
           <button
             className="active"
@@ -1113,7 +1113,7 @@ export function WorkspaceView({
               <div className="empty-chat">
                 <span className="agent-mark large"><Bot aria-hidden="true" /></span>
                 <h2>{project ? 'Que voulez-vous construire ?' : 'Ouvrez d’abord un projet'}</h2>
-                <p>{project ? 'Local Agent travaille dans votre projet avec votre modèle Ollama.' : 'Créez un espace privé ou importez un dossier existant.'}</p>
+                <p>{project ? 'Stellan travaille dans votre projet avec votre modèle Ollama.' : 'Créez un espace privé ou importez un dossier existant.'}</p>
                 {project ? (
                   <div className="prompt-suggestions">
                     <button type="button" onClick={() => setPrompt('Analyse ce projet et explique-moi sa structure.')}>Analyser le projet</button>
@@ -1225,7 +1225,7 @@ export function WorkspaceView({
             <textarea
               ref={composerRef}
               aria-label="Votre demande"
-              placeholder={!project ? 'Ouvrez un projet pour commencer…' : effectiveModel ? 'Demandez à Local Agent…' : 'Installez d’abord un modèle local…'}
+              placeholder={!project ? 'Ouvrez un projet pour commencer…' : effectiveModel ? 'Demandez à Stellan…' : 'Installez d’abord un modèle local…'}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               onKeyDown={(event) => {

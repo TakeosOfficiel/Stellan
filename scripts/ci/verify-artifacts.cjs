@@ -10,10 +10,10 @@ if (!['linux', 'windows'].includes(target)) {
 const { version } = require('../../package.json')
 const expectedNames =
   target === 'windows'
-    ? [`Local-Agent-${version}-win-x64.exe`]
+    ? [`Stellan-${version}-win-x64.exe`]
     : [
-        `Local-Agent-${version}-linux-x86_64.AppImage`,
-        `Local-Agent-${version}-linux-amd64.deb`,
+        `Stellan-${version}-linux-x86_64.AppImage`,
+        `Stellan-${version}-linux-amd64.deb`,
       ]
 const artifactDirectory = path.resolve('ci-artifacts', 'unsigned', target)
 

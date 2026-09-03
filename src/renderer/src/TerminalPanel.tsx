@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react'
 
 const TERMINAL_WELCOME = [
   '\x1b[38;5;149m',
-  '        Welcome to Local Agent.\r\n',
+  '           Welcome to Stellan.\r\n',
   '\r\n',
   '               .••••.\r\n',
   '           .••●●●●●●••.\r\n',

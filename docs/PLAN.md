@@ -63,7 +63,7 @@ Electron est retenu pour privilégier une implémentation cohérente en TypeScri
 ## 3. Organisation du dépôt
 
 ```text
-local-agent/
+stellan/
 ├── apps/
 │   └── desktop/
 │       ├── main/                 # Processus Electron
@@ -218,7 +218,7 @@ La dictée utilise directement le microphone du renderer avec une permission Ele
 - limites de ressources et politiques réseau ;
 - suspension, reprise et nettoyage des environnements.
 
-État actuel : sous Windows, l’application télécharge et vérifie Alpine, importe la distribution `LocalAgentRuntime`, installe Docker Engine sans interface et pilote toutes ses commandes via `wsl.exe`. Chaque projet importé reçoit un fichier ext4 sparse plafonné à 20 Go ; son dépôt et tous ses worktrees y résident, sans écrire dans le dossier Windows original. Chaque conversation principale reçoit un worktree et un conteneur persistant durci ; lectures, recherches, écritures, Git, commandes et terminal y sont exécutés. CPU/RAM et nombre de workers sont calculés automatiquement, le réseau worker est fermé par défaut, et le volume interne `local-agent-worker-data-<thread>` est supprimé avec le thread. Sous Linux, Docker Engine direct et les worktrees hôte restent utilisés. Podman reste un backend ultérieur.
+État actuel : sous Windows, Stellan télécharge et vérifie Alpine, retrouve ou importe la distribution technique historique `LocalAgentRuntime`, installe Docker Engine sans interface et pilote toutes ses commandes via `wsl.exe`. Ce nom système reste stable afin que les mises à jour conservent les modèles et projets existants. Chaque projet importé reçoit un fichier ext4 sparse plafonné à 20 Go ; son dépôt et tous ses worktrees y résident, sans écrire dans le dossier Windows original. Chaque conversation principale reçoit un worktree et un conteneur persistant durci ; lectures, recherches, écritures, Git, commandes et terminal y sont exécutés. CPU/RAM et nombre de workers sont calculés automatiquement, le réseau worker est fermé par défaut, et le volume interne `local-agent-worker-data-<thread>` est supprimé avec le thread. Sous Linux, Docker Engine direct et les worktrees hôte restent utilisés. Podman reste un backend ultérieur.
 
 ### Phase 4 — Fiabilité et expérience
 
@@ -243,7 +243,7 @@ La dictée utilise directement le microphone du renderer avec une permission Ele
 - assistant de première configuration ;
 - documentation utilisateur et dépannage.
 
-État actuel : les paquets Windows et Linux et leur construction CI non signée sont configurés. Au lancement, une fenêtre compacte affiche la progression de la première installation ou du redémarrage du runtime ; les diagnostics techniques ne surchargent plus les réglages de modèles. Local Agent crée ou redémarre en arrière-plan `local-agent-ollama`, tente le GPU NVIDIA puis le CPU, expose l’API uniquement sur `127.0.0.1:11435` et conserve les modèles dans le disque virtuel privé. Le choix et le téléchargement du modèle restent visibles dans le catalogue ; aucun Ollama natif, Docker Desktop ni terminal séparé n’est lancé.
+État actuel : les paquets Windows et Linux et leur construction CI non signée sont configurés. Au lancement, une fenêtre compacte affiche la progression de la première installation ou du redémarrage du runtime ; les diagnostics techniques ne surchargent plus les réglages de modèles. Stellan crée ou redémarre en arrière-plan `local-agent-ollama`, tente le GPU NVIDIA puis le CPU, expose l’API uniquement sur `127.0.0.1:11435` et conserve les modèles dans le disque virtuel privé. Le choix et le téléchargement du modèle restent visibles dans le catalogue ; aucun Ollama natif, Docker Desktop ni terminal séparé n’est lancé.
 
 Les mises à jour automatiques signées, la signature des artefacts, les smoke tests natifs empaquetés et un diagnostic indépendant de l’installation avant toute tentative de démarrage restent à réaliser. L’état « installation inconnue » est donc volontaire lorsque l’API ne répond pas encore.
 

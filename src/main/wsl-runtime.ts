@@ -9,6 +9,7 @@ import {
   type CommandResult
 } from './runtime'
 
+// Keep this legacy system identifier so installed runtimes, projects and models survive upgrades.
 export const MANAGED_WSL_DISTRO = 'LocalAgentRuntime'
 const ALPINE_VERSION = '3.24.1'
 const ALPINE_FILE = `alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz`
@@ -42,7 +43,7 @@ git config core.fsmonitor false
 [ -n "$(find . -mindepth 1 -maxdepth 1 ! -name .git -print -quit)" ] || touch .gitkeep
 git add -A
 if ! git rev-parse --verify HEAD >/dev/null 2>&1 || ! git diff --cached --quiet; then
-  git -c user.name="Local Agent" -c user.email="local-agent@localhost" commit --no-verify -m "Local Agent snapshot"
+  git -c user.name="Stellan" -c user.email="stellan@localhost" commit --no-verify -m "Stellan snapshot"
 fi`
 export const MANAGED_RUNTIME_PACKAGES = ['openrc', 'docker', 'docker-cli', 'nodejs', 'npm', 'git', 'ripgrep', 'bash', 'coreutils', 'iproute2', 'e2fsprogs', 'util-linux'] as const
 export const WSL_ADDRESS_COMMAND = ['/sbin/ip', '-o', '-4', 'addr', 'show', 'dev', 'eth0'] as const
@@ -317,7 +318,7 @@ export async function runManagedWslCommand(
 }
 
 async function refreshDistroAddress(): Promise<void> {
-  report('Configuration du réseau privé', 'Connexion sécurisée de Local Agent au runtime…', 77)
+  report('Configuration du réseau privé', 'Connexion sécurisée de Stellan au runtime…', 77)
   const address = await distroCommand(WSL_ADDRESS_COMMAND, { timeoutMs: 15_000 })
   await requireSuccess('Détection de l’adresse du runtime privé', address)
   const ipv4 = address.stdout.match(/\binet (\d{1,3}(?:\.\d{1,3}){3})\//)?.[1]
@@ -335,12 +336,12 @@ export function ensureManagedWslRuntime(): Promise<void> {
     report('Vérification de WSL 2', 'Contrôle du composant de virtualisation Windows…', 8)
     const status = await wsl(['--status'], { timeoutMs: 30_000 })
     if (status.exitCode !== 0) {
-      throw new Error('WSL 2 est requis. Activez le composant Windows WSL, redémarrez le PC, puis relancez Local Agent.')
+      throw new Error('WSL 2 est requis. Activez le composant Windows WSL, redémarrez le PC, puis relancez Stellan.')
     }
     const exists = await distroExists()
     report(
       exists ? 'Linux privé détecté' : 'Préparation du Linux privé',
-      exists ? 'Le système isolé de Local Agent est déjà installé.' : 'Une première installation automatique est nécessaire.',
+      exists ? 'Le système isolé de Stellan est déjà installé.' : 'Une première installation automatique est nécessaire.',
       exists ? 30 : 12
     )
     if (!exists) await importDistro(runtimeRoot as string)

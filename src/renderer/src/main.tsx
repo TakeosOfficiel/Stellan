@@ -13,7 +13,7 @@ createRoot(root).render(
       <App />
     ) : (
       <main className="startup-error">
-        <h1>Local Agent n’a pas pu démarrer</h1>
+        <h1>Stellan n’a pas pu démarrer</h1>
         <p>Le composant sécurisé Electron n’a pas été chargé. Redémarrez l’application.</p>
       </main>
     )}

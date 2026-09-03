@@ -79,9 +79,9 @@ function TitleBar({ view, onViewChange }: {
     <header className="titlebar" onDoubleClick={() => void window.localAgent.toggleMaximizeWindow()}>
       <div className="titlebar-brand">
         <span aria-hidden="true"><Bot /></span>
-        <strong>Local Agent</strong>
+        <strong>Stellan</strong>
       </div>
-      <h1 className="sr-only">Local Agent</h1>
+      <h1 className="sr-only">Stellan</h1>
       <nav className="titlebar-nav" aria-label="Navigation principale" onDoubleClick={(event) => event.stopPropagation()}>
         <button className={view === 'agent' ? 'active' : ''} type="button" aria-current={view === 'agent' ? 'page' : undefined} onClick={() => onViewChange('agent')}>Agent</button>
         <button
@@ -130,7 +130,7 @@ export function App(): React.JSX.Element {
       setStatus(nextStatus)
       if (nextStatus.available) setInstallationEvidence('detected')
     } catch {
-      setActionError('La vérification a échoué. Redémarrez Local Agent puis réessayez.')
+      setActionError('La vérification a échoué. Redémarrez Stellan puis réessayez.')
     } finally {
       setCheckingOllama(false)
       setRuntimeProgress(null)
@@ -149,7 +149,7 @@ export function App(): React.JSX.Element {
         try { setSetup(await window.localAgent.getSetupInfo()) } catch { /* Ollama is usable even if diagnostics refresh fails. */ }
       }
     } catch {
-      setActionError("Local Agent n'a pas pu lancer Ollama. Utilisez la commande adaptée ci-dessous.")
+      setActionError("Stellan n'a pas pu lancer Ollama. Utilisez la commande adaptée ci-dessous.")
     } finally {
       setStartingOllama(false)
       setRuntimeProgress(null)
@@ -253,7 +253,7 @@ export function App(): React.JSX.Element {
     : runtimeProgress?.percent ?? (resolvedStatus?.available ? 100 : 2)
   const startupStep = firstModelDownload
     ? 'Installation du modèle'
-    : runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Local Agent')
+    : runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Stellan')
   const startupDetail = firstModelDownload
     ? pullProgress?.status ?? 'Préparation du téléchargement…'
     : runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
@@ -305,7 +305,7 @@ export function App(): React.JSX.Element {
             className="startup-card"
             role="dialog"
             aria-modal="true"
-            aria-label="Préparation de Local Agent"
+            aria-label="Préparation de Stellan"
             aria-live="polite"
             aria-busy={runtimeBusy || firstModelDownload}
             tabIndex={-1}

@@ -17,9 +17,9 @@ Pour automatiser les exécutions, relier le service CI au dépôt Amp et configu
 
 La découverte automatique de certificat est désactivée avec `CSC_IDENTITY_AUTO_DISCOVERY=false`, et `electron-builder` reçoit `--publish never`. Les sorties attendues sont contrôlées comme fichiers non vides avant leur téléversement par Buildkite :
 
-- `ci-artifacts/unsigned/windows/Local-Agent-<version>-win-x64.exe` ;
-- `ci-artifacts/unsigned/linux/Local-Agent-<version>-linux-x86_64.AppImage` ;
-- `ci-artifacts/unsigned/linux/Local-Agent-<version>-linux-amd64.deb`.
+- `ci-artifacts/unsigned/windows/Stellan-<version>-win-x64.exe` ;
+- `ci-artifacts/unsigned/linux/Stellan-<version>-linux-x86_64.AppImage` ;
+- `ci-artifacts/unsigned/linux/Stellan-<version>-linux-amd64.deb`.
 
 Ces fichiers sont explicitement **non signés**. Ils servent à la validation CI et ne constituent pas des releases authentifiées.
 

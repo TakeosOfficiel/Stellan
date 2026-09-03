@@ -1,11 +1,11 @@
 appId: dev.localagent.desktop
-productName: Local Agent
-copyright: Copyright © 2026 Local Agent contributors
+productName: Stellan
+copyright: Copyright © 2026 Stellan contributors
 
 directories:
   output: dist
 
-artifactName: Local-Agent-${version}-${os}-${arch}.${ext}
+artifactName: Stellan-${version}-${os}-${arch}.${ext}
 asar: true
 asarUnpack:
   - node_modules/node-pty/**/*
@@ -27,11 +27,11 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: Local Agent
+  shortcutName: Stellan
 
 linux:
   category: Development
-  maintainer: Local Agent contributors
+  maintainer: Stellan contributors
   extraResources:
     - from: node_modules/@vscode/ripgrep-linux-${arch}/bin/rg
       to: bin/rg

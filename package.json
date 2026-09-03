@@ -1,9 +1,9 @@
 {
-  "name": "local-agent",
+  "name": "stellan",
   "version": "0.1.0",
   "private": true,
-  "description": "A local-first coding agent for Windows and Linux",
-  "author": "Local Agent contributors",
+  "description": "Stellan, a local-first coding agent for Windows and Linux",
+  "author": "Stellan contributors",
   "homepage": "https://ampcode.com/@takeos/AMP",
   "main": "out/main/index.js",
   "type": "module",

@@ -1,6 +1,6 @@
-# Local Agent
+# Stellan
 
-Local Agent est une application de développement assistée par une IA locale. Elle vise à offrir une boucle complète — analyser une demande, modifier un projet, exécuter ses tests et présenter le diff Git — sur Windows et Linux, sans dépendre d'un service d'inférence cloud.
+Stellan est une application de développement assistée par une IA locale. Elle vise à offrir une boucle complète — analyser une demande, modifier un projet, exécuter ses tests et présenter le diff Git — sur Windows et Linux, sans dépendre d'un service d'inférence cloud.
 
 La version 0.1 fournit :
 
@@ -29,21 +29,21 @@ La version 0.1 fournit :
 - exporte explicitement le résultat d'une conversation vers un nouveau dossier Windows, sans métadonnées Git ni liens symboliques ;
 - borne le contexte et les sorties d'outils pour rester utilisable avec de petits modèles.
 
-Sous Windows, Docker Desktop et Podman Desktop ne sont pas nécessaires. Local Agent crée une distribution WSL 2 privée nommée `LocalAgentRuntime`, y installe un moteur de conteneurs sans interface et télécharge automatiquement les images nécessaires. Ollama, ses modèles, les disques des projets et les workers résident dans ce runtime privé. Ils utilisent toujours le CPU, la RAM, le GPU et le stockage physiques du PC, mais ne sont pas installés directement dans Windows. Le téléchargement d’un modèle reste déclenché depuis le catalogue afin que l’utilisateur choisisse sa taille.
+Sous Windows, Docker Desktop et Podman Desktop ne sont pas nécessaires. Stellan crée une distribution WSL 2 privée nommée `LocalAgentRuntime`, y installe un moteur de conteneurs sans interface et télécharge automatiquement les images nécessaires. Ollama, ses modèles, les disques des projets et les workers résident dans ce runtime privé. Ils utilisent toujours le CPU, la RAM, le GPU et le stockage physiques du PC, mais ne sont pas installés directement dans Windows. Le nom technique historique du runtime est conservé pour que les mises à jour retrouvent les modèles et projets existants. Le téléchargement d’un modèle reste déclenché depuis le catalogue afin que l’utilisateur choisisse sa taille.
 
 ## Première configuration et Ollama
 
-Au démarrage, Local Agent détecte automatiquement le CPU, la RAM, le GPU et WSL 2. Au premier lancement, il télécharge un Alpine Linux minimal dont la somme SHA-256 est contrôlée, l’importe dans son dossier privé puis installe le moteur headless. Il crée ensuite en arrière-plan le conteneur `local-agent-ollama`, lié uniquement à `127.0.0.1:11435`. Aucun `ollama serve` ne doit être lancé manuellement et aucune console n’est ouverte.
+Au démarrage, Stellan détecte automatiquement le CPU, la RAM, le GPU et WSL 2. Au premier lancement, il télécharge un Alpine Linux minimal dont la somme SHA-256 est contrôlée, l’importe dans son dossier privé puis installe le moteur headless. Il crée ensuite en arrière-plan le conteneur historique `local-agent-ollama`, lié uniquement à `127.0.0.1:11435`. Aucun `ollama serve` ne doit être lancé manuellement et aucune console n’est ouverte.
 
-Les modèles sont conservés dans le volume nommé `local-agent-ollama-models`, à l’intérieur du disque virtuel privé WSL, pas dans le dossier utilisateur `.ollama`. Ils occupent néanmoins de l’espace sur le disque du PC. Le premier démarrage télécharge l’image `ollama/ollama`; avec un GPU NVIDIA détecté, Local Agent tente automatiquement l’accès GPU puis revient au CPU si le passthrough GPU n’est pas disponible.
+Les modèles sont conservés dans le volume nommé `local-agent-ollama-models`, à l’intérieur du disque virtuel privé WSL, pas dans le dossier utilisateur `.ollama`. Ils occupent néanmoins de l’espace sur le disque du PC. Le premier démarrage télécharge l’image `ollama/ollama`; avec un GPU NVIDIA détecté, Stellan tente automatiquement l’accès GPU puis revient au CPU si le passthrough GPU n’est pas disponible.
 
-Si WSL 2 manque, **Activer WSL 2** lance la commande officielle Windows avec une demande UAC. Un redémarrage du PC peut être nécessaire. Local Agent reprend ensuite automatiquement la création de son runtime privé.
+Si WSL 2 manque, **Activer WSL 2** lance la commande officielle Windows avec une demande UAC. Un redémarrage du PC peut être nécessaire. Stellan reprend ensuite automatiquement la création de son runtime privé.
 
 Une API joignable sans modèle n’est pas encore prête pour une conversation. Installer explicitement un modèle du catalogue ; les recommandations décrivent la mémoire détectée mais ne remplacent jamais le choix de l’utilisateur. La catégorie de catalogue et le modèle sélectionné sont conservés lors des nouvelles vérifications.
 
 ## Tester toute la version 0.1
 
-1. Lancer `pnpm dev` et laisser Local Agent préparer WSL 2, son moteur privé et Ollama automatiquement.
+1. Lancer `pnpm dev` et laisser Stellan préparer WSL 2, son moteur privé et Ollama automatiquement.
 2. Dans **Modèles**, vérifier l’API locale sur le port 11435, puis installer le modèle de démarrage ou un modèle de code compatible avec les outils.
 3. Dans **Agent**, ouvrir un projet : sous Windows, l’application en importe une copie dans un disque privé de 20 Go et laisse l’original intact. Elle crée ensuite le premier worktree ; le panneau droit doit afficher ses fichiers. Envoyer une demande de modification, puis consulter **Changes** et **Review**.
 4. Dans le panneau droit du thread actif, ouvrir **Terminal**, vérifier les programmes interactifs et le redimensionnement, puis fermer le terminal ; le worker doit rester disponible pour les outils suivants.

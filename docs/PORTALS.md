@@ -39,7 +39,7 @@ Le proxy ne constitue pas une frontière d’authentification entre processus lo
 
 Les modes LAN et public expérimental décrits dans les premières explorations ne sont pas implémentés. L’interface les indique comme indisponibles et ne prétend pas fournir d’accès public.
 
-Avant d’ajouter ces modes, Local Agent devra au minimum :
+Avant d’ajouter ces modes, Stellan devra au minimum :
 
 1. attribuer de façon vérifiable le processus qui écoute au thread et au projet concernés, y compris sur Windows et pour les conteneurs ;
 2. définir une authentification, une expiration, une révocation et une protection contre les requêtes intersites ;

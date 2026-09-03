@@ -1,5 +1,6 @@
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { cp, lstat, mkdir, rm, statfs } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
@@ -715,6 +716,23 @@ function createWindow(): void {
   }
 }
 
+function reuseLegacyUserData(): void {
+  const currentUserData = app.getPath('userData')
+  const hasExistingData = (directory: string): boolean =>
+    existsSync(join(directory, 'local-agent.sqlite')) || existsSync(join(directory, 'runtime'))
+
+  if (hasExistingData(currentUserData)) return
+  for (const directoryName of ['Local Agent', 'local-agent']) {
+    const legacyUserData = join(app.getPath('appData'), directoryName)
+    if (legacyUserData !== currentUserData && hasExistingData(legacyUserData)) {
+      app.setPath('userData', legacyUserData)
+      return
+    }
+  }
+}
+
+reuseLegacyUserData()
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
   configureManagedWslRuntime(join(app.getPath('userData'), 'runtime'), sendRuntimeProgress)
@@ -844,7 +862,7 @@ app.whenReady().then(() => {
         await tools.writeFile('.gitkeep', '')
         await tools.runCommand('git', ['init'], { timeoutMs: 10_000 })
         await tools.runCommand('git', ['add', '.gitkeep'], { timeoutMs: 10_000 })
-        await tools.runCommand('git', ['-c', 'user.name=Local Agent', '-c', 'user.email=local-agent@localhost', 'commit', '-m', 'Initial project'], { timeoutMs: 10_000 })
+        await tools.runCommand('git', ['-c', 'user.name=Stellan', '-c', 'user.email=stellan@localhost', 'commit', '-m', 'Initial project'], { timeoutMs: 10_000 })
       }
       approvedProjectPaths.set(projectPath, 'git')
       return { path: projectPath, name: projectName }
