@@ -74,6 +74,10 @@ function failure(result: CommandResult): string {
   return cleanWslOutput(result.stderr || result.stdout).trim().slice(0, 1_000)
 }
 
+export function isMissingManagedDistroDiskFailure(value: string): boolean {
+  return /Wsl\/Service\/CreateInstance\/Mount(?:Disk|Vhd)\/HCS\/ERROR_PATH_NOT_FOUND/i.test(value)
+}
+
 async function requireSuccess(operation: string, result: CommandResult): Promise<void> {
   if (result.exitCode !== 0 || result.timedOut) {
     throw new Error(`${operation} : ${failure(result) || 'échec sans détail'}`)
@@ -135,8 +139,8 @@ async function importDistro(root: string): Promise<void> {
   }
 }
 
-async function installRuntimePackages(): Promise<void> {
-  const marker = await distroCommand(['test', '-f', RUNTIME_MARKER], { timeoutMs: 15_000 })
+async function installRuntimePackages(existingMarker?: CommandResult): Promise<void> {
+  const marker = existingMarker ?? await distroCommand(['test', '-f', RUNTIME_MARKER], { timeoutMs: 15_000 })
   if (marker.exitCode === 0) {
     report('Outils du runtime déjà installés', 'Docker, Git et Node sont disponibles.', 58)
     return
@@ -339,14 +343,28 @@ export function ensureManagedWslRuntime(): Promise<void> {
     if (status.exitCode !== 0) {
       throw new Error('WSL 2 est requis. Activez le composant Windows WSL, redémarrez le PC, puis relancez Stellan.')
     }
-    const exists = await distroExists()
+    let exists = await distroExists()
     report(
       exists ? 'Linux privé détecté' : 'Préparation du Linux privé',
       exists ? 'Le système isolé de Stellan est déjà installé.' : 'Une première installation automatique est nécessaire.',
       exists ? 30 : 12
     )
+    let marker: CommandResult | undefined
+    if (exists) {
+      marker = await distroCommand(['test', '-f', RUNTIME_MARKER], { timeoutMs: 15_000 })
+      const markerFailure = `${marker.stderr}\n${marker.stdout}`
+      if (isMissingManagedDistroDiskFailure(markerFailure)) {
+        report('Réparation du Linux privé', 'Le disque du runtime a disparu. Stellan le recrée automatiquement…', 14)
+        await requireSuccess('Réinitialisation du runtime introuvable', await wsl([
+          '--unregister', MANAGED_WSL_DISTRO
+        ], { timeoutMs: 60_000 }))
+        await rm(path.join(runtimeRoot as string, 'wsl'), { recursive: true, force: true })
+        exists = false
+        marker = undefined
+      }
+    }
     if (!exists) await importDistro(runtimeRoot as string)
-    await installRuntimePackages()
+    await installRuntimePackages(marker)
     await startDockerDaemon()
     await mountPrivateProjectDisks()
     await refreshDistroAddress()

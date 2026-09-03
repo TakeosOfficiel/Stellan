@@ -4,6 +4,7 @@ import {
   MANAGED_RUNTIME_PACKAGES,
   MANAGED_WSL_DISTRO,
   WSL_ADDRESS_COMMAND,
+  isMissingManagedDistroDiskFailure,
   managedContainerPtyCommand,
   managedLinuxPathToWindows,
   managedProjectWindowsPath,
@@ -11,6 +12,16 @@ import {
 } from './wsl-runtime'
 
 describe('managed WSL runtime arguments', () => {
+  it('recognizes a missing registered distro disk without treating other WSL failures as data loss', () => {
+    expect(isMissingManagedDistroDiskFailure(
+      "Code d'erreur : Wsl/Service/CreateInstance/MountDisk/HCS/ERROR_PATH_NOT_FOUND"
+    )).toBe(true)
+    expect(isMissingManagedDistroDiskFailure(
+      'Error code: Wsl/Service/CreateInstance/MountVhd/HCS/ERROR_PATH_NOT_FOUND'
+    )).toBe(true)
+    expect(isMissingManagedDistroDiskFailure('Wsl/Service/CreateInstance/MountDisk/HCS/ERROR_SHARING_VIOLATION')).toBe(false)
+  })
+
   it('translates only Docker bind-mount sources to WSL paths', () => {
     expect(translateWindowsDockerArgument(
       'type=bind,source=C:\\Users\\Alice Smith\\project,target=/workspace'

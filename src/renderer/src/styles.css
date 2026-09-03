@@ -62,6 +62,7 @@ button { font: inherit; }
 .startup-card {
   display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 9px 15px; width: 100%; padding: 10px 4px 0; background: transparent;
 }
+.startup-card:focus { outline: none; }
 .startup-orbit { position: relative; grid-row: 1 / span 4; display: grid; place-items: center; width: 58px; height: 58px; }
 .startup-orbit::before { content: ''; position: absolute; inset: 4px; border: 1px solid #52685a; border-radius: 50%; animation: startup-spin 2.8s linear infinite; }
 .startup-orbit i { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: #a9c88d; box-shadow: 0 0 12px #8fbd72; animation: startup-pulse 1.2s ease-in-out infinite alternate; }
