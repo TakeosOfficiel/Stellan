@@ -8,6 +8,7 @@ import type {
   DictationProgress,
   OllamaStatus,
   ProjectSelection,
+  ProjectResourceSettings,
   StoredThread
 } from '../../shared/contracts'
 import { prepareWhisperAudio } from './dictation-audio'
@@ -180,6 +181,9 @@ export function WorkspaceView({
   const [threads, setThreads] = useState<StoredThread[]>([])
   const [exportingProject, setExportingProject] = useState(false)
   const [exportProjectError, setExportProjectError] = useState<string | null>(null)
+  const [resourceSettings, setResourceSettings] = useState<ProjectResourceSettings | null>(null)
+  const [resourceError, setResourceError] = useState<string | null>(null)
+  const [savingResources, setSavingResources] = useState(false)
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
   const [messagesByThread, setMessagesByThread] = useState<Record<string, UiMessage[]>>({})
   const [prompt, setPrompt] = useState('')
@@ -553,6 +557,36 @@ export function WorkspaceView({
     }
   }
 
+  async function openResources(): Promise<void> {
+    if (!activeThread) return
+    setResourceError(null)
+    try {
+      setResourceSettings(await window.localAgent.getProjectResources(activeThread.id))
+    } catch (error) {
+      setResourceError(error instanceof Error ? error.message : 'Les ressources sont indisponibles.')
+    }
+  }
+
+  async function saveResources(): Promise<void> {
+    if (!activeThread || !resourceSettings) return
+    setSavingResources(true)
+    setResourceError(null)
+    try {
+      setResourceSettings(await window.localAgent.saveProjectResources({
+        threadId: activeThread.id,
+        cpuLimit: resourceSettings.cpuLimit,
+        memoryMb: resourceSettings.memoryMb,
+        storageGb: resourceSettings.storageGb,
+        automaticCpuMemory: resourceSettings.automaticCpuMemory
+      }))
+      setResourceSettings(null)
+    } catch (error) {
+      setResourceError(error instanceof Error ? error.message : 'Les ressources n’ont pas été enregistrées.')
+    } finally {
+      setSavingResources(false)
+    }
+  }
+
   async function sendMessage(): Promise<void> {
     const content = prompt.trim()
     if (!project || !activeThreadId) {
@@ -869,12 +903,15 @@ export function WorkspaceView({
               <span>{hasOllama ? 'Ollama connecté' : 'Ollama indisponible'}</span>
             </div>
             {activeThread?.projectPath && (
-              <small>{activeThread.workspaceMode === 'worktree' ? 'Projet privé · stockage limité à 20 Go' : 'Dossier direct confirmé'}</small>
+              <small>{activeThread.workspaceMode === 'worktree' ? 'Projet privé · ressources isolées' : 'Dossier direct confirmé'}</small>
             )}
           </div>
 
           {activeThread?.workspaceMode === 'worktree' && (
             <>
+              <button className="resource-project-button" type="button" onClick={() => void openResources()}>
+                Ressources du projet
+              </button>
               <button className="export-project-button" type="button" disabled={exportingProject} onClick={() => void exportProject()}>
                 {exportingProject ? 'Export en cours…' : 'Exporter ce projet'}
               </button>
@@ -897,6 +934,33 @@ export function WorkspaceView({
           </div>
         </div>
       </aside>
+
+      {resourceSettings && (
+        <div className="resource-dialog-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !savingResources) setResourceSettings(null)
+        }}>
+          <section className="resource-dialog" role="dialog" aria-modal="true" aria-labelledby="resource-title">
+            <header>
+              <div><small>PROJET PRIVÉ</small><h3 id="resource-title">Ressources</h3></div>
+              <button type="button" aria-label="Fermer" disabled={savingResources} onClick={() => setResourceSettings(null)}>×</button>
+            </header>
+            <label className="resource-auto">
+              <input type="checkbox" checked={resourceSettings.automaticCpuMemory} onChange={(event) => setResourceSettings({
+                ...resourceSettings, automaticCpuMemory: event.target.checked
+              })} />
+              CPU et RAM automatiques
+            </label>
+            <div className="resource-grid">
+              <label>CPU <input type="number" min="1" max={resourceSettings.maxCpu} disabled={resourceSettings.automaticCpuMemory} value={resourceSettings.cpuLimit} onChange={(event) => setResourceSettings({ ...resourceSettings, cpuLimit: Number(event.target.value) })} /><small>Maximum : {resourceSettings.maxCpu}</small></label>
+              <label>RAM (Go) <input type="number" min="1" max={Math.floor(resourceSettings.maxMemoryMb / 1024)} disabled={resourceSettings.automaticCpuMemory} value={Math.round(resourceSettings.memoryMb / 1024)} onChange={(event) => setResourceSettings({ ...resourceSettings, memoryMb: Number(event.target.value) * 1024 })} /><small>Maximum sûr : {Math.floor(resourceSettings.maxMemoryMb / 1024)} Go</small></label>
+              <label>Stockage (Go) <input type="number" min={resourceSettings.storageGb} max={resourceSettings.maxStorageGb} value={resourceSettings.storageGb} onChange={(event) => setResourceSettings({ ...resourceSettings, storageGb: Number(event.target.value) })} /><small>Extensible jusqu’à {resourceSettings.maxStorageGb} Go sur ce volume</small></label>
+            </div>
+            <p>Le stockage peut être agrandi, mais pas réduit afin d’éviter toute corruption.</p>
+            {resourceError && <p className="resource-error" role="alert">{resourceError}</p>}
+            <footer><button type="button" disabled={savingResources} onClick={() => setResourceSettings(null)}>Annuler</button><button type="button" disabled={savingResources} onClick={() => void saveResources()}>{savingResources ? 'Application…' : 'Appliquer'}</button></footer>
+          </section>
+        </div>
+      )}
 
       <div className="chat-panel">
         <div className="chat-header">

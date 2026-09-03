@@ -93,6 +93,8 @@ export type WorkerProfile = {
   runtime: 'docker' | 'podman' | null
   cpuLimit: number
   memoryMb: number
+  storageGb: number
+  automaticCpuMemory: boolean
   image: string
   network: 'none' | 'bridge'
   maxConcurrentWorkers: number
@@ -284,6 +286,11 @@ const migrations = [
   `,
   `
     ALTER TABLE threads ADD COLUMN project_name TEXT;
+  `,
+  `
+    ALTER TABLE project_worker_profiles ADD COLUMN storage_gb INTEGER NOT NULL DEFAULT 20;
+    ALTER TABLE project_worker_profiles ADD COLUMN automatic_cpu_memory INTEGER NOT NULL DEFAULT 1
+      CHECK (automatic_cpu_memory IN (0, 1));
   `
 ]
 
@@ -324,11 +331,15 @@ function toWorkerProfile(row: StorageRow): WorkerProfile {
   const runtime = row.runtime === 'docker' || row.runtime === 'podman' ? row.runtime : null
   const cpuLimit = Number(row.cpu_limit)
   const memoryMb = Number(row.memory_mb)
+  const storageGb = Number(row.storage_gb)
+  const automaticCpuMemory = Number(row.automatic_cpu_memory)
   const maxConcurrentWorkers = Number(row.max_concurrent_workers)
   if (
     !mode || (mode === 'container' && !runtime) || (mode === 'direct' && runtime) ||
     !Number.isFinite(cpuLimit) || cpuLimit < 0.5 ||
     !Number.isInteger(memoryMb) || memoryMb < 512 ||
+    !Number.isInteger(storageGb) || storageGb < 1 ||
+    (automaticCpuMemory !== 0 && automaticCpuMemory !== 1) ||
     !Number.isInteger(maxConcurrentWorkers) || maxConcurrentWorkers < 1 || maxConcurrentWorkers > 32 ||
     (row.network !== 'none' && row.network !== 'bridge')
   ) {
@@ -340,6 +351,8 @@ function toWorkerProfile(row: StorageRow): WorkerProfile {
     runtime,
     cpuLimit,
     memoryMb,
+    storageGb,
+    automaticCpuMemory: automaticCpuMemory === 1,
     image: String(row.image),
     network: row.network,
     maxConcurrentWorkers,
@@ -930,7 +943,8 @@ export class ThreadStore {
   getWorkerProfile(projectPath: string): WorkerProfile | null {
     this.assertOpen()
     const row = this.database.prepare(`
-      SELECT project_path, mode, runtime, cpu_limit, memory_mb, image, network,
+      SELECT project_path, mode, runtime, cpu_limit, memory_mb, storage_gb,
+             automatic_cpu_memory, image, network,
              max_concurrent_workers, updated_at
       FROM project_worker_profiles
       WHERE project_path = ?
@@ -943,6 +957,7 @@ export class ThreadStore {
     if (
       !Number.isFinite(input.cpuLimit) || input.cpuLimit < 0.5 || input.cpuLimit > 128 ||
       !Number.isInteger(input.memoryMb) || input.memoryMb < 512 || input.memoryMb > 1_048_576 ||
+      !Number.isInteger(input.storageGb) || input.storageGb < 1 || input.storageGb > 4_096 ||
       !Number.isInteger(input.maxConcurrentWorkers) ||
       input.maxConcurrentWorkers < 1 || input.maxConcurrentWorkers > 32 ||
       !/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/.test(input.image) || input.image.length > 300 ||
@@ -953,14 +968,16 @@ export class ThreadStore {
     const updatedAt = new Date().toISOString()
     this.database.prepare(`
       INSERT INTO project_worker_profiles (
-        project_path, mode, runtime, cpu_limit, memory_mb, image, network,
-        max_concurrent_workers, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        project_path, mode, runtime, cpu_limit, memory_mb, storage_gb, automatic_cpu_memory,
+        image, network, max_concurrent_workers, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_path) DO UPDATE SET
         mode = excluded.mode,
         runtime = excluded.runtime,
         cpu_limit = excluded.cpu_limit,
         memory_mb = excluded.memory_mb,
+        storage_gb = excluded.storage_gb,
+        automatic_cpu_memory = excluded.automatic_cpu_memory,
         image = excluded.image,
         network = excluded.network,
         max_concurrent_workers = excluded.max_concurrent_workers,
@@ -971,6 +988,8 @@ export class ThreadStore {
       input.runtime,
       input.cpuLimit,
       input.memoryMb,
+      input.storageGb,
+      input.automaticCpuMemory ? 1 : 0,
       input.image,
       input.network,
       input.maxConcurrentWorkers,

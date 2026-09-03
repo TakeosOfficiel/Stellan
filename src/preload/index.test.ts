@@ -41,12 +41,20 @@ describe('portal preload IPC', () => {
 
   it('exposes project file reads only through a thread id and relative path', async () => {
     await api.exportThreadProject('thread')
+    await api.getProjectResources('thread')
+    await api.saveProjectResources({
+      threadId: 'thread', cpuLimit: 8, memoryMb: 16_384, storageGb: 100, automaticCpuMemory: false
+    })
     await api.listProjectFiles('thread')
     await api.readProjectFile({ threadId: 'thread', path: 'src/index.ts' })
     await api.openProjectFile({ threadId: 'thread', path: 'src/index.ts' })
 
-    expect(mocks.invoke.mock.calls.slice(-4)).toEqual([
+    expect(mocks.invoke.mock.calls.slice(-6)).toEqual([
       ['threads:export-project', 'thread'],
+      ['threads:get-project-resources', 'thread'],
+      ['threads:save-project-resources', {
+        threadId: 'thread', cpuLimit: 8, memoryMb: 16_384, storageGb: 100, automaticCpuMemory: false
+      }],
       ['threads:list-project-files', 'thread'],
       ['threads:read-project-file', { threadId: 'thread', path: 'src/index.ts' }],
       ['threads:open-project-file', { threadId: 'thread', path: 'src/index.ts' }]

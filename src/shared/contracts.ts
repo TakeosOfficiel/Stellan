@@ -125,11 +125,28 @@ export type WorkerProfile = {
   runtime: 'docker' | 'podman' | null
   cpuLimit: number
   memoryMb: number
+  storageGb: number
+  automaticCpuMemory: boolean
   image: string
   network: 'none' | 'bridge'
   maxConcurrentWorkers: number
   updatedAt: string
 }
+
+export type ProjectResourceSettings = {
+  cpuLimit: number
+  memoryMb: number
+  storageGb: number
+  automaticCpuMemory: boolean
+  maxCpu: number
+  maxMemoryMb: number
+  maxStorageGb: number
+}
+
+export type SaveProjectResourceSettingsRequest = Pick<
+  ProjectResourceSettings,
+  'cpuLimit' | 'memoryMb' | 'storageGb' | 'automaticCpuMemory'
+> & { threadId: string }
 
 export type ActiveRun = {
   requestId: string
@@ -278,6 +295,8 @@ export type LocalAgentApi = {
   loadThreadMessages: (threadId: string) => Promise<StoredMessage[]>
   deleteThread: (threadId: string) => Promise<boolean>
   exportThreadProject: (threadId: string) => Promise<string | null>
+  getProjectResources: (threadId: string) => Promise<ProjectResourceSettings>
+  saveProjectResources: (request: SaveProjectResourceSettingsRequest) => Promise<ProjectResourceSettings>
   reviewThreadProject: (threadId: string) => Promise<ProjectReview | null>
   listProjectFiles: (threadId: string) => Promise<ProjectFileList>
   readProjectFile: (request: ProjectFileRequest) => Promise<ProjectFilePreview>

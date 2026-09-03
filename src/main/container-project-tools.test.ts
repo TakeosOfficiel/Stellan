@@ -5,7 +5,8 @@ import type { CommandResult, executeInWorkerContainer } from './runtime'
 
 const profile: WorkerProfile = {
   projectPath: 'C:\\project', mode: 'container', runtime: 'docker', cpuLimit: 2,
-  memoryMb: 4096, image: 'node:22-bookworm', network: 'none', maxConcurrentWorkers: 2,
+  memoryMb: 4096, storageGb: 20, automaticCpuMemory: true,
+  image: 'node:22-bookworm', network: 'none', maxConcurrentWorkers: 2,
   updatedAt: '2026-01-01'
 }
 

@@ -1,6 +1,6 @@
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { cp, lstat } from 'node:fs/promises'
+import { cp, lstat, statfs } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
@@ -27,6 +27,7 @@ import {
   isManagedProjectWindowsPath,
   managedLinuxPathToWindows,
   managedWslServiceUrl,
+  resizePrivateProject,
   runManagedWslCommand,
   stopManagedWslRuntime
 } from './wsl-runtime'
@@ -56,6 +57,8 @@ const THREADS_CREATE_CHANNEL = 'threads:create'
 const THREADS_MESSAGES_CHANNEL = 'threads:messages'
 const THREADS_DELETE_CHANNEL = 'threads:delete'
 const THREADS_EXPORT_PROJECT_CHANNEL = 'threads:export-project'
+const THREADS_GET_PROJECT_RESOURCES_CHANNEL = 'threads:get-project-resources'
+const THREADS_SAVE_PROJECT_RESOURCES_CHANNEL = 'threads:save-project-resources'
 const THREADS_REVIEW_PROJECT_CHANNEL = 'threads:review-project'
 const THREADS_LIST_PROJECT_FILES_CHANNEL = 'threads:list-project-files'
 const THREADS_READ_PROJECT_FILE_CHANNEL = 'threads:read-project-file'
@@ -126,6 +129,13 @@ const createThreadSchema = z.object({
   projectName: z.string().trim().min(1).max(200),
   projectPath: z.string().min(1).max(10_000).nullable(),
   model: z.string().min(1).max(200).nullable()
+})
+const projectResourcesSchema = z.object({
+  threadId: z.uuid(),
+  cpuLimit: z.number().int().min(1).max(128),
+  memoryMb: z.number().int().min(1024).max(1_048_576),
+  storageGb: z.number().int().min(20).max(4_096),
+  automaticCpuMemory: z.boolean()
 })
 let activeDownload: string | null = null
 let dictationActive = false
@@ -265,6 +275,8 @@ async function defaultWorkerProfile(projectPath: string) {
     runtime: containerRuntime,
     cpuLimit,
     memoryMb,
+    storageGb: 20,
+    automaticCpuMemory: true,
     image: 'node:22-bookworm',
     network: 'none' as const,
     maxConcurrentWorkers: Math.max(1, Math.min(
@@ -276,8 +288,43 @@ async function defaultWorkerProfile(projectPath: string) {
 }
 
 async function resolveWorkerProfile(store: ThreadStore, projectPath: string) {
+  const current = store.getWorkerProfile(projectPath)
   const defaults = await defaultWorkerProfile(projectPath)
-  return store.saveWorkerProfile(defaults)
+  if (!current || current.automaticCpuMemory) {
+    return store.saveWorkerProfile({ ...defaults, storageGb: current?.storageGb ?? defaults.storageGb })
+  }
+  const cpuCores = os.cpus().length
+  const totalMemoryMb = os.totalmem() / 1_000_000
+  return store.saveWorkerProfile({
+    ...current,
+    mode: defaults.mode,
+    runtime: defaults.runtime,
+    image: defaults.image,
+    network: 'none',
+    maxConcurrentWorkers: Math.max(1, Math.min(
+      2,
+      Math.floor(cpuCores / current.cpuLimit),
+      Math.floor(totalMemoryMb / current.memoryMb)
+    ))
+  })
+}
+
+async function publicProjectResources(store: ThreadStore, projectPath: string) {
+  const profile = await resolveWorkerProfile(store, projectPath)
+  const maxCpu = Math.max(1, os.cpus().length)
+  const maxMemoryMb = Math.max(1024, Math.floor(os.totalmem() / 1_000_000 * 0.9))
+  const disk = await statfs(join(app.getPath('userData'), 'runtime'))
+  const freeGb = Math.floor((disk.bavail * disk.bsize) / (1024 ** 3))
+  const maxStorageGb = Math.min(4_096, Math.max(profile.storageGb, profile.storageGb + Math.max(0, freeGb - 10)))
+  return {
+    cpuLimit: profile.cpuLimit,
+    memoryMb: profile.memoryMb,
+    storageGb: profile.storageGb,
+    automaticCpuMemory: profile.automaticCpuMemory,
+    maxCpu,
+    maxMemoryMb,
+    maxStorageGb
+  }
 }
 
 function handle<T extends unknown[], R>(
@@ -983,6 +1030,51 @@ app.whenReady().then(() => {
     if (openError) throw new Error(`Le projet est exporté, mais son dossier n’a pas pu être ouvert : ${openError}`)
     return destination
   })
+  handle(THREADS_GET_PROJECT_RESOURCES_CHANNEL, async (event, input: unknown) => {
+    const threadId = requestIdSchema.parse(input)
+    const thread = requireActiveProjectThread(event.sender.id, threadId)
+    if (!thread.projectPath) throw new Error('Ce thread ne possède aucun projet.')
+    return publicProjectResources(getThreadStore(), thread.projectPath)
+  })
+  handle(THREADS_SAVE_PROJECT_RESOURCES_CHANNEL, async (event, input: unknown) => {
+    const request = projectResourcesSchema.parse(input)
+    const thread = requireActiveProjectThread(event.sender.id, request.threadId)
+    if (!thread.projectPath) throw new Error('Ce thread ne possède aucun projet.')
+    const store = getThreadStore()
+    const projectThreads = store.listThreads().filter((candidate) => candidate.projectPath === thread.projectPath)
+    if (projectThreads.some((candidate) => workerScheduler.hasThread(candidate.id) || activeThreadChats.has(candidate.id))) {
+      throw new Error('Attendez la fin des agents de ce projet avant de modifier ses ressources.')
+    }
+    const limits = await publicProjectResources(store, thread.projectPath)
+    if (request.cpuLimit > limits.maxCpu || request.memoryMb > limits.maxMemoryMb) {
+      throw new Error('La limite demandée dépasse les ressources disponibles sur ce PC.')
+    }
+    if (request.storageGb < limits.storageGb) {
+      throw new Error('Le stockage peut être agrandi, mais pas réduit sans risque de corruption.')
+    }
+    if (request.storageGb > limits.maxStorageGb) {
+      throw new Error('Ce disque ne possède pas assez d’espace disponible en conservant la marge de sécurité.')
+    }
+    if (process.platform === 'win32' && isManagedProjectWindowsPath(thread.projectPath)) {
+      await resizePrivateProject(thread.projectPath, request.storageGb)
+    }
+    const defaults = await defaultWorkerProfile(thread.projectPath)
+    const cpuLimit = request.automaticCpuMemory ? defaults.cpuLimit : request.cpuLimit
+    const memoryMb = request.automaticCpuMemory ? defaults.memoryMb : request.memoryMb
+    store.saveWorkerProfile({
+      ...defaults,
+      cpuLimit,
+      memoryMb,
+      storageGb: request.storageGb,
+      automaticCpuMemory: request.automaticCpuMemory,
+      maxConcurrentWorkers: Math.max(1, Math.min(
+        2,
+        Math.floor(limits.maxCpu / cpuLimit),
+        Math.floor((os.totalmem() / 1_000_000) / memoryMb)
+      ))
+    })
+    return publicProjectResources(store, thread.projectPath)
+  })
   handle(THREADS_REVIEW_PROJECT_CHANNEL, async (event, input: unknown) => {
     const threadId = requestIdSchema.parse(input)
     const thread = requireActiveProjectThread(event.sender.id, threadId)
@@ -1259,6 +1351,8 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(THREADS_MESSAGES_CHANNEL)
   ipcMain.removeHandler(THREADS_DELETE_CHANNEL)
   ipcMain.removeHandler(THREADS_EXPORT_PROJECT_CHANNEL)
+  ipcMain.removeHandler(THREADS_GET_PROJECT_RESOURCES_CHANNEL)
+  ipcMain.removeHandler(THREADS_SAVE_PROJECT_RESOURCES_CHANNEL)
   ipcMain.removeHandler(THREADS_REVIEW_PROJECT_CHANNEL)
   ipcMain.removeHandler(THREADS_LIST_PROJECT_FILES_CHANNEL)
   ipcMain.removeHandler(THREADS_READ_PROJECT_FILE_CHANNEL)

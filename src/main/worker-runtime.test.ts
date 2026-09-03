@@ -8,6 +8,8 @@ const profile: WorkerProfile = {
   runtime: 'docker',
   cpuLimit: 2,
   memoryMb: 4096,
+  storageGb: 20,
+  automaticCpuMemory: true,
   image: 'node:22-bookworm',
   network: 'none',
   maxConcurrentWorkers: 2,

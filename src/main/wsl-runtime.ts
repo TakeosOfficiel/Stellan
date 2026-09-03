@@ -269,6 +269,35 @@ export function isManagedProjectWindowsPath(value: string): boolean {
   return managedLinuxPathFromWindows(value)?.startsWith(`${PRIVATE_PROJECTS_ROOT}/projects/`) ?? false
 }
 
+export async function resizePrivateProject(projectPath: string, storageGb: number): Promise<number> {
+  if (!Number.isInteger(storageGb) || storageGb < 20 || storageGb > 4_096) {
+    throw new Error('Le stockage doit être compris entre 20 et 4096 Go.')
+  }
+  const linuxPath = managedLinuxPathFromWindows(projectPath)
+  const projectId = linuxPath?.match(new RegExp(`^${PRIVATE_PROJECTS_ROOT}/projects/([a-f\\d-]{36})(?:/|$)`, 'i'))?.[1]
+  if (!projectId) throw new Error('Ce projet n’utilise pas un disque privé redimensionnable.')
+  validateProjectId(projectId)
+  await ensureManagedWslRuntime()
+  const bytes = storageGb * 1024 * 1024 * 1024
+  const disk = `${PRIVATE_PROJECTS_ROOT}/disks/${projectId}.img`
+  const current = await distroCommand(['stat', '-c', '%s', disk], { timeoutMs: 15_000 })
+  await requireSuccess('Lecture de la taille du projet privé', current)
+  const currentBytes = Number(current.stdout.trim())
+  if (!Number.isSafeInteger(currentBytes) || currentBytes <= 0) {
+    throw new Error('La taille actuelle du projet privé est invalide.')
+  }
+  if (bytes < currentBytes) {
+    throw new Error('Un disque privé peut être agrandi, mais pas réduit sans risque de corruption.')
+  }
+  if (bytes === currentBytes) return storageGb
+  const resized = await distroCommand([
+    '/bin/sh', '-lc', 'disk=$1; target=$2; bytes=$3; loop=$(findmnt -n -o SOURCE --target "$target"); test -b "$loop"; truncate -s "$bytes" "$disk"; resize2fs "$loop"',
+    'resize-private-project', disk, `${PRIVATE_PROJECTS_ROOT}/projects/${projectId}`, String(bytes)
+  ], { timeoutMs: 600_000, maxOutputBytes: 100_000 })
+  await requireSuccess('Agrandissement du projet privé', resized)
+  return storageGb
+}
+
 export async function runManagedWslCommand(
   executable: string,
   args: readonly string[],

@@ -409,7 +409,7 @@ describe('ThreadStore', () => {
       })
       const version = new DatabaseSync(path, { readOnly: true })
       try {
-        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(10)
+        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(11)
       } finally {
         version.close()
       }
@@ -501,6 +501,8 @@ describe('ThreadStore', () => {
         runtime: 'docker',
         cpuLimit: 2,
         memoryMb: 4096,
+        storageGb: 20,
+        automaticCpuMemory: true,
         image: 'node:22-bookworm',
         network: 'none',
         maxConcurrentWorkers: 2
@@ -543,6 +545,8 @@ describe('ThreadStore', () => {
         runtime: null,
         cpuLimit: 1,
         memoryMb: 1024,
+        storageGb: 20,
+        automaticCpuMemory: true,
         image: 'node:22-bookworm',
         network: 'none',
         maxConcurrentWorkers: 1
@@ -553,6 +557,8 @@ describe('ThreadStore', () => {
         runtime: null,
         cpuLimit: 1,
         memoryMb: 1024,
+        storageGb: 20,
+        automaticCpuMemory: true,
         image: 'node:22-bookworm',
         network: 'none',
         maxConcurrentWorkers: 0

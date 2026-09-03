@@ -448,12 +448,29 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .thread-row.active button:first-of-type { color: #dde3df; }
 .thread-row .thread-delete { width: 20px; padding: 3px; opacity: 0; text-align: center; }
 .thread-row:hover .thread-delete, .thread-row:focus-within .thread-delete { opacity: 1; }
-.export-project-button {
+.export-project-button, .resource-project-button {
   width: 100%; padding: 7px 9px; border: 1px solid #2b332e; border-radius: 6px;
   color: #aab5ad; background: #181e1a; font-size: 9px; text-align: left;
 }
-.export-project-button:hover { color: #d7ddd9; background: #1d241f; }
+.export-project-button:hover, .resource-project-button:hover { color: #d7ddd9; background: #1d241f; }
+.resource-project-button { margin-bottom: 5px; }
 .export-project-error { display: block; margin: 5px 6px 8px; color: #d28c82; font-size: 8px; line-height: 1.4; }
+.resource-dialog-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 4, 0.72); }
+.resource-dialog { width: min(430px, 100%); padding: 18px; border: 1px solid #344039; border-radius: 11px; background: #111613; box-shadow: 0 24px 80px #000b; }
+.resource-dialog header { display: flex; align-items: start; justify-content: space-between; margin-bottom: 15px; }
+.resource-dialog header small { color: #68746c; font-size: 8px; letter-spacing: .12em; }
+.resource-dialog h3 { margin: 2px 0 0; color: #e0e6e2; font-size: 15px; }
+.resource-dialog header button { padding: 2px 6px; color: #859088; font-size: 18px; }
+.resource-auto { display: flex; align-items: center; gap: 8px; color: #bdc7c0; font-size: 10px; }
+.resource-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+.resource-grid label { display: grid; gap: 5px; color: #9ba69f; font-size: 9px; }
+.resource-grid input { width: 100%; padding: 8px; border: 1px solid #303a34; border-radius: 6px; color: #d8ded9; background: #0b0f0d; }
+.resource-grid input:disabled { opacity: .45; }
+.resource-grid small, .resource-dialog > p { color: #647068; font-size: 8px; line-height: 1.4; }
+.resource-dialog .resource-error { color: #d28c82; }
+.resource-dialog footer { display: flex; justify-content: flex-end; gap: 7px; margin-top: 16px; }
+.resource-dialog footer button { padding: 7px 11px; border: 1px solid #303a34; border-radius: 6px; color: #abb5ae; background: #19201c; font-size: 9px; }
+.resource-dialog footer button:last-child { border-color: #38604c; color: #a8dec1; background: #17271e; }
 .sidebar-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid #252b27; }
 .runtime-summary { margin: 0 6px 9px; font-size: 9px; }
 .model-selector { margin: 0; padding: 0; border: 0; }
