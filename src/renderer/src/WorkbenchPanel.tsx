@@ -387,18 +387,24 @@ export function WorkbenchPanel({
               <button className="icon-button" type="button" aria-label="Actualiser les modifications" onClick={() => void refreshChanges()}><RefreshCw aria-hidden="true" /></button>
             </header>
             {reviewError && <p className="workbench-error" role="alert">{reviewError}</p>}
-            <small>{review?.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
+            <div className="change-section-heading">
+              <strong>Modifications non indexées</strong>
+              <small>{review?.workspaceMode === 'worktree' ? 'Worktree Git isolé' : 'Dossier direct confirmé'}</small>
+            </div>
             {reviewLoading ? <div className="workbench-zero"><p>Lecture des changements…</p></div> : reviewOpen ? (
               review?.diff ? <DiffContent className="workbench-diff" diff={review.diff} /> : <div className="workbench-zero"><span aria-hidden="true"><Check /></span><p>Rien à relire pour le moment</p></div>
             ) : review && review.changes.length > 0 ? (
               <div className="change-list">{review.changes.map((change) => {
                 const expanded = expandedChanges.has(change.path)
                 const label = change.kind === 'added' ? 'Nouveau' : change.kind === 'deleted' ? 'Supprimé' : change.kind === 'renamed' ? 'Renommé' : 'Modifié'
+                const separator = Math.max(change.path.lastIndexOf('/'), change.path.lastIndexOf('\\'))
+                const filename = separator >= 0 ? change.path.slice(separator + 1) : change.path
+                const directory = separator >= 0 ? change.path.slice(0, separator) : ''
                 return <article key={change.path}>
                   <button type="button" aria-expanded={expanded} onClick={() => toggleChange(change.path)}>
                     <ChevronRight className={expanded ? 'expanded' : ''} aria-hidden="true" />
-                    <code>{change.path}</code>
-                    <small>{label}</small>
+                    <span className="change-path"><code>{filename}</code>{directory && <small>{directory}</small>}</span>
+                    <small className={`change-kind ${change.kind}`} title={label}>{change.kind === 'added' ? 'A' : change.kind === 'deleted' ? 'D' : change.kind === 'renamed' ? 'R' : 'M'}</small>
                     <span className="change-added">+{change.added}</span>
                     <span className="change-removed">−{change.removed}</span>
                   </button>

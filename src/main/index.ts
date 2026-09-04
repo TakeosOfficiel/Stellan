@@ -5,7 +5,7 @@ import { cp, lstat, mkdir, rm, statfs } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
-import type { ModelPullProgress, OllamaStatus, RuntimeProgress } from '../shared/contracts'
+import type { ChatMessage, ModelPullProgress, OllamaStatus, RuntimeProgress } from '../shared/contracts'
 import { compactConversation, normalizeWorkerPath, runCodingAgent, type AgentToolLifecycleEvent, type WorkerTask } from './agent'
 import { runAdvisor } from './advisor'
 import {
@@ -211,6 +211,7 @@ let activeDownloadPromise: Promise<Awaited<ReturnType<typeof pullOllamaModel>>> 
 let dictationActive = false
 const activeChats = new Map<string, AbortController>()
 const activeThreadChats = new Map<string, string>()
+const pendingSteering = new Map<string, ChatMessage[]>()
 const workerScheduler = new WorkerScheduler()
 const activeThreadOwners = new Map<number, string>()
 const approvedProjectPaths = new Map<string, 'git' | 'folder'>()
@@ -670,6 +671,11 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           assistantContent += content
           sendChatEvent(run, { type: 'content', content })
         }
+        const consumeSteering = (): ChatMessage[] => {
+          const messages = pendingSteering.get(run.requestId) ?? []
+          pendingSteering.delete(run.requestId)
+          return messages
+        }
         const onToolEvent = async (toolEvent: AgentToolLifecycleEvent): Promise<void> => {
           const currentStore = getThreadStore()
           if (toolEvent.type === 'started') {
@@ -715,6 +721,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             onTool: () => undefined,
             onInferenceLog: writeInferenceLog,
             onToolEvent,
+            consumeSteering,
             runCommand: createWorkerCommandExecutor(profile, thread.id, executionPath, git),
             isGitRepository: git !== null,
             readTodos: () => getThreadStore().listTodos(thread.id),
@@ -887,6 +894,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             onTool: () => undefined,
             onInferenceLog: writeInferenceLog,
             onToolEvent,
+            consumeSteering,
             authorize: async () => !controller.signal.aborted,
             isGitRepository: false,
             readTodos: () => getThreadStore().listTodos(thread.id),
@@ -919,6 +927,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
         sendChatEvent(run, { type: 'error', reason })
       } finally {
         activeChats.delete(run.requestId)
+        pendingSteering.delete(run.requestId)
         if (activeThreadChats.get(thread.id) === run.requestId) activeThreadChats.delete(thread.id)
       }
     }
@@ -1760,11 +1769,20 @@ app.whenReady().then(() => {
     if (activeRun && store.getThread(activeRun.threadId)?.parentThreadId) {
       throw new Error('La file d’attente d’un worker est gérée automatiquement.')
     }
+    const queuedRun = store.listActiveAgentRuns().find((candidate) => candidate.requestId === requestId)
+    if (!queuedRun) throw new Error('Ce message n’est plus en attente.')
+    const activeRequestId = activeThreadChats.get(queuedRun.threadId)
+    if (activeRequestId && activeRequestId !== requestId) {
+      const message = store.steerQueuedAgentRun(requestId, activeRequestId)
+      workerScheduler.removeQueued(requestId)
+      pendingSteering.set(activeRequestId, [...(pendingSteering.get(activeRequestId) ?? []), message])
+      const activeRun = store.listActiveAgentRuns().find((candidate) => candidate.requestId === activeRequestId)
+      if (activeRun) sendChatEvent(activeRun, { type: 'progress', detail: 'Instruction ajoutée à l’exécution en cours…', percent: null })
+      return
+    }
     const run = store.prioritizeQueuedAgentRun(requestId)
     if (!workerScheduler.has(requestId)) await scheduleAgentRun(run)
     workerScheduler.prioritize(requestId)
-    const activeRequestId = activeThreadChats.get(run.threadId)
-    if (activeRequestId && activeRequestId !== requestId) activeChats.get(activeRequestId)?.abort()
   })
   createWindow()
 

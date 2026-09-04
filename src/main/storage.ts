@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import type { OllamaMessage, OllamaToolCall } from './ollama'
-import { MODEL_SELECTION_MESSAGE_PREFIX, type ChatImage } from '../shared/contracts'
+import { MODEL_SELECTION_MESSAGE_PREFIX, type ChatImage, type ChatMessage } from '../shared/contracts'
 
 export type Thread = {
   id: string
@@ -1008,6 +1008,42 @@ export class ThreadStore {
     this.database.prepare('UPDATE agent_runs SET priority = ? WHERE id = ? AND status = \'queued\'')
       .run(Number(row?.priority ?? 1), run.id)
     return this.getAgentRun(run.id) as AgentRun
+  }
+
+  steerQueuedAgentRun(requestId: string, activeRequestId: string): ChatMessage {
+    this.assertOpen()
+    const queued = this.getAgentRunByRequestId(requestId)
+    const active = this.getAgentRunByRequestId(activeRequestId)
+    if (!queued || queued.status !== 'queued') throw new Error('Ce message n’est plus en attente.')
+    if (!active || active.status !== 'running' || active.threadId !== queued.threadId) {
+      throw new Error('Aucune exécution active ne peut recevoir ce message.')
+    }
+    const queuedMessage = this.database.prepare(`
+      SELECT content, images_json FROM messages WHERE id = ? AND thread_id = ?
+    `).get(queued.userMessageId, queued.threadId)
+    const activeMessage = this.database.prepare(`
+      SELECT content, images_json FROM messages WHERE id = ? AND thread_id = ?
+    `).get(active.userMessageId, active.threadId)
+    if (!queuedMessage || !activeMessage) throw new Error('Le message à injecter est introuvable.')
+    const content = String(queuedMessage.content)
+    const images = JSON.parse(String(queuedMessage.images_json ?? '[]')) as ChatImage[]
+    const activeImages = JSON.parse(String(activeMessage.images_json ?? '[]')) as ChatImage[]
+    const mergedContent = `${String(activeMessage.content)}\n\n[Instruction ajoutée pendant l’exécution]\n${content}`
+    const finishedAt = new Date().toISOString()
+
+    this.database.exec('BEGIN')
+    try {
+      this.database.prepare('UPDATE messages SET content = ?, images_json = ? WHERE id = ?')
+        .run(mergedContent, JSON.stringify([...activeImages, ...images]), active.userMessageId)
+      this.database.prepare('DELETE FROM agent_runs WHERE id = ? AND status = \'queued\'').run(queued.id)
+      this.database.prepare('DELETE FROM messages WHERE id = ?').run(queued.userMessageId)
+      this.database.prepare('UPDATE threads SET updated_at = ? WHERE id = ?').run(finishedAt, queued.threadId)
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+    return { role: 'user', content, images }
   }
 
   recordToolStarted(

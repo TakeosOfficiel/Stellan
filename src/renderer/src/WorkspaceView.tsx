@@ -1778,9 +1778,14 @@ export function WorkspaceView({
       {visitedWorkbenchThreads.map((threadId) => {
         const workbenchThread = threads.find((thread) => thread.id === threadId)
         if (!workbenchThread) return null
-        const refreshKey = (runHistoryByThread[threadId] ?? [])
+        const runRefreshKey = (runHistoryByThread[threadId] ?? [])
           .map((run) => `${run.requestId}:${run.status}:${run.finishedAt ?? ''}`)
           .join('|')
+        const fileRefreshKey = (toolsByThread[threadId] ?? [])
+          .filter((activity) => ['write_file', 'edit_file', 'delete_file', 'undo_edit'].includes(activity.tool) && activity.status === 'done')
+          .map((activity) => `${activity.id}:${activity.output ?? ''}`)
+          .join('|')
+        const refreshKey = `${runRefreshKey}|${fileRefreshKey}`
         return (
           <WorkbenchPanel
             key={threadId}

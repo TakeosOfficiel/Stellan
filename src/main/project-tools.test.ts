@@ -3,7 +3,17 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { ProjectTools } from './project-tools'
+import { parseGitStatus, ProjectTools } from './project-tools'
+
+describe('parseGitStatus', () => {
+  it('separates paths when a Windows runtime replaces NUL bytes', () => {
+    expect(parseGitStatus('?? app.js\uFFFD?? index.html\uFFFD?? styles.css\uFFFD')).toEqual([
+      { path: 'app.js', kind: 'added' },
+      { path: 'index.html', kind: 'added' },
+      { path: 'styles.css', kind: 'added' }
+    ])
+  })
+})
 
 describe('ProjectTools', () => {
   let project: string

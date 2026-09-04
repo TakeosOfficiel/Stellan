@@ -26,7 +26,10 @@ export type FileWriteResult = {
 
 export function parseGitStatus(status: string): Array<Pick<ProjectChange, 'path' | 'kind'>> {
   const entries: Array<Pick<ProjectChange, 'path' | 'kind'>> = []
-  const tokens = status.split('\0')
+  // Docker output normally preserves NUL separators. Some Windows runtime
+  // transports replace them with U+FFFD, so accept both forms instead of
+  // displaying every changed path as one concatenated filename.
+  const tokens = status.split(/\0|\uFFFD|\r?\n/)
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
     if (!token || token.length < 4) continue

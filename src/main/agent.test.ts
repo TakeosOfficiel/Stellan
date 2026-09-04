@@ -306,12 +306,11 @@ describe('runCodingAgent', () => {
     const project = await ProjectTools.create(projectPath)
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(streamResponse([{
-        message: { tool_calls: [{
-          function: {
-            name: 'write_file',
-            arguments: { path: 'index.html', content: '<h1>Jeu du pendu</h1>\n' }
-          }
-        }] },
+        message: { tool_calls: [
+          { function: { name: 'write_file', arguments: { path: 'index.html', content: '<link rel="stylesheet" href="style.css"><h1>Jeu du pendu</h1><script src="script.js"></script>\n' } } },
+          { function: { name: 'write_file', arguments: { path: 'style.css', content: 'body { color: green; }\n' } } },
+          { function: { name: 'write_file', arguments: { path: 'script.js', content: 'console.log("ready")\n' } } }
+        ] },
         done: true
       }]))
       .mockResolvedValueOnce(streamResponse([{
@@ -341,7 +340,8 @@ describe('runCodingAgent', () => {
     expect(toolNames).not.toContain('activity_action')
     expect(startActivity).not.toHaveBeenCalled()
     expect(applyActivity).not.toHaveBeenCalled()
-    await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toBe('<h1>Jeu du pendu</h1>\n')
+    await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toContain('assets/css/style.css')
+    await expect(readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).resolves.toContain('ready')
   })
 
   it('explains hangman rules without starting or continuing the activity', async () => {
@@ -577,12 +577,11 @@ describe('runCodingAgent', () => {
     const project = await ProjectTools.create(projectPath)
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(streamResponse([{
-        message: { tool_calls: [{
-          function: {
-            name: 'write_file',
-            arguments: { path: 'index.html', content: '<h1>Pendu</h1>\n' }
-          }
-        }] },
+        message: { tool_calls: [
+          { function: { name: 'write_file', arguments: { path: 'index.html', content: '<link rel="stylesheet" href="style.css"><h1>Pendu</h1><script src="script.js"></script>\n' } } },
+          { function: { name: 'write_file', arguments: { path: 'style.css', content: 'body { color: green; }\n' } } },
+          { function: { name: 'write_file', arguments: { path: 'script.js', content: 'console.log("ready")\n' } } }
+        ] },
         done: true
       }]))
       .mockResolvedValueOnce(streamResponse([{
@@ -985,6 +984,35 @@ describe('runCodingAgent', () => {
     expect(onContent).toHaveBeenCalledWith('Voici le résultat final.')
   })
 
+  it('inserts a steering message at the next inference boundary without publishing the stale answer', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Je vais utiliser un thème clair.' }, done: true }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Je poursuis avec le thème sombre demandé.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const onContent = vi.fn()
+    const consumeSteering = vi.fn()
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([{ role: 'user', content: 'Utilise plutôt un thème sombre.' }])
+      .mockReturnValue([])
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Prépare le design.' }],
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      consumeSteering,
+      intentClassification: { intent: 'code', clear: false, source: 'model', reason: 'model-classification' }
+    })
+
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Instruction ajoutée pendant l’exécution')
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Utilise plutôt un thème sombre.')
+    expect(onContent).not.toHaveBeenCalledWith(expect.stringContaining('thème clair'))
+    expect(onContent).toHaveBeenCalledWith('Je poursuis avec le thème sombre demandé.')
+  })
+
   it('forces a tool retry when a model only pastes code for a requested file change', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
@@ -1022,6 +1050,46 @@ describe('runCodingAgent', () => {
     await expect(readFile(join(projectPath, 'js/script.js'), 'utf8')).resolves.toBe('console.log("ready")\n')
   })
 
+  it('does not let negative feedback on the current site end with invented file changes', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    await writeFile(join(projectPath, 'index.html'), '<h1>Boutique</h1>\n')
+    await writeFile(join(projectPath, 'styles.css'), 'body { color: black; }\n')
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: 'J’ai amélioré index.html et styles.css avec un design moderne.' },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: '<stellan_file path="styles.css">\nbody { color: white; background: #111; }\n</stellan_file>' },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le style a réellement été amélioré.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:4b',
+      messages: [
+        { role: 'assistant', content: 'J’ai créé index.html et styles.css pour le site.' },
+        { role: 'user', content: 'Le site est moche !' }
+      ],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      intentClassification: { intent: 'code', clear: false, source: 'model', reason: 'model-classification' }
+    })
+
+    const initialRequest = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))
+    expect(initialRequest.tools.some((tool: { function: { name: string } }) => tool.function.name === 'write_file')).toBe(true)
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('proposer du code sans modifier le projet')
+    await expect(readFile(join(projectPath, 'styles.css'), 'utf8')).resolves.toContain('background: #111')
+    expect(onContent).toHaveBeenCalledWith('Le style a réellement été amélioré.')
+  })
+
   it('does not finish until every explicitly separated web file has been written', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
@@ -1049,9 +1117,9 @@ describe('runCodingAgent', () => {
       authorize: vi.fn().mockResolvedValue(true)
     })
 
-    expect(String(fetcher.mock.calls[2]?.[1]?.body)).toContain('il manque encore : CSS, JavaScript')
-    await expect(readFile(join(projectPath, 'styles.css'), 'utf8')).resolves.toContain('green')
-    await expect(readFile(join(projectPath, 'script.js'), 'utf8')).resolves.toContain('ready')
+    expect(String(fetcher.mock.calls[2]?.[1]?.body)).toContain('contrôle déterministe du site')
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('green')
+    await expect(readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).resolves.toContain('ready')
     expect(onContent).toHaveBeenCalledWith('Les trois fichiers sont créés.')
   })
 
@@ -1086,7 +1154,7 @@ describe('runCodingAgent', () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(streamResponse([{ message: { content: 'Voici le code de la page.' }, done: true }]))
       .mockResolvedValueOnce(streamResponse([{
-        message: { content: '<stellan_file path="index.html">\n<h1>Minecraft</h1>\n</stellan_file>\n<stellan_file path="css/styles.css">\nbody { color: #62c462; }\n</stellan_file>' },
+        message: { content: '<stellan_file path="index.html">\n<link rel="stylesheet" href="style.css"><h1>Minecraft</h1><script src="script.js"></script>\n</stellan_file>\n<stellan_file path="css/styles.css">\nbody { color: #62c462; }\n</stellan_file>\n<stellan_file path="script.js">\nconsole.log("ready")\n</stellan_file>' },
         done: true
       }]))
       .mockResolvedValueOnce(streamResponse([{ message: { content: 'La page Minecraft a été créée.' }, done: true }]))
@@ -1104,10 +1172,11 @@ describe('runCodingAgent', () => {
       authorize
     })
 
-    expect(authorize).toHaveBeenCalledTimes(2)
+    expect(authorize).toHaveBeenCalledTimes(3)
     expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('<stellan_file path=')
-    expect(await readFile(join(projectPath, 'index.html'), 'utf8')).toBe('<h1>Minecraft</h1>\n')
-    expect(await readFile(join(projectPath, 'css/styles.css'), 'utf8')).toBe('body { color: #62c462; }\n')
+    expect(await readFile(join(projectPath, 'index.html'), 'utf8')).toContain('assets/css/style.css')
+    expect(await readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).toBe('body { color: #62c462; }\n')
+    expect(await readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).toContain('ready')
     expect(onContent).toHaveBeenCalledWith('La page Minecraft a été créée.')
   })
 
@@ -1170,7 +1239,7 @@ describe('runCodingAgent', () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(streamResponse([{ error: 'XML syntax error on line 100: element <function> closed by </parameter>', done: true }]))
       .mockResolvedValueOnce(streamResponse([{
-        message: { content: '<stellan_file path="index.html">\n<h1>Bonjour</h1>\n</stellan_file>' },
+        message: { content: '<stellan_file path="index.html">\n<link rel="stylesheet" href="style.css"><h1>Bonjour</h1><script src="script.js"></script>\n</stellan_file>\n<stellan_file path="style.css">\nbody{}\n</stellan_file>\n<stellan_file path="script.js">\nconsole.log("ready")\n</stellan_file>' },
         done: true
       }]))
       .mockResolvedValueOnce(streamResponse([{ message: { content: 'La page a été créée.' }, done: true }]))
@@ -1186,7 +1255,7 @@ describe('runCodingAgent', () => {
       authorize: vi.fn().mockResolvedValue(true)
     })
 
-    expect(await readFile(join(projectPath, 'index.html'), 'utf8')).toBe('<h1>Bonjour</h1>\n')
+    expect(await readFile(join(projectPath, 'index.html'), 'utf8')).toContain('assets/js/game.js')
     expect(fetcher).toHaveBeenCalledTimes(3)
     const recoveryRequest = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))
     expect(recoveryRequest.tools).toBeUndefined()
@@ -1797,6 +1866,7 @@ describe('runCodingAgent', () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
     const project = await ProjectTools.create(projectPath)
+    await writeFile(join(projectPath, 'README.md'), '# Projet existant\n')
     const malformedTasks = [
       { title: 'Site', instructions: 'Crée la page.', files: ['index.html'] },
       { title: 'Workers locaux', instructions: 'Crée d’autres workers.', files: [] }
@@ -1970,9 +2040,78 @@ describe('runCodingAgent', () => {
 
     expect(spawnWorkers).not.toHaveBeenCalled()
     expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Ne crée aucun worker')
-    await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toContain('assets/style.css')
-    await expect(readFile(join(projectPath, 'assets/style.css'), 'utf8')).resolves.toContain('green')
-    await expect(readFile(join(projectPath, 'assets/script.js'), 'utf8')).resolves.toContain('ready')
+    await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toContain('assets/css/style.css')
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('green')
+    await expect(readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).resolves.toContain('ready')
+  })
+
+  it('repairs JavaScript references that do not exist in the generated HTML before declaring success', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [
+          { function: { name: 'write_file', arguments: { path: 'page.html', content: '<link rel="stylesheet" href="style.css"><button>Miner</button><script src="script.js"></script>' } } },
+          { function: { name: 'write_file', arguments: { path: 'style.css', content: 'button { color: green; }' } } },
+          { function: { name: 'write_file', arguments: { path: 'script.js', content: 'document.getElementById("mine").addEventListener("click", () => {})' } } }
+        ] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le site est terminé.' }, done: true }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{
+          function: { name: 'write_file', arguments: { path: 'index.html', content: '<link rel="stylesheet" href="assets/css/style.css"><button id="mine">Miner</button><script src="assets/js/game.js"></script>' } }
+        }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le site cohérent est prêt.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:4b',
+      messages: [{ role: 'user', content: 'Crée-moi un site web de minage.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true)
+    })
+
+    expect(String(fetcher.mock.calls[2]?.[1]?.body)).toContain('identifiants HTML utilisés par le JavaScript sont absents : mine')
+    await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toContain('id="mine"')
+    expect(onContent).toHaveBeenCalledWith('Le site cohérent est prêt.')
+  })
+
+  it('does not impose the static-site tree on an existing project', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    await writeFile(join(projectPath, 'package.json'), '{"scripts":{}}\n')
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{
+          function: { name: 'write_file', arguments: { path: 'public/index.html', content: '<h1>Projet existant</h1>' } }
+        }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'La page du projet existant est prête.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Crée une page web dans ce site existant.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true)
+    })
+
+    await expect(readFile(join(projectPath, 'public/index.html'), 'utf8')).resolves.toContain('Projet existant')
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).rejects.toThrow()
+    expect(String(fetcher.mock.calls[0]?.[1]?.body)).not.toContain('CONTRAT DU NOUVEAU SITE STATIQUE')
   })
 
   it('lets the coordinator inspect an empty project before creating workers', async () => {
@@ -1983,11 +2122,20 @@ describe('runCodingAgent', () => {
       { title: 'HTML', instructions: 'Crée la structure.', files: ['index.html'] },
       { title: 'CSS et JS', instructions: 'Crée la présentation.', files: ['css/styles.css', 'js/script.js'] }
     ]
-    const spawnWorkers = vi.fn().mockResolvedValue(tasks.map((task) => ({
-      ...task,
-      summary: 'Terminé',
-      status: 'done' as const
-    })))
+    const normalizedTasks = [
+      { ...tasks[0], files: ['index.html'] },
+      { ...tasks[1], files: ['assets/css/style.css', 'assets/js/game.js'] }
+    ]
+    const spawnWorkers = vi.fn(async (workerTasks: WorkerTask[]) => {
+      await project.writeFile('index.html', '<link rel="stylesheet" href="assets/css/style.css"><script src="assets/js/game.js"></script>')
+      await project.writeFile('assets/css/style.css', 'body{}')
+      await project.writeFile('assets/js/game.js', 'console.log("ready")')
+      return workerTasks.map((task) => ({
+        ...task,
+        summary: 'Terminé',
+        status: 'done' as const
+      }))
+    })
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(streamResponse([{
         message: { tool_calls: [{ function: { name: 'list_files', arguments: {} } }] },
@@ -2011,7 +2159,7 @@ describe('runCodingAgent', () => {
       spawnWorkers
     })
 
-    expect(spawnWorkers).toHaveBeenCalledWith(tasks)
+    expect(spawnWorkers).toHaveBeenCalledWith(normalizedTasks)
     const planningRequest = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))
     expect(planningRequest.messages).toContainEqual(expect.objectContaining({
       role: 'tool',

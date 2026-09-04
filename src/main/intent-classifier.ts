@@ -69,6 +69,8 @@ export function classifyIntentByRule(
   activityContext?: string | null
 ): IntentClassification | null {
   const request = normalizedLatestRequest(messages)
+  const previousAssistant = [...messages].reverse().find((message) => message.role === 'assistant')?.content
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase() ?? ''
   if (!request) return { intent: 'discussion', clear: true, source: 'rule', reason: 'empty-request' }
   if (requestsSoftwareArtifact(messages)) {
     return { intent: 'code', clear: true, source: 'rule', reason: 'explicit-software-artifact' }
@@ -92,8 +94,6 @@ export function classifyIntentByRule(
   if (activityContext?.includes('"engineId":"hangman"') && activeActivityAction(request)) {
     return { intent: 'activity', clear: true, source: 'rule', reason: 'active-activity-action', activityEngine: 'hangman' }
   }
-  const previousAssistant = [...messages].reverse().find((message) => message.role === 'assistant')?.content
-    .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase() ?? ''
   if (/^(?:oui|yes|confirme|je confirme|vas[- ]?y|go)[\s.!]*$/.test(request)
     && /\b(?:supprime|supprimer|delete|suppression)\b/.test(previousAssistant)) {
     return { intent: 'code', clear: true, source: 'rule', reason: 'confirmed-destructive-action' }
@@ -132,7 +132,7 @@ export async function classifyIntent(options: ClassifyIntentOptions): Promise<In
       [
         {
           role: 'system',
-          content: 'Classe uniquement la dernière demande. CODE = travailler sur un logiciel ou ses fichiers. ACTIVITE = jouer ou poursuivre une activité à état. DISCUSSION = répondre ou expliquer sans agir sur le projet. Réponds par exactement un mot : CODE, ACTIVITE ou DISCUSSION.'
+          content: 'Classe uniquement la dernière demande avec son contexte immédiat. CODE = travailler sur un logiciel ou ses fichiers, y compris critiquer, corriger ou demander implicitement de reprendre le résultat logiciel précédent sans employer un verbe d’action. ACTIVITE = jouer ou poursuivre une activité à état. DISCUSSION = répondre ou expliquer sans agir sur le projet. Réponds par exactement un mot : CODE, ACTIVITE ou DISCUSSION.'
         },
         { role: 'user', content: classificationTranscript(options.messages) }
       ],

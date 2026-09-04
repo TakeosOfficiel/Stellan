@@ -353,6 +353,30 @@ describe('ThreadStore', () => {
     }
   })
 
+  it('merges a queued steering message into the active request without creating a second run', () => {
+    const store = new ThreadStore(temporaryDatabase())
+    try {
+      const thread = store.createThread({ title: 'Steering' })
+      const active = store.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Crée le site')
+      store.markAgentRunRunning(active.id)
+      const queued = store.startAgentRun(thread.id, crypto.randomUUID(), 'local-model', 'Utilise plutôt un thème sombre')
+
+      expect(store.steerQueuedAgentRun(queued.requestId, active.requestId)).toEqual({
+        role: 'user',
+        content: 'Utilise plutôt un thème sombre',
+        images: []
+      })
+      expect(store.listQueuedAgentRuns()).toEqual([])
+      expect(store.listAgentRuns(thread.id)).toHaveLength(1)
+      expect(store.listPromptMessages(thread.id, active.userMessageId)).toEqual([{
+        role: 'user',
+        content: 'Crée le site\n\n[Instruction ajoutée pendant l’exécution]\nUtilise plutôt un thème sombre'
+      }])
+    } finally {
+      store.close()
+    }
+  })
+
   it('enforces fail-closed environment state transitions', () => {
     const store = new ThreadStore(temporaryDatabase())
     try {

@@ -846,6 +846,9 @@ body.resizing-workbench { cursor: col-resize; user-select: none; }
 .changes-toolbar button:hover, .changes-toolbar button.active { color: #d6ded8 !important; background: #1a211d !important; }
 .changes-toolbar button.icon-button { width: 28px; padding: 0 !important; justify-content: center; }
 .workbench-pane > small { color: #68736c; font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
+.change-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 2px 1px 10px; }
+.change-section-heading strong { color: #819087; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
+.change-section-heading small { color: #59645d; font-size: 8px; text-transform: uppercase; letter-spacing: .06em; }
 .workbench-empty, .workbench-zero {
   display: grid; place-items: center; align-content: center; height: 100%; padding: 28px; color: #6c776f; text-align: center;
 }
@@ -858,7 +861,7 @@ body.resizing-workbench { cursor: col-resize; user-select: none; }
 .workbench-empty button { padding: 8px 11px; color: #172019; background: #d9e7dc; font-size: 9px; }
 .workbench-zero { min-height: 260px; }
 .workbench-zero p { margin: 0; font-size: 10px; }
-.change-list { display: grid; gap: 5px; margin-top: 12px; }
+.change-list { display: grid; gap: 3px; }
 .change-list article { overflow: hidden; border: 1px solid #29312c; border-radius: 6px; background: #131814; }
 .change-list button {
   display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px;
@@ -867,9 +870,15 @@ body.resizing-workbench { cursor: col-resize; user-select: none; }
 .change-list button:hover { background: #18201b; }
 .change-list button > svg { width: 12px; height: 12px; transition: transform 120ms ease; }
 .change-list button > svg.expanded { transform: rotate(90deg); }
-.change-list code { overflow: hidden; font: 9px ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.change-path { display: flex; align-items: baseline; gap: 7px; min-width: 0; overflow: hidden; }
+.change-list .change-path code { overflow: hidden; color: #c9d3cc; font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.change-list .change-path small { overflow: hidden; color: #68746d; font: 8px ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .change-list button small { color: #758078; font-size: 8px; }
 .change-list button span { font: 9px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.change-kind { display: grid; place-items: center; width: 17px; height: 17px; border: 1px solid #566159; border-radius: 4px; color: #a7b2aa !important; font: 8px ui-monospace, SFMono-Regular, Consolas, monospace !important; }
+.change-kind.added { border-color: #25895c; color: #57d795 !important; }
+.change-kind.deleted { border-color: #904747; color: #e48585 !important; }
+.change-kind.renamed { border-color: #786935; color: #d7bd67 !important; }
 .change-added { color: #43c989; }
 .change-removed { color: #df7777; }
 .change-list article > pre {

@@ -45,6 +45,8 @@ ssh "${ssh_options[@]}" "$STELLAN_UPDATE_SSH" "set -eu
   mv -Tf '$STELLAN_UPDATE_ROOT/linux/.Stellan-Linux-x86_64.AppImage.next' '$STELLAN_UPDATE_ROOT/linux/Stellan-Linux-x86_64.AppImage'
   mv '$remote_staging/windows/latest.yml' '$STELLAN_UPDATE_ROOT/windows/latest.yml'
   mv '$remote_staging/linux/latest-linux.yml' '$STELLAN_UPDATE_ROOT/linux/latest-linux.yml'
+  find '$STELLAN_UPDATE_ROOT/windows' -maxdepth 1 -type f -name 'Stellan-*-win-x64.exe*' ! -name 'Stellan-${version}-win-x64.exe' ! -name 'Stellan-${version}-win-x64.exe.blockmap' -delete
+  find '$STELLAN_UPDATE_ROOT/linux' -maxdepth 1 -type f -name 'Stellan-*-linux-x86_64.AppImage' ! -name 'Stellan-${version}-linux-x86_64.AppImage' -delete
   rm -rf '$remote_staging'"
 
 echo "Stellan ${version} publié sur https://update.stellan.takeos.fr"
