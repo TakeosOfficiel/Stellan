@@ -34,7 +34,7 @@ describe('budget reliable engine', () => {
   it('uses the unchanged generic service to track exact amounts', () => {
     const { store, service, threadId } = setup()
     try {
-      expect(createReliableEngineRegistry().ids()).toEqual(['hangman', 'budget'])
+      expect(createReliableEngineRegistry().ids()).toEqual(['hangman', 'budget', 'neither-yes-nor-no'])
       expect(service.start(threadId, 'budget', { limitCents: 10_000, currency: 'eur' })).toMatchObject({
         ok: true,
         engineId: 'budget',

@@ -196,7 +196,8 @@ export async function detectContainerRuntime(
   runner: CommandRunner = runCommand
 ): Promise<ContainerRuntime | null> {
   for (const runtime of ['docker', 'podman'] as const) {
-    const result = await runner(runtime, ['info', '--format', '{{.Version}}'], {
+    const versionTemplate = runtime === 'docker' ? '{{.ServerVersion}}' : '{{.Version.Version}}'
+    const result = await runner(runtime, ['info', '--format', versionTemplate], {
       timeoutMs: 5_000
     })
     if (result.exitCode === 0 && !result.timedOut) return runtime
@@ -220,8 +221,8 @@ export async function getRuntimeInfo(
 ): Promise<RuntimeInfo> {
   const [git, docker, podman] = await Promise.all([
     inspectTool('git', ['--version'], runner),
-    inspectTool('docker', ['info', '--format', '{{.Version}}'], runner),
-    inspectTool('podman', ['info', '--format', '{{.Version}}'], runner)
+    inspectTool('docker', ['info', '--format', '{{.ServerVersion}}'], runner),
+    inspectTool('podman', ['info', '--format', '{{.Version.Version}}'], runner)
   ])
 
   return {

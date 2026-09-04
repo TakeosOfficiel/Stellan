@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { createBudgetEngine } from './activity-engines/budget'
+import { createDeclarativeEngine } from './activity-engines/declarative'
 import { createHangmanEngine } from './activity-engines/hangman'
+import neitherYesNorNo from './activity-engines/neither-yes-nor-no.json'
 import type { ThreadStore } from './storage'
 
 export const MAX_PUBLIC_VIEW_BYTES = 8 * 1024
@@ -123,6 +125,7 @@ export class ReliableActivityService {
         ? this.store.getReliableActivity(activityId)
         : this.store.getActiveReliableActivity(threadId)
       if (!activity || activity.threadId !== threadId) return safeError('ACTIVITY_NOT_FOUND', 'Aucune activité correspondante n’est active.', true)
+      if (activity.status !== 'active') return safeError('ACTIVITY_COMPLETED', 'Cette activité est déjà terminée.', false)
       const engine = this.registry.get(activity.engineId)
       if (!engine) return safeError('UNKNOWN_ACTIVITY', 'Le moteur de cette activité n’est plus disponible.', false)
       const parsedAction = engine.actionSchema.safeParse(action)
@@ -189,5 +192,6 @@ export function createReliableEngineRegistry(): ReliableEngineRegistry {
   const registry = new ReliableEngineRegistry()
   registry.register(createHangmanEngine())
   registry.register(createBudgetEngine())
+  registry.register(createDeclarativeEngine(neitherYesNorNo))
   return registry
 }

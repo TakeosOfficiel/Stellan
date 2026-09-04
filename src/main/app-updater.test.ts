@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const updateDirectory = path.join(tmpdir(), `stellan-updater-test-${process.pid}`)
 
 const mocks = vi.hoisted(() => {
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
@@ -22,14 +27,18 @@ const mocks = vi.hoisted(() => {
 })
 
 vi.mock('electron', () => ({
-  app: { isPackaged: true, getVersion: () => '0.1.2' }
+  app: { isPackaged: true, getVersion: () => '0.1.2', getPath: () => updateDirectory }
 }))
 vi.mock('electron-updater', () => ({ default: { autoUpdater: mocks.updater } }))
 
 const { getUpdateState, isInstallingUpdate, startMandatoryUpdate } = await import('./app-updater')
 
 describe('mandatory application updater', () => {
-  beforeEach(() => vi.useFakeTimers())
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mkdirSync(updateDirectory, { recursive: true })
+  })
+  afterEach(() => rmSync(updateDirectory, { recursive: true, force: true }))
 
   it('uses the platform VPS channel, downloads automatically and forces restart', async () => {
     const ready = startMandatoryUpdate()
@@ -48,7 +57,10 @@ describe('mandatory application updater', () => {
     mocks.emit('update-downloaded', { version: '0.1.2' })
     await expect(ready).resolves.toBe(false)
     expect(isInstallingUpdate()).toBe(true)
-    await vi.advanceTimersByTimeAsync(250)
+    expect(existsSync(path.join(updateDirectory, 'pending-update-restart.json'))).toBe(true)
+    await vi.advanceTimersByTimeAsync(899)
+    expect(mocks.updater.quitAndInstall).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
     expect(mocks.updater.quitAndInstall).toHaveBeenCalledWith(true, true)
   })
 })

@@ -41,6 +41,7 @@ import type {
   OllamaStatus,
   ProjectSelection,
   ProjectResourceSettings,
+  StoredToolActivity,
   StoredThread
 } from '../../shared/contracts'
 import { MODEL_SELECTION_MESSAGE_PREFIX } from '../../shared/contracts'
@@ -63,13 +64,8 @@ type WorkspaceViewProps = {
   onOpenSetup: () => void
 }
 
-type ToolActivity = {
+type ToolActivity = Omit<StoredToolActivity, 'callId'> & {
   id: string
-  requestId: string
-  tool: string
-  status: 'running' | 'done' | 'denied' | 'error'
-  input: string | null
-  output: string | null
   expanded: boolean
 }
 
@@ -119,7 +115,7 @@ const TOOL_LABELS: Record<string, string> = {
   todo_write: 'Mise à jour du plan',
   activity_start: 'Démarrage de l’activité',
   activity_action: 'Action vérifiée',
-  consult_advisor: 'Conseiller local',
+  consult_advisor: 'Conseiller expert',
   run_command: 'Commande locale',
   git_status: 'Statut Git',
   git_diff: 'Diff Git'
@@ -131,6 +127,44 @@ function parsedToolValue(value: string | null): unknown {
     return JSON.parse(value)
   } catch {
     return value
+  }
+}
+
+type AdvisorActivityData = {
+  question: string
+  model: string
+  advice: string
+  trace: Array<{ tool: string; label: string; status: 'done' | 'error'; summary: string }>
+}
+
+function advisorQuestion(activity: ToolActivity): string {
+  const input = parsedToolValue(activity.input)
+  return input && typeof input === 'object' && !Array.isArray(input) && typeof (input as Record<string, unknown>).question === 'string'
+    ? String((input as Record<string, unknown>).question)
+    : ''
+}
+
+function advisorActivityData(activity: ToolActivity): AdvisorActivityData | null {
+  const output = parsedToolValue(activity.output)
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return null
+  const result = output as Record<string, unknown>
+  if (typeof result.model !== 'string' || typeof result.advice !== 'string' || !Array.isArray(result.trace)) return null
+  const trace = result.trace.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+    const item = entry as Record<string, unknown>
+    if (typeof item.tool !== 'string' || typeof item.label !== 'string' || typeof item.summary !== 'string') return []
+    return [{
+      tool: item.tool,
+      label: item.label,
+      status: item.status === 'error' ? 'error' as const : 'done' as const,
+      summary: item.summary
+    }]
+  })
+  return {
+    question: advisorQuestion(activity),
+    model: result.model,
+    advice: result.advice,
+    trace
   }
 }
 
@@ -160,7 +194,10 @@ function toolActivityLabel(activity: ToolActivity): React.JSX.Element {
     const failed = output && typeof output === 'object' && 'ok' in output && output.ok === false
     return <>{running ? 'Vérification de l’action…' : failed ? 'Action refusée par le moteur' : 'Action vérifiée par le moteur'}</>
   }
-  if (activity.tool === 'consult_advisor') return <>{running ? 'Consultation d’un autre modèle…' : 'Conseiller consulté'}</>
+  if (activity.tool === 'consult_advisor') {
+    const advisor = advisorActivityData(activity)
+    return <>{running ? 'Le conseiller expert enquête…' : `Conseiller consulté${advisor?.trace.length ? ` · ${advisor.trace.length} vérification${advisor.trace.length > 1 ? 's' : ''}` : ''}`}</>
+  }
   if (activity.tool === 'delete_file') return <>{running ? 'Suppression de ' : 'Supprimé '}<code>{path}</code>{running ? '…' : ''}</>
   if (activity.tool === 'run_command') {
     const command = [input?.command, ...(Array.isArray(input?.args) ? input.args : [])].filter((part) => typeof part === 'string').join(' ')
@@ -217,6 +254,56 @@ function MarkdownMessage({ content }: { content: string }): React.JSX.Element {
           a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />
         }}
       >{content}</ReactMarkdown>
+    </div>
+  )
+}
+
+function AdvisorActivityDetails({ data }: { data: AdvisorActivityData }): React.JSX.Element {
+  return (
+    <div className="tool-activity-details advisor-details">
+      {data.question && (
+        <section className="advisor-question">
+          <strong>Question confiée</strong>
+          <p>{data.question}</p>
+        </section>
+      )}
+      <section>
+        <strong>Recherches effectuées</strong>
+        {data.trace.length > 0 ? (
+          <ol className="advisor-trace">
+            {data.trace.map((entry, index) => (
+              <li className={entry.status} key={`${entry.tool}:${entry.label}:${index}`}>
+                <span className="advisor-trace-icon" aria-hidden="true">
+                  {entry.status === 'done' ? <Check /> : <X />}
+                </span>
+                <span>
+                  <b>{entry.label}</b>
+                  <small>{entry.summary}</small>
+                </span>
+              </li>
+            ))}
+          </ol>
+        ) : <p className="advisor-empty">Avis produit sans consultation de fichier.</p>}
+      </section>
+      <section className="advisor-advice">
+        <strong>Avis du conseiller</strong>
+        <MarkdownMessage content={data.advice} />
+      </section>
+      <footer><LockKeyhole aria-hidden="true" /> Lecture seule · {data.model}</footer>
+    </div>
+  )
+}
+
+function AdvisorPendingDetails({ question }: { question: string }): React.JSX.Element {
+  return (
+    <div className="tool-activity-details advisor-details">
+      {question && (
+        <section className="advisor-question">
+          <strong>Question confiée</strong>
+          <p>{question}</p>
+        </section>
+      )}
+      <div className="advisor-pending"><span aria-hidden="true" /> Investigation en lecture seule en cours</div>
     </div>
   )
 }
@@ -697,9 +784,10 @@ export function WorkspaceView({
 
   async function openThread(thread: StoredThread): Promise<void> {
     const request = ++openThreadRequestRef.current
-    const [storedMessages, runHistory] = await Promise.all([
+    const [storedMessages, runHistory, storedTools] = await Promise.all([
       window.localAgent.loadThreadMessages(thread.id),
-      window.localAgent.listThreadRuns(thread.id)
+      window.localAgent.listThreadRuns(thread.id),
+      window.localAgent.loadThreadToolActivities(thread.id)
     ])
     if (request !== openThreadRequestRef.current) return
     await window.localAgent.setActiveThread(thread.id)
@@ -744,7 +832,14 @@ export function WorkspaceView({
       ? { path: thread.projectPath, name: thread.projectName ?? projectName(thread.projectPath) }
       : null)
     if (thread.model) setSelectedModel(thread.model)
-    setToolsByThread((current) => ({ ...current, [thread.id]: current[thread.id] ?? [] }))
+    setToolsByThread((current) => ({
+      ...current,
+      [thread.id]: storedTools.map((activity) => ({
+        ...activity,
+        id: `${activity.requestId}:${activity.callId}`,
+        expanded: current[thread.id]?.find((item) => item.id === `${activity.requestId}:${activity.callId}`)?.expanded ?? false
+      }))
+    }))
   }
 
   async function newThread(): Promise<void> {
@@ -1006,32 +1101,43 @@ export function WorkspaceView({
 
     return (
       <div className="tool-activities" aria-label="Activité des outils">
-        {activities.filter((activity) => !fileEditActivity(activity)).map((activity) => (
-          <article className={`tool-activity ${activity.status} ${activity.expanded ? 'expanded' : ''}`} key={activity.id}>
-            <button
-              type="button"
-              aria-expanded={activity.expanded}
-              onClick={() => setToolsByThread((all) => ({
-                ...all,
-                [messageKey]: (all[messageKey] ?? []).map((item) => item.id === activity.id
-                  ? { ...item, expanded: !item.expanded }
-                  : item)
-              }))}
-            >
-              <span>{toolActivityLabel(activity)}</span>
-              {activity.status === 'denied' && <small>refusé</small>}
-              {activity.status === 'error' && <small>erreur</small>}
-              <ChevronRight className="tool-activity-arrow" aria-hidden="true" />
-            </button>
-            {activity.expanded && (
-              <div className="tool-activity-details">
-                {activity.input && <section><strong>Action</strong><pre>{activity.input}</pre></section>}
-                {activity.output && <section><strong>Résultat</strong><pre>{activity.output}</pre></section>}
-                {!activity.output && activity.status === 'running' && <span>Action en cours…</span>}
-              </div>
-            )}
-          </article>
-        ))}
+        {activities.filter((activity) => !fileEditActivity(activity)).map((activity) => {
+          const advisor = activity.tool === 'consult_advisor' ? advisorActivityData(activity) : null
+          return (
+            <article className={`tool-activity ${activity.status} ${activity.expanded ? 'expanded' : ''}`} key={activity.id}>
+              <button
+                type="button"
+                aria-expanded={activity.expanded}
+                onClick={() => {
+                  stickToBottomRef.current = false
+                  setToolsByThread((all) => ({
+                    ...all,
+                    [messageKey]: (all[messageKey] ?? []).map((item) => item.id === activity.id
+                      ? { ...item, expanded: !item.expanded }
+                      : item)
+                  }))
+                }}
+              >
+                <span>{toolActivityLabel(activity)}</span>
+                {activity.status === 'denied' && <small>refusé</small>}
+                {activity.status === 'error' && <small>erreur</small>}
+                {activity.status === 'interrupted' && <small>interrompu</small>}
+                <ChevronRight className="tool-activity-arrow" aria-hidden="true" />
+              </button>
+              {activity.expanded && (advisor
+                ? <AdvisorActivityDetails data={advisor} />
+                : activity.tool === 'consult_advisor' && activity.status === 'running'
+                  ? <AdvisorPendingDetails question={advisorQuestion(activity)} />
+                  : (
+                    <div className="tool-activity-details">
+                      {activity.input && <section><strong>Action</strong><pre>{activity.input}</pre></section>}
+                      {activity.output && <section><strong>Résultat</strong><pre>{activity.output}</pre></section>}
+                      {!activity.output && activity.status === 'running' && <span>Action en cours…</span>}
+                    </div>
+                  ))}
+            </article>
+          )
+        })}
         {fileEdits.length > 0 && (
           <article className={`tool-activity tool-edit-summary ${activeFileEdits ? 'running' : 'done'} ${fileEditsExpanded ? 'expanded' : ''}`}>
             <button

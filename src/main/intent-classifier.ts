@@ -2,13 +2,14 @@ import type { ChatMessage } from '../shared/contracts'
 import { streamOllamaChat } from './ollama'
 
 export type IntentKind = 'activity' | 'code' | 'discussion' | 'unknown'
+export type ReliableActivityEngineId = 'hangman' | 'neither-yes-nor-no'
 
 export type IntentClassification = {
   intent: IntentKind
   clear: boolean
   source: 'rule' | 'model' | 'fallback'
   reason: string
-  activityEngine?: 'hangman'
+  activityEngine?: ReliableActivityEngineId
 }
 
 type ClassifyIntentOptions = {
@@ -43,15 +44,17 @@ function requestsSoftwareArtifact(messages: readonly ChatMessage[]): boolean {
     || /\bjeu\b[^.!?\n]{0,50}\b(?:web|video|javascript|html|a coder|a programmer)\b/.test(request)
 }
 
-function explicitActivityRequest(request: string): boolean {
-  return /\b(?:joue|jouer|jouons|partie|play)\b[^.!?\n]{0,50}\b(?:pendu|hangman)\b/.test(request)
-    || /\b(?:pendu|hangman)\b[^.!?\n]{0,50}\b(?:joue|jouer|jouons|partie|play)\b/.test(request)
-    || /\bpend\s+u\s*ca te dit\b/.test(request)
+function explicitActivityEngine(request: string): ReliableActivityEngineId | null {
+  const playRequest = /\b(?:joue|jouer|jouons|partie|play)\b/.test(request)
+  if (playRequest && /\bni\s+oui\s+ni\s+non\b/.test(request)) return 'neither-yes-nor-no'
+  if ((playRequest && /\b(?:pendu|hangman)\b/.test(request)) || /\bpend\s+u\s*ca te dit\b/.test(request)) return 'hangman'
+  return null
 }
 
-function explanatoryHangmanRequest(request: string): boolean {
-  return /\b(?:explique|expliquer|regles?|fonctionne|principe|definition|c['’]est quoi|what is|how does)\b[^.!?\n]{0,80}\b(?:pendu|hangman)\b/.test(request)
-    || /\b(?:regles?|principe|definition)\b[^.!?\n]{0,50}\b(?:du |de |of )?(?:pendu|hangman)\b/.test(request)
+function explanatoryActivityRequest(request: string): boolean {
+  const activity = /\b(?:pendu|hangman|ni\s+oui\s+ni\s+non)\b/
+  return new RegExp(`\\b(?:explique|expliquer|regles?|fonctionne|principe|definition|c['’]est quoi|what is|how does)\\b[^.!?\\n]{0,80}${activity.source}`).test(request)
+    || new RegExp(`\\b(?:regles?|principe|definition)\\b[^.!?\\n]{0,50}\\b(?:du |de |of )?${activity.source}`).test(request)
 }
 
 function activeActivityAction(request: string): boolean {
@@ -70,11 +73,21 @@ export function classifyIntentByRule(
   if (requestsSoftwareArtifact(messages)) {
     return { intent: 'code', clear: true, source: 'rule', reason: 'explicit-software-artifact' }
   }
-  if (explanatoryHangmanRequest(request)) {
+  if (explanatoryActivityRequest(request)) {
     return { intent: 'discussion', clear: true, source: 'rule', reason: 'activity-explanation' }
   }
-  if (explicitActivityRequest(request)) {
-    return { intent: 'activity', clear: true, source: 'rule', reason: 'explicit-activity', activityEngine: 'hangman' }
+  const requestedEngine = explicitActivityEngine(request)
+  if (requestedEngine) {
+    return { intent: 'activity', clear: true, source: 'rule', reason: 'explicit-activity', activityEngine: requestedEngine }
+  }
+  if (activityContext?.includes('"engineId":"neither-yes-nor-no"')) {
+    return {
+      intent: 'activity',
+      clear: true,
+      source: 'rule',
+      reason: 'active-activity-answer',
+      activityEngine: 'neither-yes-nor-no'
+    }
   }
   if (activityContext?.includes('"engineId":"hangman"') && activeActivityAction(request)) {
     return { intent: 'activity', clear: true, source: 'rule', reason: 'active-activity-action', activityEngine: 'hangman' }

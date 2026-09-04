@@ -70,6 +70,7 @@ const api: LocalAgentApi = {
   setThreadModel: (request) => ipcRenderer.invoke('threads:set-model', request),
   createThread: (request) => ipcRenderer.invoke('threads:create', request),
   loadThreadMessages: (threadId) => ipcRenderer.invoke('threads:messages', threadId),
+  loadThreadToolActivities: (threadId) => ipcRenderer.invoke('threads:tool-activities', threadId),
   deleteThread: (request) => ipcRenderer.invoke('threads:delete', request),
   exportThreadProject: (threadId) => ipcRenderer.invoke('threads:export-project', threadId),
   getProjectResources: (threadId) => ipcRenderer.invoke('threads:get-project-resources', threadId),

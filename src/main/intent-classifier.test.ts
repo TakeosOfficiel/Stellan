@@ -22,21 +22,37 @@ describe('intent classifier', () => {
     ])).toMatchObject({ intent: 'discussion', clear: true, source: 'rule' })
   })
 
-  it('does not assign the hangman engine to another conversational game', async () => {
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async (url) => {
-      if (String(url).endsWith('/api/ps')) return new Response(JSON.stringify({ models: [] }), { status: 200 })
-      return streamResponse([{ message: { content: 'ACTIVITE' }, done: true }])
-    }))
-
+  it('routes neither-yes-nor-no explicitly without assigning the hangman engine', async () => {
     await expect(classifyIntent({
       model: 'test-model',
       messages: [{ role: 'user', content: 'Viens, on joue au ni oui ni non.' }],
       signal: new AbortController().signal
     })).resolves.toEqual({
       intent: 'activity',
-      clear: false,
-      source: 'model',
-      reason: 'model-classification'
+      clear: true,
+      source: 'rule',
+      reason: 'explicit-activity',
+      activityEngine: 'neither-yes-nor-no'
+    })
+  })
+
+  it('keeps explanations and software about neither-yes-nor-no outside its engine', () => {
+    expect(classifyIntentByRule([
+      { role: 'user', content: 'Explique-moi les règles du ni oui ni non.' }
+    ])).toMatchObject({ intent: 'discussion', clear: true, source: 'rule' })
+    expect(classifyIntentByRule([
+      { role: 'user', content: 'Crée une page web de ni oui ni non.' }
+    ])).toMatchObject({ intent: 'code', clear: true, source: 'rule' })
+  })
+
+  it('routes normal answers to an active neither-yes-nor-no engine', () => {
+    expect(classifyIntentByRule(
+      [{ role: 'user', content: 'Absolument !' }],
+      '{"engineId":"neither-yes-nor-no"}'
+    )).toMatchObject({
+      intent: 'activity',
+      clear: true,
+      activityEngine: 'neither-yes-nor-no'
     })
   })
 

@@ -1,0 +1,46 @@
+{
+  "id": "neither-yes-nor-no",
+  "title": "Ni oui ni non",
+  "variables": {
+    "round": { "kind": "integer", "initial": 0, "min": 0, "max": 10 },
+    "status": { "kind": "enum", "initial": "active", "values": ["active", "won", "lost", "cancelled"] }
+  },
+  "actions": [
+    { "type": "answer", "fields": { "text": { "kind": "string", "maxLength": 500 } } },
+    { "type": "exit", "fields": {} }
+  ],
+  "transitions": [
+    {
+      "action": "answer",
+      "when": [{ "operator": "containsToken", "ref": { "source": "action", "key": "text" }, "tokens": ["oui", "non"] }],
+      "effects": [{ "operation": "set", "variable": "status", "value": "lost" }],
+      "completed": true,
+      "message": "Un mot interdit a été prononcé : la partie est perdue."
+    },
+    {
+      "action": "answer",
+      "when": [{ "operator": "equals", "ref": { "source": "state", "key": "round" }, "value": 9 }],
+      "effects": [
+        { "operation": "increment", "variable": "round", "amount": 1 },
+        { "operation": "set", "variable": "status", "value": "won" }
+      ],
+      "completed": true,
+      "message": "Dix réponses sans mot interdit : la partie est gagnée."
+    },
+    {
+      "action": "answer",
+      "when": [],
+      "effects": [{ "operation": "increment", "variable": "round", "amount": 1 }],
+      "completed": false,
+      "message": "Réponse acceptée. La partie continue."
+    },
+    {
+      "action": "exit",
+      "when": [],
+      "effects": [{ "operation": "set", "variable": "status", "value": "cancelled" }],
+      "completed": true,
+      "message": "La partie est arrêtée."
+    }
+  ],
+  "publicVariables": ["round", "status"]
+}

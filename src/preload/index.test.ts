@@ -48,8 +48,9 @@ describe('portal preload IPC', () => {
     await api.listProjectFiles('thread')
     await api.readProjectFile({ threadId: 'thread', path: 'src/index.ts' })
     await api.openProjectFile({ threadId: 'thread', path: 'src/index.ts' })
+    await api.loadThreadToolActivities('thread')
 
-    expect(mocks.invoke.mock.calls.slice(-6)).toEqual([
+    expect(mocks.invoke.mock.calls.slice(-7)).toEqual([
       ['threads:export-project', 'thread'],
       ['threads:get-project-resources', 'thread'],
       ['threads:save-project-resources', {
@@ -57,7 +58,8 @@ describe('portal preload IPC', () => {
       }],
       ['threads:list-project-files', 'thread'],
       ['threads:read-project-file', { threadId: 'thread', path: 'src/index.ts' }],
-      ['threads:open-project-file', { threadId: 'thread', path: 'src/index.ts' }]
+      ['threads:open-project-file', { threadId: 'thread', path: 'src/index.ts' }],
+      ['threads:tool-activities', 'thread']
     ])
   })
 

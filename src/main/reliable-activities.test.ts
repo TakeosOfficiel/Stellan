@@ -147,11 +147,20 @@ describe('ReliableActivityService', () => {
       })
       expect(store.getActiveReliableActivity(threadId)?.version).toBe(1)
 
+      const activityId = store.getActiveReliableActivity(threadId)?.id as string
       const solved = service.apply(threadId, undefined, { type: 'solve', word: 'chat' })
       expect(solved).toMatchObject({
         ok: true,
         status: 'completed',
         publicView: { status: 'won', word: 'C H A T', remainingAttempts: 6 }
+      })
+      expect(service.apply(threadId, activityId, { type: 'guess', letter: 'Z' })).toEqual({
+        ok: false,
+        error: {
+          code: 'ACTIVITY_COMPLETED',
+          message: 'Cette activité est déjà terminée.',
+          retryable: false
+        }
       })
     } finally {
       store.close()

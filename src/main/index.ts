@@ -7,6 +7,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'ele
 import { z } from 'zod'
 import type { ModelPullProgress, OllamaStatus, RuntimeProgress } from '../shared/contracts'
 import { compactConversation, normalizeWorkerPath, runCodingAgent, type AgentToolLifecycleEvent, type WorkerTask } from './agent'
+import { runAdvisor } from './advisor'
 import {
   configureMandatoryUpdater,
   getUpdateState,
@@ -81,6 +82,7 @@ const THREADS_SET_ACTIVE_CHANNEL = 'threads:set-active'
 const THREADS_SET_MODEL_CHANNEL = 'threads:set-model'
 const THREADS_CREATE_CHANNEL = 'threads:create'
 const THREADS_MESSAGES_CHANNEL = 'threads:messages'
+const THREADS_TOOL_ACTIVITIES_CHANNEL = 'threads:tool-activities'
 const THREADS_DELETE_CHANNEL = 'threads:delete'
 const THREADS_EXPORT_PROJECT_CHANNEL = 'threads:export-project'
 const THREADS_GET_PROJECT_RESOURCES_CHANNEL = 'threads:get-project-resources'
@@ -519,6 +521,27 @@ function toPublicRunSummary(run: StoredAgentRunSummary) {
   }
 }
 
+function listPublicToolActivities(threadId: string) {
+  const store = getThreadStore()
+  return store.listAgentRunSummaries(threadId).flatMap((run) => {
+    const events = store.listAgentToolEvents(run.id)
+    const finishedByCallId = new Map(
+      events.filter((event) => event.status !== 'running').map((event) => [event.callId, event])
+    )
+    return events.filter((event) => event.status === 'running').map((started) => {
+      const finished = finishedByCallId.get(started.callId)
+      return {
+        requestId: run.requestId,
+        callId: started.callId,
+        tool: started.tool,
+        status: finished?.status ?? 'running',
+        input: started.arguments ? toolDetail(started.arguments) : null,
+        output: finished?.result ?? null
+      }
+    })
+  })
+}
+
 async function resolveVisionModel(run: AgentRun, messages: Awaited<ReturnType<ThreadStore['listPromptMessages']>>): Promise<string> {
   if (!messages.some((message) => (message.images?.length ?? 0) > 0)) return run.model
   sendChatEvent(run, { type: 'progress', detail: 'Choix automatique du modèle de vision…', percent: null })
@@ -695,27 +718,22 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             startActivity,
             applyActivity,
             consultAdvisor: async (question) => {
-              const model = await selectSpecialist('general')
-              let advice = ''
-              await streamOllamaChat(
+              const specialist = await selectSpecialist('general')
+              const model = await modelSupportsTools(specialist) ? specialist : executionModel
+              sendChatEvent(run, {
+                type: 'progress',
+                detail: `Conseiller · démarrage de l’enquête avec ${model}`,
+                percent: null
+              })
+              return runAdvisor({
                 model,
-                [
-                  {
-                    role: 'system',
-                    content: 'Tu es le conseiller local de Stellan. Analyse uniquement la question fournie. Donne un avis technique indépendant, précis et concis. Tu es en lecture seule : ne prétends pas avoir consulté ou modifié le projet, ne demande aucun outil et signale clairement tes incertitudes.'
-                  },
-                  { role: 'user', content: question }
-                ],
-                (content) => { advice += content },
-                controller.signal,
-                fetch,
-                undefined,
-                120_000,
-                undefined,
-                undefined,
-                writeInferenceLog
-              )
-              return { model, advice }
+                question,
+                project,
+                signal: controller.signal,
+                isGitRepository: git !== null,
+                onProgress: (detail) => sendChatEvent(run, { type: 'progress', detail, percent: null }),
+                onInferenceLog: writeInferenceLog
+              })
             },
             intentClassification,
             spawnWorkers: thread.parentThreadId ? undefined : async (tasks: WorkerTask[]) => {
@@ -1260,6 +1278,9 @@ app.whenReady().then(() => {
     const threadId = requestIdSchema.parse(input)
     return getThreadStore().listMessages(threadId)
   })
+  handle(THREADS_TOOL_ACTIVITIES_CHANNEL, (_event, input: unknown) => {
+    return listPublicToolActivities(requestIdSchema.parse(input))
+  })
   handle(THREADS_DELETE_CHANNEL, async (event, input: unknown) => {
     const { threadId, discardChanges } = deleteThreadSchema.parse(input)
     const store = getThreadStore()
@@ -1750,6 +1771,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(THREADS_SET_MODEL_CHANNEL)
   ipcMain.removeHandler(THREADS_CREATE_CHANNEL)
   ipcMain.removeHandler(THREADS_MESSAGES_CHANNEL)
+  ipcMain.removeHandler(THREADS_TOOL_ACTIVITIES_CHANNEL)
   ipcMain.removeHandler(THREADS_DELETE_CHANNEL)
   ipcMain.removeHandler(THREADS_EXPORT_PROJECT_CHANNEL)
   ipcMain.removeHandler(THREADS_GET_PROJECT_RESOURCES_CHANNEL)

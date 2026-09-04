@@ -51,7 +51,7 @@ describe('detectContainerRuntime', () => {
     expect(runner).toHaveBeenCalledOnce()
     expect(runner).toHaveBeenCalledWith(
       'docker',
-      ['info', '--format', '{{.Version}}'],
+      ['info', '--format', '{{.ServerVersion}}'],
       { timeoutMs: 5_000 }
     )
   })
@@ -83,6 +83,12 @@ describe('getRuntimeInfo', () => {
       recommendedContainerRuntime: 'docker'
     })
     expect(runner).toHaveBeenCalledTimes(3)
+    expect(runner).toHaveBeenNthCalledWith(2, 'docker', [
+      'info', '--format', '{{.ServerVersion}}'
+    ], { timeoutMs: 5_000 })
+    expect(runner).toHaveBeenNthCalledWith(3, 'podman', [
+      'info', '--format', '{{.Version.Version}}'
+    ], { timeoutMs: 5_000 })
   })
 
   it('recommends Podman when Docker is unavailable', async () => {

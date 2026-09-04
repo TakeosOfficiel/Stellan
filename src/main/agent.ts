@@ -7,8 +7,13 @@ import {
   type OllamaMessage,
   type OllamaToolCall
 } from './ollama'
-import { classifyIntentByRule, type IntentClassification } from './intent-classifier'
+import {
+  classifyIntentByRule,
+  type IntentClassification,
+  type ReliableActivityEngineId
+} from './intent-classifier'
 import { ProjectTools } from './project-tools'
+import type { AdvisorResult } from './advisor'
 
 export type AgentProjectTools = Pick<ProjectTools,
   'listFiles' | 'readFile' | 'search' | 'writeFile' | 'editFile' | 'deleteFile' | 'gitStatus' | 'gitDiff' | 'gitChanges' | 'runCommand'
@@ -148,11 +153,11 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'activity_start',
-      description: 'Démarre une activité déterministe. Moteurs disponibles : hangman (input facultatif : difficulty = facile, moyen ou difficile) ; budget (input : limitCents entier positif, currency code ISO facultatif). N’invente aucun autre paramètre.',
+      description: 'Démarre une activité déterministe. Moteurs disponibles : hangman (input facultatif : difficulty = facile, moyen ou difficile) ; neither-yes-nor-no (input vide) ; budget (input : limitCents entier positif, currency code ISO facultatif). N’invente aucun autre paramètre.',
       parameters: {
         type: 'object',
         properties: {
-          engineId: { type: 'string', enum: ['hangman', 'budget'] },
+          engineId: { type: 'string', enum: ['hangman', 'neither-yes-nor-no', 'budget'] },
           input: {
             type: 'object',
             properties: {
@@ -172,7 +177,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'activity_action',
-      description: 'Soumet une action au moteur actif. Pendu : guess+letter, solve+word, hint, give_up ou exit pour quitter la partie ; pour toute autre demande liée à la partie, utilise unsupported. Budget : add_expense, remove_expense ou close. Le moteur seul décide du résultat.',
+      description: 'Soumet une action au moteur actif. Pendu : guess+letter, solve+word, hint, give_up ou exit. Ni oui ni non : answer+text exact de l’utilisateur, ou exit. Budget : add_expense, remove_expense ou close. Le moteur seul décide du résultat.',
       parameters: {
         type: 'object',
         properties: {
@@ -180,9 +185,10 @@ const TOOL_DEFINITIONS = [
           action: {
             type: 'object',
             properties: {
-              type: { type: 'string', enum: ['guess', 'solve', 'hint', 'give_up', 'exit', 'unsupported', 'add_expense', 'remove_expense', 'close'] },
+              type: { type: 'string', enum: ['guess', 'solve', 'hint', 'give_up', 'exit', 'unsupported', 'answer', 'add_expense', 'remove_expense', 'close'] },
               letter: { type: 'string', pattern: '^[A-Za-z]$' },
               word: { type: 'string', pattern: '^[A-Za-z]+$' },
+              text: { type: 'string', maxLength: 500 },
               id: { type: 'string' },
               label: { type: 'string' },
               amountCents: { type: 'integer', minimum: 1 }
@@ -200,7 +206,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'consult_advisor',
-      description: 'Consulte un second modèle local en lecture seule pour résoudre une décision, un diagnostic ou un plan complexe encore incertain.',
+      description: 'Consulte un second modèle local expert qui enquête de façon autonome dans le projet en lecture seule, puis fournit un avis indépendant et étayé pour une décision, un diagnostic ou un plan complexe encore incertain.',
       parameters: {
         type: 'object',
         properties: { question: { type: 'string' } },
@@ -386,7 +392,7 @@ function normalizeActivityActionArguments(input: Record<string, unknown>): Recor
       : { type: 'solve', word: action.guess }
   }
   const normalizedAction: Record<string, unknown> = {}
-  for (const key of ['type', 'letter', 'word', 'id', 'label', 'amountCents']) {
+  for (const key of ['type', 'letter', 'word', 'text', 'id', 'label', 'amountCents']) {
     if (action[key] !== undefined) normalizedAction[key] = action[key]
   }
   return {
@@ -593,6 +599,63 @@ function reliableActivityResponse(content: string): string | null {
   }
 }
 
+function reliableActivityStopsNarration(content: string): boolean {
+  try {
+    const result = JSON.parse(content) as { ok?: unknown; status?: unknown }
+    return result.ok === false || (result.ok === true && result.status === 'completed')
+  } catch {
+    return true
+  }
+}
+
+const SAFE_NEXT_QUESTIONS = [
+  'As-tu déjà voyagé en train ?',
+  'Préfères-tu le matin ou le soir ?',
+  'Aimes-tu cuisiner pendant ton temps libre ?',
+  'Possèdes-tu un animal de compagnie ?',
+  'Irais-tu vivre près de la mer ?'
+] as const
+
+function deterministicNextQuestion(activityResult: string | null): string {
+  try {
+    const result = JSON.parse(activityResult ?? '') as { publicView?: unknown }
+    const view = recordValue(result.publicView)
+    const round = typeof view?.round === 'number' && Number.isInteger(view.round) ? view.round : 0
+    return SAFE_NEXT_QUESTIONS[Math.abs(round) % SAFE_NEXT_QUESTIONS.length] as string
+  } catch {
+    return SAFE_NEXT_QUESTIONS[0]
+  }
+}
+
+function validatedNextQuestion(content: string): string | null {
+  const question = content.trim()
+  if (question.length < 4 || question.length > 180 || /[\r\n]/.test(question)) return null
+  if (!question.endsWith('?') || (question.match(/\?/g) ?? []).length !== 1) return null
+  if (/[.!:;`#*_{}\[\]<>]/.test(question.slice(0, -1))) return null
+  const normalized = question.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLocaleLowerCase('fr')
+  if (!/^(?:[a-z]+(?:-[a-z]+)?-(?:tu|vous)\b|est-ce que\b|qui\b|que\b|quoi\b|quel(?:le|les|s)?\b|comment\b|pourquoi\b|ou\b|quand\b|combien\b)/.test(normalized)) return null
+  if (/\b(?:oui|non|bravo|felicitation\w*|gagn\w*|perd\w*|defaite\w*|victoire\w*|echou\w*|elimin\w*|interdit\w*|partie\w*|jeu\w*|reponse\w*|score\w*|tour\w*|continu\w*|win\w*|won|los\w*|forbidden|game)\b/.test(normalized)) return null
+  return question
+}
+
+function reliableActivityTurnResponse(
+  engineMessage: string | null,
+  narratorContent: string,
+  activityResult: string | null
+): string {
+  const question = validatedNextQuestion(narratorContent) ?? deterministicNextQuestion(activityResult)
+  return `${engineMessage ?? 'La partie continue.'}\n\n${question}`
+}
+
+function activityEngineFromContext(activityContext?: string | null): ReliableActivityEngineId | null {
+  try {
+    const engineId = Reflect.get(JSON.parse(activityContext ?? ''), 'engineId')
+    return engineId === 'hangman' || engineId === 'neither-yes-nor-no' ? engineId : null
+  } catch {
+    return null
+  }
+}
+
 function validWorkerFilePath(value: string): boolean {
   const portable = value.replaceAll('\\', '/')
   const normalized = path.posix.normalize(portable.replace(/^\.\//, ''))
@@ -673,7 +736,7 @@ export type CodingAgentOptions = {
   activityContext?: string | null
   startActivity?: (engineId: string, input: Record<string, unknown>) => unknown
   applyActivity?: (activityId: string | undefined, action: Record<string, unknown>) => unknown
-  consultAdvisor?: (question: string) => Promise<{ model: string; advice: string }>
+  consultAdvisor?: (question: string) => Promise<AdvisorResult>
   intentClassification?: IntentClassification
   writeScope?: ReadonlySet<string>
   allowRunCommand?: boolean
@@ -1030,7 +1093,7 @@ export function buildCodingAgentSystemPrompt(options: Pick<CodingAgentOptions,
       ? '\n\nWORKER ENFANT\n- Tu peux lire le projet pour comprendre le contexte, mais tu ne modifies que les chemins de fichiers exacts qui te sont attribués. write_file crée automatiquement leurs dossiers parents : écris directement le fichier demandé et ne tente pas de lancer mkdir. N’essaie pas de lancer des commandes, de créer d’autres workers ou de modifier un autre fichier.'
       : ''
   const advisorRule = options.consultAdvisor
-    ? '\n- Pour une décision, un diagnostic ou un plan complexe dont une incertitude importante subsiste après ton analyse, utilise consult_advisor avec une question précise. Le conseiller est en lecture seule : vérifie son avis et garde la décision finale. Ne le consulte pas pour une demande simple.'
+    ? '\n- Pour une décision, un diagnostic ou un plan complexe dont une incertitude importante subsiste après ton analyse, utilise consult_advisor avec une question précise. Le conseiller peut enquêter lui-même dans le projet, uniquement en lecture seule : exploite ses preuves, vérifie son avis et garde la décision finale. Ne le consulte pas pour une demande simple.'
     : ''
   const activityRules = options.startActivity
     ? `\n\nACTIVITÉS FIABLES\n- Pour une demande dont les règles ou l’état doivent être exacts, utilise un moteur fiable disponible au lieu de simuler son état toi-même. Le moteur hangman gère le pendu.\n- Utilise activity_start pour démarrer, puis activity_action pour chaque tour. Pour le pendu, utilise guess pour une lettre, solve pour un mot complet, hint pour un indice, give_up pour abandonner et unsupported pour toute demande liée à la partie qui ne correspond à aucune de ces actions.\n- Tant qu’une activité est active, ne réponds jamais librement à une demande qui la concerne : appelle son moteur. Considère son résultat comme la seule source de vérité. Ne révèle, ne corrige et ne complète jamais un état ou un indice par supposition.\n- Après chaque coup, affiche le mot masqué, les lettres essayées et les erreurs restantes à partir de publicView. Si le moteur retourne ok=false, reprends uniquement son message public, sans ajout. Le résultat d’un outil du tour actuel remplace toujours l’état initial plus ancien.${options.activityContext ? `\n- Une activité est actuellement active. Utilise son identifiant et son état public autoritatif : ${options.activityContext}` : ''}`
@@ -1074,7 +1137,24 @@ RÉPONSE
 - N’affiche pas de jargon interne, de raisonnement privé, de JSON d’outil ou de phrase technique inutile.${activityRules}`
 }
 
-export function buildActiveActivitySystemPrompt(activityContext?: string | null): string {
+export function buildActiveActivitySystemPrompt(
+  activityContext?: string | null,
+  requestedEngine?: ReliableActivityEngineId
+): string {
+  const engine = requestedEngine ?? activityEngineFromContext(activityContext) ?? 'hangman'
+  if (engine === 'neither-yes-nor-no') {
+    return `Tu es Stellan. Tu animes une partie de ni oui ni non dont les règles sont exécutées par un moteur déterministe.
+
+ÉTAT PUBLIC AUTORITATIF
+${activityContext ?? 'Aucune partie active : démarre neither-yes-nor-no avec activity_start et un input vide.'}
+
+RÈGLES
+- ${activityContext ? 'Au début du tour, appelle activity_action exactement une fois avec {type:"answer", text:<dernier message utilisateur exact>}. Si son résultat figure déjà dans la conversation, ne rappelle aucun outil.' : 'Appelle activity_start exactement une fois avec engineId="neither-yes-nor-no" et input={}. N’utilise aucun autre outil.'}
+- Le moteur seul détecte les mots interdits et décide de la victoire ou de la défaite. Ne modifie jamais le texte de la réponse avant de le lui transmettre.
+- Après un résultat actif, ta réponse entière doit être une seule question naturelle et courte, sans préambule, bilan, Markdown ou commentaire sur la partie. Le code affichera séparément le résultat du moteur.
+- Après un résultat terminé ou une erreur, reprends uniquement le message public du moteur.
+- Réponds dans la langue de l’utilisateur, sans JSON ni jargon interne.`
+  }
   return `Tu es Stellan. Tu dois gérer une partie de pendu avec le moteur déterministe.
 
 ÉTAT PUBLIC AUTORITATIF
@@ -1091,13 +1171,15 @@ RÈGLES
 
 export async function runCodingAgent(options: CodingAgentOptions): Promise<void> {
   const inferenceTraceId = Math.random().toString(36).slice(2, 8)
+  const contextualActivityEngine = activityEngineFromContext(options.activityContext)
   const intentClassification = options.intentClassification
     ?? classifyIntentByRule(options.messages, options.activityContext)
     ?? (options.activityContext
-      ? { intent: 'activity', clear: false, source: 'fallback', reason: 'classification-not-provided', activityEngine: 'hangman' }
+      ? { intent: 'activity', clear: false, source: 'fallback', reason: 'classification-not-provided', ...(contextualActivityEngine ? { activityEngine: contextualActivityEngine } : {}) }
       : { intent: 'unknown', clear: false, source: 'fallback', reason: 'classification-not-provided' }) as IntentClassification
   const softwareArtifactRequested = Boolean(options.project) && intentClassification.intent === 'code'
-  const reliableActivityRequested = intentClassification.activityEngine === 'hangman'
+  const requestedActivityEngine = intentClassification.activityEngine
+  const reliableActivityRequested = requestedActivityEngine !== undefined
   const activityExitRequested = Boolean(options.activityContext) && requestsActivityExit(options.messages)
   const pureActivityExitRequested = activityExitRequested && isPureActivityExitRequest(options.messages)
   let effectiveActivityContext = options.activityContext
@@ -1127,7 +1209,10 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     options.onContent(activityExitResponse ?? 'La partie est déjà arrêtée.')
     return
   }
-  const routedActivityContext = reliableActivityRequested ? effectiveActivityContext : null
+  const routedActivityContext = reliableActivityRequested
+    && contextualActivityEngine === requestedActivityEngine
+    ? effectiveActivityContext
+    : null
   const activeActivityMode = Boolean(routedActivityContext)
   const reliableActivityActionRequired = !activityExitRequested && reliableActivityRequested
   const reliableActivityMode = activeActivityMode || reliableActivityActionRequired
@@ -1138,7 +1223,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     {
       role: 'system',
       content: reliableActivityMode
-        ? buildActiveActivitySystemPrompt(routedActivityContext)
+        ? buildActiveActivitySystemPrompt(routedActivityContext, requestedActivityEngine)
         : `${buildCodingAgentSystemPrompt({
             ...options,
             activityContext: routedActivityContext,
@@ -1162,6 +1247,8 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   let reliableActivityRecoveryAttempted = false
   let reliableActivityToolAttempted = false
   let reliableActivityFallback: string | null = null
+  let reliableActivityResult: string | null = null
+  let reliableActivityStopsAfterTool = false
   const projectChangeRequested = Boolean(options.project) && intentClassification.intent === 'code'
   const multipleWorkersRequested = Boolean(options.spawnWorkers) && requestsMultipleWorkers(options.messages)
   const requestedFileKinds = explicitlyRequestedFileKinds(options.messages)
@@ -1256,7 +1343,9 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         continue
       }
       if (reliableActivityFallback) {
-        options.onContent(reliableActivityFallback)
+        options.onContent(requestedActivityEngine === 'neither-yes-nor-no' && !reliableActivityStopsAfterTool
+          ? reliableActivityTurnResponse(reliableActivityFallback, '', reliableActivityResult)
+          : reliableActivityFallback)
         return
       }
       if (error instanceof OllamaIdleTimeoutError && completedWrites.size > 0) {
@@ -1272,11 +1361,20 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       if (fallbackCalls.length > 0) result = { content: '', toolCalls: fallbackCalls }
     }
 
+    if (reliableActivityMode && reliableActivityToolAttempted) {
+      result.toolCalls = []
+    }
+
     for (const call of result.toolCalls) {
       if (call.function.name === 'activity_start') {
-        call.function.arguments = normalizeActivityStartArguments(call.function.arguments)
+        call.function.arguments = requestedActivityEngine === 'neither-yes-nor-no'
+          ? { engineId: 'neither-yes-nor-no', input: {} }
+          : normalizeActivityStartArguments(call.function.arguments)
       } else if (call.function.name === 'activity_action') {
-        call.function.arguments = normalizeActivityActionArguments(call.function.arguments)
+        const latestUserContent = [...options.messages].reverse().find((message) => message.role === 'user')?.content ?? ''
+        call.function.arguments = requestedActivityEngine === 'neither-yes-nor-no'
+          ? { action: { type: 'answer', text: latestUserContent } }
+          : normalizeActivityActionArguments(call.function.arguments)
       }
     }
 
@@ -1300,15 +1398,27 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     }
 
     if (result.toolCalls.length === 0) {
+      if (requestedActivityEngine === 'neither-yes-nor-no' && reliableActivityToolAttempted) {
+        options.onContent(reliableActivityTurnResponse(
+          reliableActivityFallback,
+          result.content,
+          reliableActivityResult
+        ))
+        return
+      }
       if (reliableActivityActionRequired && !reliableActivityToolAttempted) {
         if (!reliableActivityRecoveryAttempted) {
           reliableActivityRecoveryAttempted = true
           conversation.push({ role: 'assistant', content: result.content })
           conversation.push({
             role: 'user',
-            content: options.activityContext
-              ? 'Une activité fiable est active. Appelle maintenant activity_action : guess pour une lettre, solve pour un mot, hint pour un indice, give_up pour abandonner, ou unsupported si aucune action ne couvre la demande. Ne réponds pas toi-même.'
-              : 'Cette demande doit démarrer le moteur fiable du pendu. Appelle maintenant activity_start avec engineId="hangman" et une difficulté adaptée, sans choisir ni révéler de mot toi-même.'
+            content: requestedActivityEngine === 'neither-yes-nor-no'
+              ? options.activityContext
+                ? 'La partie fiable de ni oui ni non est active. Appelle maintenant activity_action une fois avec type="answer" et le dernier message utilisateur exact dans text. Ne réponds pas toi-même avant cet appel.'
+                : 'Démarre maintenant la partie fiable avec activity_start, engineId="neither-yes-nor-no" et input={}. N’utilise aucun autre outil.'
+              : options.activityContext
+                ? 'Une activité fiable est active. Appelle maintenant activity_action : guess pour une lettre, solve pour un mot, hint pour un indice, give_up pour abandonner, ou unsupported si aucune action ne couvre la demande. Ne réponds pas toi-même.'
+                : 'Cette demande doit démarrer le moteur fiable du pendu. Appelle maintenant activity_start avec engineId="hangman" et une difficulté adaptée, sans choisir ni révéler de mot toi-même.'
           })
           continue
         }
@@ -1395,7 +1505,9 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         invalidWorkerPlanThisStep ||= toolResult.status === 'error'
       }
       if (tool === 'activity_start' || tool === 'activity_action') {
+        reliableActivityResult = toolResult.content
         reliableActivityFallback = activityFallbackMessage(toolResult.content)
+        reliableActivityStopsAfterTool = reliableActivityStopsNarration(toolResult.content)
         const deterministicResponse = reliableActivityResponse(toolResult.content)
         if (deterministicResponse) reliableActivityFallback = deterministicResponse
       }
@@ -1438,7 +1550,8 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       }
       continue
     }
-    if (reliableActivityMode && reliableActivityFallback) {
+    if (reliableActivityMode && reliableActivityFallback
+      && (requestedActivityEngine !== 'neither-yes-nor-no' || reliableActivityStopsAfterTool)) {
       options.onContent(reliableActivityFallback)
       return
     }

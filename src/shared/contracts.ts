@@ -60,7 +60,7 @@ export type RuntimeProgress = {
 
 export type UpdateState =
   | { status: 'checking' }
-  | { status: 'current'; version: string }
+  | { status: 'current'; version: string; updatedFrom?: string }
   | { status: 'downloading'; version: string; percent: number; bytesPerSecond: number }
   | { status: 'restarting'; version: string }
   | { status: 'error'; message: string }
@@ -180,6 +180,15 @@ export type AgentRunSummary = {
   error: string | null
   startedAt: string
   finishedAt: string | null
+}
+
+export type StoredToolActivity = {
+  requestId: string
+  callId: string
+  tool: string
+  status: 'running' | 'done' | 'denied' | 'error' | 'interrupted'
+  input: string | null
+  output: string | null
 }
 
 export type UpdateQueuedMessageRequest = {
@@ -347,6 +356,7 @@ export type LocalAgentApi = {
   setThreadModel: (request: SetThreadModelRequest) => Promise<SetThreadModelResult>
   createThread: (request: CreateThreadRequest) => Promise<StoredThread>
   loadThreadMessages: (threadId: string) => Promise<StoredMessage[]>
+  loadThreadToolActivities: (threadId: string) => Promise<StoredToolActivity[]>
   deleteThread: (request: DeleteThreadRequest) => Promise<DeleteThreadResult>
   exportThreadProject: (threadId: string) => Promise<string | null>
   getProjectResources: (threadId: string) => Promise<ProjectResourceSettings>

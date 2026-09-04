@@ -265,17 +265,23 @@ export function App(): React.JSX.Element {
   const startupVisible = updatePending || runtimeProgress !== null || runtimeBusy || isLoading || !resolvedStatus?.available
   const startupPercent = updateState.status === 'downloading'
     ? Math.round(updateState.percent)
-    : updatePending ? (updateState.status === 'restarting' ? 100 : 2)
+    : updatePending ? (updateState.status === 'restarting' ? null : 2)
       : runtimeProgress?.percent ?? (resolvedStatus?.available ? 100 : 2)
+  const startupPhrase = updateState.status === 'restarting'
+    ? 'Préparation du redémarrage sécurisé…'
+    : STARTUP_PHRASES[Math.min(STARTUP_PHRASES.length - 1, Math.floor((startupPercent ?? 100) / 26))]
   const startupStep = updateState.status === 'checking' ? 'Recherche des mises à jour'
     : updateState.status === 'downloading' ? `Mise à jour ${updateState.version}`
       : updateState.status === 'restarting' ? 'Installation de la mise à jour'
         : updateState.status === 'error' ? 'Mise à jour impossible'
+          : updateState.updatedFrom ? `Finalisation de Stellan ${updateState.version}`
           : runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Stellan')
   const startupDetail = updateState.status === 'checking' ? 'Vérification sécurisée de la version disponible…'
     : updateState.status === 'downloading' ? `Téléchargement optimisé en cours — ${Math.round(updateState.bytesPerSecond / 1_000_000 * 10) / 10} Mo/s`
-      : updateState.status === 'restarting' ? 'Stellan va redémarrer automatiquement.'
+      : updateState.status === 'restarting' ? 'Téléchargement terminé. Stellan va se fermer quelques secondes, installer la mise à jour, puis se rouvrir automatiquement.'
         : updateState.status === 'error' ? updateState.message
+          : updateState.updatedFrom
+            ? `Mise à jour depuis la version ${updateState.updatedFrom} réussie.${runtimeProgress ? ` ${runtimeProgress.detail}` : ' Finalisation du démarrage…'}`
           : runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
             ? 'Environnement local prêt.'
             : resolvedStatus?.reason ?? 'Préparation de l’environnement privé…')
@@ -340,10 +346,10 @@ export function App(): React.JSX.Element {
                 <small>STELLAN</small>
                 <strong>{startupStep}</strong>
               </div>
-              <span>{startupPercent}%</span>
+              <span>{startupPercent === null ? 'En cours' : `${startupPercent}%`}</span>
             </div>
-            <progress max="100" value={startupPercent} />
-            <p>{STARTUP_PHRASES[Math.min(STARTUP_PHRASES.length - 1, Math.floor(startupPercent / 26))]}</p>
+            <progress max="100" value={startupPercent ?? undefined} />
+            <p>{startupPhrase}</p>
             <small className="startup-detail" title={startupDetail}>{startupDetail}</small>
             {updateState.status === 'current' && !runtimeBusy && !resolvedStatus?.available && (
               <div className="startup-card-actions">

@@ -106,7 +106,17 @@ describe('agent guardrails', () => {
       }]))
       .mockResolvedValueOnce(streamResponse([{ message: { content: 'Je retiens le compromis vérifié.' }, done: true }]))
     vi.stubGlobal('fetch', fetcher)
-    const consultAdvisor = vi.fn().mockResolvedValue({ model: 'granite4.1:8b', advice: 'Choisir la solution A.' })
+    const consultAdvisor = vi.fn().mockResolvedValue({
+      model: 'granite4.1:8b',
+      advice: 'Choisir la solution A.',
+      trace: [{
+        tool: 'read_file',
+        label: 'Lecture de src/index.ts',
+        input: { path: 'src/index.ts' },
+        status: 'done',
+        summary: 'Fichier consulté.'
+      }]
+    })
 
     await runCodingAgent({
       model: 'qwen3.5:9b',
@@ -121,6 +131,7 @@ describe('agent guardrails', () => {
 
     expect(consultAdvisor).toHaveBeenCalledWith('Quel compromis choisir ?')
     expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Choisir la solution A.')
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Lecture de src/index.ts')
   })
 
   it('blocks destructive command bypasses and gates Git writes', () => {
@@ -311,33 +322,204 @@ describe('runCodingAgent', () => {
     expect(applyActivity).not.toHaveBeenCalled()
   })
 
-  it('plays an unsupported conversational game without starting hangman', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(streamResponse([{
-      message: { content: 'D’accord. Pose-moi des questions, je ne dois dire ni oui ni non !' }, done: true
-    }]))
+  it('starts neither-yes-nor-no with its declarative engine and then narrates', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: {
+          name: 'activity_start',
+          arguments: { engineId: 'hangman', input: { difficulty: 'difficile' } }
+        } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: 'As-tu déjà voyagé en train ?' }, done: true
+      }]))
     vi.stubGlobal('fetch', fetcher)
-    const startActivity = vi.fn()
+    const startActivity = vi.fn().mockReturnValue({
+      ok: true,
+      activityId: 'active',
+      engineId: 'neither-yes-nor-no',
+      status: 'active',
+      message: 'L’activité est démarrée.',
+      publicView: { activity: 'Ni oui ni non', round: 0, status: 'active' }
+    })
+    const onContent = vi.fn()
 
     await runCodingAgent({
       model: 'test-model',
       messages: [{ role: 'user', content: 'Viens, on joue au ni oui ni non.' }],
       signal: new AbortController().signal,
-      onContent: vi.fn(),
+      onContent,
       onTool: vi.fn(),
       authorize: vi.fn().mockResolvedValue(true),
       startActivity,
-      applyActivity: vi.fn(),
-      intentClassification: {
-        intent: 'activity',
-        clear: false,
-        source: 'model',
-        reason: 'model-classification'
-      }
+      applyActivity: vi.fn()
     })
 
-    const request = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))
-    expect(request.tools.some((tool: { function: { name: string } }) => tool.function.name.startsWith('activity_'))).toBe(false)
-    expect(startActivity).not.toHaveBeenCalled()
+    expect(startActivity).toHaveBeenCalledWith('neither-yes-nor-no', {})
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(onContent).toHaveBeenCalledWith('L’activité est démarrée.\n\nAs-tu déjà voyagé en train ?')
+  })
+
+  it('passes an active neither-yes-nor-no answer verbatim and asks the next question', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: {
+          name: 'activity_action',
+          arguments: { action: { type: 'answer', text: 'texte inventé' } }
+        } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: 'Préfères-tu le matin ou le soir ?' }, done: true
+      }]))
+    vi.stubGlobal('fetch', fetcher)
+    const applyActivity = vi.fn().mockReturnValue({
+      ok: true,
+      activityId: 'active',
+      engineId: 'neither-yes-nor-no',
+      status: 'active',
+      message: 'Réponse acceptée. La partie continue.',
+      publicView: { activity: 'Ni oui ni non', round: 1, status: 'active' }
+    })
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Absolument !' }],
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      activityContext: '{"activityId":"active","engineId":"neither-yes-nor-no","publicView":{"round":0,"status":"active"}}',
+      startActivity: vi.fn(),
+      applyActivity
+    })
+
+    expect(applyActivity).toHaveBeenCalledWith(undefined, { type: 'answer', text: 'Absolument !' })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(onContent).toHaveBeenCalledWith('Réponse acceptée. La partie continue.\n\nPréfères-tu le matin ou le soir ?')
+  })
+
+  it('blocks a lying narrator and uses the deterministic next question instead', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: {
+          name: 'activity_action',
+          arguments: { action: { type: 'answer', text: 'tomate' } }
+        } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: 'Tomate est un mot interdit : tu as perdu !' }, done: true
+      }]))
+    vi.stubGlobal('fetch', fetcher)
+    const applyActivity = vi.fn().mockReturnValue({
+      ok: true,
+      activityId: 'active',
+      engineId: 'neither-yes-nor-no',
+      status: 'active',
+      message: 'Réponse acceptée. La partie continue.',
+      publicView: { activity: 'Ni oui ni non', round: 1, status: 'active' }
+    })
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'tomate' }],
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      activityContext: '{"activityId":"active","engineId":"neither-yes-nor-no","publicView":{"round":0,"status":"active"}}',
+      startActivity: vi.fn(),
+      applyActivity
+    })
+
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(applyActivity).toHaveBeenCalledWith(undefined, { type: 'answer', text: 'tomate' })
+    expect(onContent).toHaveBeenCalledExactlyOnceWith(
+      'Réponse acceptée. La partie continue.\n\nPréfères-tu le matin ou le soir ?'
+    )
+    expect(onContent).not.toHaveBeenCalledWith(expect.stringMatching(/mot interdit|perdu/i))
+  })
+
+  it.each([
+    ['une fausse conclusion déguisée en question', 'As-tu perdu cette partie ?'],
+    ['un narrateur en échec', null]
+  ])('uses the deterministic question for %s', async (_case, narration) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(streamResponse([{
+      message: { tool_calls: [{ function: {
+        name: 'activity_action',
+        arguments: { action: { type: 'answer', text: 'tomate' } }
+      } }] },
+      done: true
+    }]))
+    if (narration === null) fetcher.mockRejectedValueOnce(new Error('Narrateur indisponible'))
+    else fetcher.mockResolvedValueOnce(streamResponse([{ message: { content: narration }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const applyActivity = vi.fn().mockReturnValue({
+      ok: true,
+      activityId: 'active',
+      engineId: 'neither-yes-nor-no',
+      status: 'active',
+      message: 'Réponse acceptée. La partie continue.',
+      publicView: { activity: 'Ni oui ni non', round: 2, status: 'active' }
+    })
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'tomate' }],
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      activityContext: '{"activityId":"active","engineId":"neither-yes-nor-no","publicView":{"round":1,"status":"active"}}',
+      startActivity: vi.fn(),
+      applyActivity
+    })
+
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(onContent).toHaveBeenCalledExactlyOnceWith(
+      'Réponse acceptée. La partie continue.\n\nAimes-tu cuisiner pendant ton temps libre ?'
+    )
+  })
+
+  it('returns a deterministic loss without asking the narrator to reinterpret it', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(streamResponse([{
+      message: { tool_calls: [{ function: {
+        name: 'activity_action',
+        arguments: { action: { type: 'answer', text: 'Non.' } }
+      } }] },
+      done: true
+    }]))
+    vi.stubGlobal('fetch', fetcher)
+    const applyActivity = vi.fn().mockReturnValue({
+      ok: true,
+      activityId: 'active',
+      engineId: 'neither-yes-nor-no',
+      status: 'completed',
+      message: 'Un mot interdit a été prononcé : la partie est perdue.',
+      publicView: { activity: 'Ni oui ni non', round: 2, status: 'lost' }
+    })
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'NÖN, jamais !' }],
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      activityContext: '{"activityId":"active","engineId":"neither-yes-nor-no","publicView":{"round":2,"status":"active"}}',
+      startActivity: vi.fn(),
+      applyActivity
+    })
+
+    expect(applyActivity).toHaveBeenCalledWith(undefined, { type: 'answer', text: 'NÖN, jamais !' })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(onContent).toHaveBeenCalledWith('Un mot interdit a été prononcé : la partie est perdue.')
   })
 
   it('leaves an active hangman game when the user asks to build a hangman website', async () => {
