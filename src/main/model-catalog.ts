@@ -188,14 +188,17 @@ function getCompatibility(
   let compatibility: ModelCompatibility
   let compatibilityReason: string
 
-  if (availableMemory >= model.minimumMemoryBytes * 1.25 && (fitsGpu || lightweight)) {
+  if (!fitsGpu && !lightweight) {
+    compatibility = 'demanding'
+    compatibilityReason = availableMemory >= model.minimumMemoryBytes
+      ? 'Le modèle utilisera fortement le processeur et risque d’être trop lent pour un usage interactif.'
+      : 'Peut être lent ou manquer de mémoire sur cette machine.'
+  } else if (availableMemory >= model.minimumMemoryBytes * 1.25) {
     compatibility = 'recommended'
     compatibilityReason = 'Recommandé pour la mémoire détectée.'
   } else if (availableMemory >= model.minimumMemoryBytes) {
     compatibility = 'compatible'
-    compatibilityReason = knownVram > 0 && !fitsGpu
-      ? 'Compatible via la RAM, mais une partie du modèle utilisera le processeur.'
-      : 'Compatible, avec une vitesse variable selon le matériel.'
+    compatibilityReason = 'Compatible, avec une vitesse variable selon le matériel.'
   } else {
     compatibility = 'demanding'
     compatibilityReason = 'Peut être lent ou manquer de mémoire sur cette machine.'
@@ -248,6 +251,20 @@ export function selectInstalledSpecialistModel(
     })
   const specialist = candidates[0]
   return specialist ? installedById.get(normalizedModelId(specialist.id)) ?? specialist.id : primaryModel
+}
+
+export function selectInstalledInteractiveModel(
+  catalog: readonly CatalogModel[],
+  installedModels: readonly string[],
+  category: ModelCategory
+): string | null {
+  const installedById = new Map(installedModels.map((model) => [normalizedModelId(model), model]))
+  const candidate = [...catalog]
+    .filter((model) => model.categories.includes(category))
+    .filter((model) => model.compatibility === 'recommended' || model.compatibility === 'compatible')
+    .filter((model) => installedById.has(normalizedModelId(model.id)))
+    .sort((left, right) => right.downloadSizeBytes - left.downloadSizeBytes)[0]
+  return candidate ? installedById.get(normalizedModelId(candidate.id)) ?? candidate.id : null
 }
 
 export function selectAutomaticVisionModel(catalog: readonly CatalogModel[]): CatalogModel | null {

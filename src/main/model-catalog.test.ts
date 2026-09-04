@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { HardwareInfo } from '../shared/contracts'
-import { getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledSpecialistModel } from './model-catalog'
+import { getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledInteractiveModel, selectInstalledSpecialistModel } from './model-catalog'
 
 function hardware(overrides: Partial<HardwareInfo> = {}): HardwareInfo {
   return {
@@ -31,8 +31,8 @@ describe('getModelCatalog', () => {
       gpus: [{ model: 'GPU 16 GB', vramBytes: 16_000_000_000 }]
     })).find((entry) => entry.id === 'qwen3.8:27b')
 
-    expect(model?.compatibility).toBe('compatible')
-    expect(model?.compatibilityReason).toContain('utilisera le processeur')
+    expect(model?.compatibility).toBe('demanding')
+    expect(model?.compatibilityReason).toContain('trop lent')
   })
 
   it('marks experimental image generation unsupported on Windows', () => {
@@ -85,6 +85,17 @@ describe('getModelCatalog', () => {
       'code',
       'qwen3.5:2b'
     )).toBe('qwen3.5:4b')
+  })
+
+  it('selects an installed interactive model instead of an oversized CPU-offloaded model', () => {
+    const catalog = getModelCatalog(hardware({
+      totalMemoryBytes: 64_000_000_000,
+      gpus: [{ model: 'GPU 16 GB', vramBytes: 16_000_000_000 }]
+    }))
+
+    expect(selectInstalledInteractiveModel(catalog, ['qwen3.8:27b', 'qwen3.5:9b'], 'code'))
+      .toBe('qwen3.5:9b')
+    expect(selectInstalledInteractiveModel(catalog, ['qwen3.8:27b'], 'code')).toBeNull()
   })
 
   it('exposes one polyvalent model in general, code, vision, and fast usages', () => {

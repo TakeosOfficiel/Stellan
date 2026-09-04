@@ -32,7 +32,7 @@ import {
   ensureManagedLinuxRuntime,
   stopManagedLinuxRuntime
 } from './linux-runtime'
-import { getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledSpecialistModel } from './model-catalog'
+import { getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledInteractiveModel, selectInstalledSpecialistModel } from './model-catalog'
 import { configureOllamaModelOptions, configureOllamaUrl, getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
 import { detectOllamaGpuBackend, OLLAMA_CONTAINER_NAME, OLLAMA_HOST_PORT, startOllamaServer, type OllamaGpuBackend } from './ollama-process'
 import { assertPortalAccess, PortalManager } from './portal'
@@ -657,13 +657,28 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           const { hardware, installed } = await specialistContext
           return selectInstalledSpecialistModel(getModelCatalog(hardware), installed, category, primaryModel)
         }
-        const executionModel = executionPath && visionModel === run.model && intentClassification.intent === 'code'
-          ? await selectSpecialist('code', visionModel)
-          : visionModel
+        let executionModel = visionModel
+        let oversizedCodeModel = false
+        if (executionPath && intentClassification.intent === 'code') {
+          specialistContext ??= Promise.all([getOllamaStatus(), getHardwareInfo()]).then(([status, hardware]) => ({
+            hardware,
+            installed: status.available ? status.models.map((model) => model.name) : []
+          }))
+          const { hardware, installed } = await specialistContext
+          const catalog = getModelCatalog(hardware)
+          oversizedCodeModel = catalog.some((model) => model.id === visionModel && model.compatibility === 'demanding')
+          const interactiveModel = selectInstalledInteractiveModel(catalog, installed, 'code')
+          if (!interactiveModel) {
+            throw new Error(`${visionModel} est trop lourd pour une réponse interactive sur ce GPU. Installez ou sélectionnez un modèle de code plus léger, comme Qwen 3.5 9B ou 4B.`)
+          }
+          executionModel = interactiveModel
+        }
         if (executionModel !== run.model) {
           sendChatEvent(run, {
             type: 'progress',
-            detail: `Modèle spécialisé sélectionné automatiquement : ${executionModel}`,
+            detail: oversizedCodeModel
+              ? `${run.model} dépasse les ressources adaptées à une tâche de code interactive ; exécution avec ${executionModel}.`
+              : `Modèle spécialisé sélectionné automatiquement : ${executionModel}`,
             percent: null
           })
         }
