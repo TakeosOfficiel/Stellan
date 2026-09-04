@@ -71,7 +71,7 @@ function requestsImageAnalysis(messages: readonly ChatMessage[]): boolean {
   const referencesImage = /\b(?:image|photo|capture|screenshot|piece jointe)\b/.test(request)
   const requestsInspection = /\b(?:analyse|analyser|decris|decrire|regarde|regarder|vois|voit|voir|montre|identifier|quoi|cette)\b/.test(request)
   return (referencesImage && (requestsInspection || (latestUser.images?.length ?? 0) > 0))
-    || ((latestUser.images?.length ?? 0) > 0 && /\b(?:cette|voici|regarde|analyse|decris)\b/.test(request))
+    || ((latestUser.images?.length ?? 0) > 0 && /\b(?:cette|voici|regarde|analyse|decris|vois|voit|voir|quoi)\b/.test(request))
 }
 
 export function classifyIntentByRule(

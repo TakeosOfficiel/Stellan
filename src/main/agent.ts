@@ -1360,18 +1360,22 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   const promptMessages = reliableActivityMode || activityExitRequested
     ? options.messages.filter((message) => message.role === 'user').slice(-1)
     : options.messages.filter((message) => message.role !== 'system')
+  const hasAttachedImages = promptMessages.some((message) => (message.images?.length ?? 0) > 0)
+  const attachedImageRules = hasAttachedImages
+    ? '\n\nIMAGES JOINTES\n- Une ou plusieurs images sont réellement jointes et accessibles dans les messages. Analyse-les lorsque l’utilisateur le demande. Ne prétends jamais ne pas les avoir reçues et ne réponds pas par une salutation générique à la place de leur analyse.'
+    : ''
   const conversation: OllamaMessage[] = [
     {
       role: 'system',
       content: reliableActivityMode
         ? buildActiveActivitySystemPrompt(routedActivityContext, requestedActivityEngine)
         : discussionMode
-          ? buildConversationSystemPrompt(promptMessages.some((message) => (message.images?.length ?? 0) > 0))
+          ? buildConversationSystemPrompt(hasAttachedImages)
         : `${buildCodingAgentSystemPrompt({
             ...options,
             activityContext: routedActivityContext,
             startActivity: activityExitRequested || !reliableActivityRequested ? undefined : options.startActivity
-          })}${activityExitRequested ? '\n\nLa précédente activité vient d’être fermée à la demande de l’utilisateur. Ne la relance pas. Réponds maintenant naturellement au reste de son message.' : ''}`
+          })}${attachedImageRules}${activityExitRequested ? '\n\nLa précédente activité vient d’être fermée à la demande de l’utilisateur. Ne la relance pas. Réponds maintenant naturellement au reste de son message.' : ''}`
     },
     ...promptMessages
   ]

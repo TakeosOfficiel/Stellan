@@ -58,6 +58,9 @@ describe('intent classifier', () => {
     expect(classifyIntentByRule([
       { role: 'user', content: 'cette iomage', images: [image] }
     ])).toMatchObject({ intent: 'discussion', clear: true, reason: 'attached-image-analysis' })
+    expect(classifyIntentByRule([
+      { role: 'user', content: 't u voit quoi ?', images: [image] }
+    ])).toMatchObject({ intent: 'discussion', clear: true, reason: 'attached-image-analysis' })
   })
 
   it('keeps an image-backed software modification in code mode', () => {

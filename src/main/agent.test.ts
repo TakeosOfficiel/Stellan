@@ -149,6 +149,37 @@ describe('agent guardrails', () => {
     })
   })
 
+  it('keeps explicit image guidance when the isolated classifier returns unknown', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(streamResponse([
+      { message: { content: 'Je vois un grand nombre vert.' }, done: true }
+    ]))
+    vi.stubGlobal('fetch', fetcher)
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [{
+        role: 'user',
+        content: 't u voit quoi ?',
+        images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }]
+      }],
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(false),
+      intentClassification: {
+        intent: 'unknown',
+        clear: false,
+        source: 'fallback',
+        reason: 'invalid-classifier-output'
+      }
+    })
+
+    const request = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))
+    expect(request.messages[0]?.content).toContain('IMAGES JOINTES')
+    expect(request.messages[0]?.content).toContain('Ne prétends jamais ne pas les avoir reçues')
+    expect(request.messages[1]?.images).toEqual(['aGVsbG8='])
+  })
+
   it('keeps an explicitly conversational request in the chat without forcing file tools', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
