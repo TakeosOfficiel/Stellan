@@ -11,15 +11,28 @@ const { version } = require('../../package.json')
 const expectedNames =
   target === 'windows'
     ? [`Stellan-${version}-win-x64.exe`]
-    : [
-        `Stellan-${version}-linux-x86_64.AppImage`,
-        `Stellan-${version}-linux-amd64.deb`,
-      ]
+    : [`Stellan-${version}-linux-x86_64.AppImage`]
 const artifactDirectory = path.resolve('ci-artifacts', 'unsigned', target)
 
 fs.mkdirSync(artifactDirectory, { recursive: true })
 
+const manifest = path.resolve('dist', target === 'windows' ? 'latest.yml' : 'latest-linux.yml')
+const manifestContents = fs.readFileSync(manifest, 'utf8')
+if (!manifestContents.includes(`version: ${version}`) || !manifestContents.includes('sha512:')) {
+  console.error(`Update manifest is invalid: ${path.relative(process.cwd(), manifest)}`)
+  process.exit(1)
+}
+const mainBundle = fs.readFileSync(path.resolve('out', 'main', 'index.js'), 'utf8')
+if (/import\s*\{[^}]*\bautoUpdater\b[^}]*\}\s*from\s*["']electron-updater["']/.test(mainBundle)) {
+  console.error('The main bundle uses a named ESM import from the CommonJS electron-updater package.')
+  process.exit(1)
+}
 if (target === 'windows') {
+  const blockmap = path.resolve('dist', `Stellan-${version}-win-x64.exe.blockmap`)
+  if (!fs.statSync(blockmap).isFile() || fs.statSync(blockmap).size === 0) {
+    console.error(`Windows differential update blockmap is missing: ${blockmap}`)
+    process.exit(1)
+  }
   const nodePty = path.resolve(
     'dist',
     'win-unpacked',

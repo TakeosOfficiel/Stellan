@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, readdir, realpath, stat, unlink } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, realpath, rmdir, stat, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 import spawn from 'cross-spawn'
@@ -225,6 +225,19 @@ export class ProjectTools {
     return { path: relativePath, added, removed }
   }
 
+  async editFile(relativePath: string, oldText: string, newText: string, replaceAll = false): Promise<FileWriteResult> {
+    const content = await this.readFile(relativePath)
+    const occurrences = content.split(oldText).length - 1
+    if (occurrences === 0) throw new Error('Le texte à remplacer est introuvable dans le fichier.')
+    if (!replaceAll && occurrences !== 1) {
+      throw new Error(`Le texte à remplacer apparaît ${occurrences} fois. Fournissez plus de contexte ou activez replaceAll.`)
+    }
+    return this.writeFile(
+      relativePath,
+      replaceAll ? content.split(oldText).join(newText) : content.replace(oldText, newText)
+    )
+  }
+
   async deleteFile(relativePath: string): Promise<FileWriteResult> {
     const previous = await this.readFile(relativePath)
     const target = await this.safePath(relativePath)
@@ -235,6 +248,17 @@ export class ProjectTools {
       if (change.removed) removed += change.count ?? 0
     }
     await unlink(target)
+    let directory = path.dirname(target)
+    while (directory !== this.root) {
+      try {
+        await rmdir(directory)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'ENOTEMPTY' || code === 'EEXIST') break
+        if (code !== 'ENOENT') throw error
+      }
+      directory = path.dirname(directory)
+    }
     return { path: relativePath, added: 0, removed }
   }
 

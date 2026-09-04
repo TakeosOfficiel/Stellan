@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { WorkerProfile } from '../shared/contracts'
-import { ContainerProjectTools } from './container-project-tools'
+import type { AgentProjectTools } from './agent'
+import { ContainerProjectTools, createAgentProjectTools } from './container-project-tools'
 import type { CommandResult, executeInWorkerContainer } from './runtime'
 
 const profile: WorkerProfile = {
@@ -15,6 +16,17 @@ function result(stdout = ''): CommandResult {
 }
 
 describe('ContainerProjectTools', () => {
+  it('fails closed instead of returning host project tools for a direct profile', () => {
+    const direct = {} as AgentProjectTools
+
+    expect(() => createAgentProjectTools(
+      { ...profile, mode: 'direct', runtime: null },
+      'thread-123',
+      '/project',
+      direct
+    )).toThrow('accès direct')
+  })
+
   it('routes reads, writes, searches, Git, and commands through the persistent container', async () => {
     const executor = vi.fn<typeof executeInWorkerContainer>()
       .mockResolvedValueOnce(result('avant\n'))
@@ -62,6 +74,8 @@ describe('ContainerProjectTools', () => {
     })
     expect(executor).toHaveBeenCalledTimes(2)
     expect(executor.mock.calls[1]?.[0].command).toContain('src/a.ts')
+    expect(executor.mock.calls[1]?.[0].command.join('\n')).toContain('fs.rmdirSync(directory)')
+    expect(executor.mock.calls[1]?.[0].command.join('\n')).toContain('directory !== root')
   })
 
   it('returns reviewable changes and line counts for untracked files', async () => {

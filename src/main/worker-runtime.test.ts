@@ -45,8 +45,12 @@ describe('createWorkerCommandExecutor', () => {
     })
   })
 
-  it('keeps direct profiles on the native ProjectTools executor', () => {
-    expect(createWorkerCommandExecutor({ ...profile, mode: 'direct', runtime: null }, 'thread', '/workspace')).toBeUndefined()
+  it('fails closed instead of executing a direct profile on the host', () => {
+    expect(() => createWorkerCommandExecutor(
+      { ...profile, mode: 'direct', runtime: null },
+      'thread',
+      '/workspace'
+    )).toThrow('exécution directe')
   })
 
   it('fails closed for an invalid persisted container profile', () => {

@@ -57,9 +57,10 @@ if (target === 'windows') {
 } else {
   run(
     process.execPath,
-    [require.resolve('electron-builder/cli.js'), '--linux', 'AppImage', 'deb', '--x64', '--publish', 'never'],
+    [require.resolve('electron-builder/cli.js'), '--linux', 'AppImage', '--x64', '--publish', 'never'],
     { env: packagingEnvironment },
   )
 }
 
+run(process.execPath, ['scripts/ci/smoke-packaged-native.cjs', target])
 run(process.execPath, ['scripts/ci/verify-artifacts.cjs', target])

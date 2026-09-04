@@ -85,13 +85,15 @@ export function WorkbenchPanel({
   projectName,
   refreshKey,
   revealFile,
-  onChooseProject
+  onChooseProject,
+  active = true
 }: {
   thread: StoredThread | undefined
   projectName: string
   refreshKey: string
   revealFile: { threadId: string; path: string; nonce: number } | null
   onChooseProject: () => void
+  active?: boolean
 }): React.JSX.Element {
   const [tab, setTab] = useState<WorkbenchTab>('changes')
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -117,6 +119,7 @@ export function WorkbenchPanel({
   const [portalError, setPortalError] = useState<string | null>(null)
   const [terminalStartedForThreadId, setTerminalStartedForThreadId] = useState<string | null>(null)
   const ready = Boolean(thread?.projectPath && thread.environmentStatus === 'active')
+  const panelId = thread?.id ?? 'empty'
 
   useEffect(() => {
     if (!portalMenuOpen) return
@@ -225,7 +228,12 @@ export function WorkbenchPanel({
       setFilePreview(await window.localAgent.readProjectFile({ threadId: thread.id, path }))
     } catch (error) {
       setFilePreview(null)
-      setFilesError(error instanceof Error ? error.message : 'Ce fichier ne peut pas être prévisualisé.')
+      const message = error instanceof Error ? error.message : ''
+      if (/\bENOENT\b|no such file/i.test(message)) {
+        await refreshFiles()
+        return
+      }
+      setFilesError(message || 'Ce fichier ne peut pas être prévisualisé.')
     }
   }
 
@@ -342,7 +350,7 @@ export function WorkbenchPanel({
   }
 
   return (
-    <aside className={focused ? 'workbench focused' : 'workbench'} aria-label="Espace de travail du projet">
+    <aside className={`${focused ? 'workbench focused' : 'workbench'}${active ? '' : ' inactive'}`} aria-hidden={!active} aria-label="Espace de travail du projet">
       <div className="workbench-titlebar">
         <nav className="workbench-tabs" aria-label="Outils du projet" role="tablist">
           {TABS.map((item) => (
@@ -351,7 +359,7 @@ export function WorkbenchPanel({
               type="button"
               role="tab"
               aria-selected={tab === item.id}
-              aria-controls={ready && !item.disabled ? `workbench-${item.id}` : undefined}
+              aria-controls={ready && !item.disabled ? `workbench-${panelId}-${item.id}` : undefined}
               disabled={item.disabled || !ready}
               title={item.disabled ? 'Bientôt disponible' : !ready ? 'Ouvrez d’abord un projet' : undefined}
               onClick={() => selectTab(item.id)}
@@ -371,7 +379,7 @@ export function WorkbenchPanel({
         </div>
       ) : (
         <div className="workbench-content">
-          <section id="workbench-changes" role="tabpanel" className={tab === 'changes' ? 'workbench-pane active' : 'workbench-pane'} aria-label="Modifications">
+          <section id={`workbench-${panelId}-changes`} role="tabpanel" className={tab === 'changes' ? 'workbench-pane active' : 'workbench-pane'} aria-label="Modifications">
             <header className="changes-toolbar">
               <div>
                 <button className={reviewOpen ? 'active' : ''} type="button" aria-pressed={reviewOpen} onClick={() => setReviewOpen((value) => !value)}><ListChecks aria-hidden="true" />Relire</button>
@@ -402,7 +410,7 @@ export function WorkbenchPanel({
             ) : <div className="workbench-zero"><span aria-hidden="true"><Plus /></span><p>Aucune modification</p></div>}
           </section>
 
-          <section id="workbench-portals" role="tabpanel" className={tab === 'portals' ? 'workbench-pane active portals-pane' : 'workbench-pane portals-pane'} aria-label="Portails">
+          <section id={`workbench-${panelId}-portals`} role="tabpanel" className={tab === 'portals' ? 'workbench-pane active portals-pane' : 'workbench-pane portals-pane'} aria-label="Portails">
             <div className="portal-browser">
               <div className="portal-browser-toolbar">
                 <div className="portal-history-controls">
@@ -460,7 +468,7 @@ export function WorkbenchPanel({
             </div>
           </section>
 
-          <section id="workbench-files" role="tabpanel" className={tab === 'files' ? 'workbench-pane active files-pane' : 'workbench-pane files-pane'} aria-label="Fichiers">
+          <section id={`workbench-${panelId}-files`} role="tabpanel" className={tab === 'files' ? 'workbench-pane active files-pane' : 'workbench-pane files-pane'} aria-label="Fichiers">
             {filesError && <p className="workbench-error" role="alert">{filesError}</p>}
             {filePreview ? (
               <div className="file-preview">
@@ -479,7 +487,7 @@ export function WorkbenchPanel({
             )}
           </section>
 
-          <section id="workbench-terminal" role="tabpanel" className={tab === 'terminal' ? 'workbench-pane active terminal-pane' : 'workbench-pane terminal-pane'} aria-label="Terminal">
+          <section id={`workbench-${panelId}-terminal`} role="tabpanel" className={tab === 'terminal' ? 'workbench-pane active terminal-pane' : 'workbench-pane terminal-pane'} aria-label="Terminal">
             {thread && terminalStartedForThreadId === thread.id && <TerminalPanel threadId={thread.id} projectName={projectName} onClose={() => {
               void window.localAgent.closeTerminal(thread.id)
               setTerminalStartedForThreadId(null)

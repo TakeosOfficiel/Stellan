@@ -7,20 +7,28 @@ directories:
 
 artifactName: Stellan-${version}-${os}-${arch}.${ext}
 asar: true
+npmRebuild: false
 asarUnpack:
   - node_modules/node-pty/**/*
   - node_modules/onnxruntime-node/**/*
+  - node_modules/sharp/**/*
+  - node_modules/@img/sharp-*/**/*
 afterPack: scripts/after-pack.cjs
 files:
   - out/**/*
   - package.json
 
 win:
+  publish:
+    provider: generic
+    url: https://update.stellan.takeos.fr/windows
   extraResources:
     - from: node_modules/@vscode/ripgrep-win32-${arch}/bin/rg.exe
       to: bin/rg.exe
   target:
-    - nsis
+    - target: nsis
+      arch:
+        - x64
 
 nsis:
   oneClick: false
@@ -32,9 +40,13 @@ nsis:
 linux:
   category: Development
   maintainer: Stellan contributors
+  publish:
+    provider: generic
+    url: https://update.stellan.takeos.fr/linux
   extraResources:
     - from: node_modules/@vscode/ripgrep-linux-${arch}/bin/rg
       to: bin/rg
   target:
-    - AppImage
-    - deb
+    - target: AppImage
+      arch:
+        - x64

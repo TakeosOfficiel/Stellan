@@ -12,6 +12,7 @@ export type CatalogModel = {
   id: string
   name: string
   category: ModelCategory
+  categories: ModelCategory[]
   description: string
   downloadSizeBytes: number
   minimumMemoryBytes: number
@@ -57,6 +58,13 @@ export type RuntimeProgress = {
   percent: number
 }
 
+export type UpdateState =
+  | { status: 'checking' }
+  | { status: 'current'; version: string }
+  | { status: 'downloading'; version: string; percent: number; bytesPerSecond: number }
+  | { status: 'restarting'; version: string }
+  | { status: 'error'; message: string }
+
 export type ModelPullProgress = {
   model: string
   status: string
@@ -77,9 +85,15 @@ export type DictationProgress = {
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool'
 
+export type ChatImage = {
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp'
+  data: string
+}
+
 export type ChatMessage = {
   role: ChatRole
   content: string
+  images?: ChatImage[]
 }
 
 export type ChatRequest = {
@@ -92,6 +106,7 @@ export type ChatRequest = {
 
 export type ChatEvent =
   | { requestId: string; threadId: string; type: 'status'; status: 'queued' | 'running' }
+  | { requestId: string; threadId: string; type: 'progress'; detail: string; percent: number | null }
   | { requestId: string; threadId: string; type: 'thread-created'; child: StoredThread }
   | {
       requestId: string
@@ -99,6 +114,7 @@ export type ChatEvent =
       type: 'started'
       userMessageId: string
       userContent: string
+      images: ChatImage[]
     }
   | { requestId: string; threadId: string; type: 'content'; content: string }
   | {
@@ -187,12 +203,35 @@ export type StoredThread = {
   updatedAt: string
 }
 
+export type DeleteThreadRequest = {
+  threadId: string
+  discardChanges: boolean
+}
+
+export type DeleteThreadResult = {
+  deleted: boolean
+  pendingChanges: string | null
+}
+
 export type StoredMessage = {
   id: string
   threadId: string
   role: ChatRole
   content: string
+  images: ChatImage[]
   createdAt: string
+}
+
+export const MODEL_SELECTION_MESSAGE_PREFIX = 'stellan:model-selection:'
+
+export type SetThreadModelRequest = {
+  threadId: string
+  model: string
+}
+
+export type SetThreadModelResult = {
+  thread: StoredThread
+  message: StoredMessage | null
 }
 
 export type CreateThreadRequest = {
@@ -280,6 +319,8 @@ export type LocalAgentApi = {
   toggleMaximizeWindow: () => Promise<void>
   closeWindow: () => Promise<void>
   setStartupWindow: (active: boolean) => Promise<void>
+  getUpdateState: () => Promise<UpdateState>
+  onUpdateState: (listener: (state: UpdateState) => void) => () => void
   getOllamaStatus: () => Promise<OllamaStatus>
   startOllama: () => Promise<OllamaStatus>
   getBasicHardwareInfo: () => Promise<HardwareInfo>
@@ -303,9 +344,10 @@ export type LocalAgentApi = {
   onChatEvent: (listener: (event: ChatEvent) => void) => () => void
   listThreads: () => Promise<StoredThread[]>
   setActiveThread: (threadId: string | null) => Promise<void>
+  setThreadModel: (request: SetThreadModelRequest) => Promise<SetThreadModelResult>
   createThread: (request: CreateThreadRequest) => Promise<StoredThread>
   loadThreadMessages: (threadId: string) => Promise<StoredMessage[]>
-  deleteThread: (threadId: string) => Promise<boolean>
+  deleteThread: (request: DeleteThreadRequest) => Promise<DeleteThreadResult>
   exportThreadProject: (threadId: string) => Promise<string | null>
   getProjectResources: (threadId: string) => Promise<ProjectResourceSettings>
   saveProjectResources: (request: SaveProjectResourceSettingsRequest) => Promise<ProjectResourceSettings>

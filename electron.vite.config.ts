@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ['cross-spawn'] })]
+    plugins: [externalizeDepsPlugin({ exclude: ['cross-spawn', 'electron-updater'] })]
   },
   preload: {
     plugins: [externalizeDepsPlugin()],

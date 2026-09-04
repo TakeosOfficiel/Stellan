@@ -1,6 +1,7 @@
 import os from 'node:os'
 import systeminformation from 'systeminformation'
 import type { HardwareInfo } from '../shared/contracts'
+import type { OllamaGpuBackend } from './ollama-process'
 
 type GraphicsController = {
   model?: string | null
@@ -35,6 +36,35 @@ export function selectGpus(controllers: GraphicsController[]): HardwareInfo['gpu
       if (leftDiscrete !== rightDiscrete) return rightDiscrete - leftDiscrete
       return (right.vramBytes ?? 0) - (left.vramBytes ?? 0)
     })
+}
+
+export function inferenceParallelism(
+  hardware: HardwareInfo,
+  gpuBackend: OllamaGpuBackend = 'cpu'
+): 1 | 2 {
+  const largestVram = hardware.gpus.reduce(
+    (largest, gpu) => Math.max(largest, gpu.vramBytes ?? 0),
+    0
+  )
+  return gpuBackend !== 'cpu'
+    && largestVram >= 16_000_000_000
+    && hardware.totalMemoryBytes >= 24_000_000_000
+    ? 2
+    : 1
+}
+
+export function inferenceModelOptions(hardware: HardwareInfo): { numCtx: number; numPredict: number } {
+  const largestVram = hardware.gpus.reduce(
+    (largest, gpu) => Math.max(largest, gpu.vramBytes ?? 0),
+    0
+  )
+  if (largestVram >= 24_000_000_000 || hardware.totalMemoryBytes >= 64_000_000_000) {
+    return { numCtx: 32_768, numPredict: 2_048 }
+  }
+  if (largestVram >= 12_000_000_000 || hardware.totalMemoryBytes >= 24_000_000_000) {
+    return { numCtx: 16_384, numPredict: 1_536 }
+  }
+  return { numCtx: 8_192, numPredict: 1_024 }
 }
 
 export function getBasicHardwareInfo(): HardwareInfo {

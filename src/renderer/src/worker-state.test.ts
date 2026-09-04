@@ -11,7 +11,8 @@ describe('parallel worker renderer state', () => {
       threadId: 'thread-b',
       type: 'started',
       userMessageId: 'message-b',
-      userContent: 'B question'
+      userContent: 'B question',
+      images: []
     }
     const content: ChatEvent = { requestId: 'request-b', threadId: 'thread-b', type: 'content', content: 'B result' }
     let runs = applyRunEvent({}, queued)
@@ -37,7 +38,8 @@ describe('parallel worker renderer state', () => {
       threadId: 'thread',
       type: 'started',
       userMessageId: 'message',
-      userContent: 'Message en file'
+      userContent: 'Message en file',
+      images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }]
     }
     expect(applyMessageEvent({}, queued)).toEqual({})
     const first = applyMessageEvent({}, started)
@@ -45,6 +47,7 @@ describe('parallel worker renderer state', () => {
       ['user', 'Message en file'],
       ['assistant', '']
     ])
+    expect(first.thread?.[0]?.images).toEqual([{ mimeType: 'image/png', data: 'aGVsbG8=' }])
     expect(applyMessageEvent(first, started)).toBe(first)
   })
 

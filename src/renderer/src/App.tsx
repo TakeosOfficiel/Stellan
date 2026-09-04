@@ -16,7 +16,8 @@ import type {
   ModelPullProgress,
   OllamaStatus,
   RuntimeProgress,
-  SetupInfo
+  SetupInfo,
+  UpdateState
 } from '../../shared/contracts'
 import {
   getOllamaSetupState,
@@ -29,6 +30,7 @@ type LoadState = OllamaStatus | null | 'loading'
 
 const ONBOARDING_KEY = 'local-agent:onboarding-complete'
 const CATEGORY_KEY = 'local-agent:model-category'
+const IS_WINDOWS = navigator.userAgent.includes('Windows')
 const STARTUP_PHRASES = [
   'Préparation de votre espace privé…',
   'Mise en route des outils locaux…',
@@ -59,7 +61,7 @@ function normalizeModelName(model: string): string {
 function compatibilityLabel(model: CatalogModel): string {
   if (model.compatibility === 'recommended') return 'Recommandé'
   if (model.compatibility === 'compatible') return 'Compatible'
-  if (model.compatibility === 'demanding') return 'Exigeant'
+  if (model.compatibility === 'demanding') return 'Non recommandé'
   return 'Non disponible'
 }
 
@@ -104,6 +106,7 @@ function TitleBar({ view, onViewChange }: {
 export function App(): React.JSX.Element {
   const [firstRun, setFirstRun] = useState(() => localStorage.getItem(ONBOARDING_KEY) !== 'true')
   const [view, setView] = useState<AppView>(() => firstRun ? 'setup' : 'agent')
+  const [preferredModel, setPreferredModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
   const [workspaceShortcut, setWorkspaceShortcut] = useState<WorkspaceShortcut | null>(null)
   const [status, setStatus] = useState<LoadState>(null)
   const [setup, setSetup] = useState<SetupInfo | null>(null)
@@ -118,7 +121,9 @@ export function App(): React.JSX.Element {
   const [installationEvidence, setInstallationEvidence] = useState<InstallationEvidence>('unknown')
   const [actionError, setActionError] = useState<string | null>(null)
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null)
+  const [updateState, setUpdateState] = useState<UpdateState>({ status: 'checking' })
   const startupCardRef = useRef<HTMLElement>(null)
+  const localStartupStarted = useRef(false)
 
   const refreshStatus = useCallback(async () => {
     setCheckingOllama(true)
@@ -158,13 +163,17 @@ export function App(): React.JSX.Element {
 
   async function activateRuntime(): Promise<void> {
     setActivatingRuntime(true)
-    setRuntimeProgress({ step: 'Activation de WSL 2', detail: 'Préparation de la demande Windows…', percent: 1 })
+    setRuntimeProgress(IS_WINDOWS
+      ? { step: 'Activation de WSL 2', detail: 'Préparation de la demande Windows…', percent: 1 }
+      : { step: 'Préparation du moteur privé', detail: 'Vérification des prérequis Linux…', percent: 1 })
     setActionError(null)
     try {
       await window.localAgent.openOllamaDownload()
       await startOllama()
-    } catch {
-      setActionError('WSL 2 n’a pas pu être activé. Acceptez la demande Windows puis redémarrez le PC si nécessaire.')
+    } catch (error) {
+      setActionError(IS_WINDOWS
+        ? 'WSL 2 n’a pas pu être activé. Acceptez la demande Windows puis redémarrez le PC si nécessaire.'
+        : error instanceof Error ? error.message : 'Le moteur Linux privé n’a pas pu être préparé.')
     } finally {
       setActivatingRuntime(false)
       setRuntimeProgress(null)
@@ -172,12 +181,17 @@ export function App(): React.JSX.Element {
   }
 
   useEffect(() => {
-    void startOllama()
+    const unsubscribe = window.localAgent.onUpdateState(setUpdateState)
+    void window.localAgent.getUpdateState().then(setUpdateState)
+    return unsubscribe
   }, [])
 
   useEffect(() => {
+    if (updateState.status !== 'current' || localStartupStarted.current) return
+    localStartupStarted.current = true
+    void startOllama()
     void analyzeComputer()
-  }, [])
+  }, [updateState.status])
 
   async function analyzeComputer(): Promise<void> {
     setSetupError(null)
@@ -195,7 +209,8 @@ export function App(): React.JSX.Element {
     }
   }), [])
 
-  const runtimeBusy = startingOllama || checkingOllama || activatingRuntime
+  const updating = updateState.status !== 'current' && updateState.status !== 'error'
+  const runtimeBusy = updating || startingOllama || checkingOllama || activatingRuntime
   useEffect(() => {
     return window.localAgent.onModelPullProgress(setPullProgress)
   }, [])
@@ -224,7 +239,7 @@ export function App(): React.JSX.Element {
   }, [])
 
   const visibleModels = useMemo(
-    () => setup?.models.filter((model) => model.category === category) ?? [],
+    () => setup?.models.filter((model) => model.categories.includes(category)) ?? [],
     [category, setup]
   )
 
@@ -246,12 +261,24 @@ export function App(): React.JSX.Element {
     setView('agent')
   }, [firstRun, isModelReady])
 
-  const startupVisible = runtimeProgress !== null || runtimeBusy || isLoading || !resolvedStatus?.available
-  const startupPercent = runtimeProgress?.percent ?? (resolvedStatus?.available ? 100 : 2)
-  const startupStep = runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Stellan')
-  const startupDetail = runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
-    ? 'Environnement local prêt.'
-    : resolvedStatus?.reason ?? 'Préparation de l’environnement privé…')
+  const updatePending = updateState.status !== 'current'
+  const startupVisible = updatePending || runtimeProgress !== null || runtimeBusy || isLoading || !resolvedStatus?.available
+  const startupPercent = updateState.status === 'downloading'
+    ? Math.round(updateState.percent)
+    : updatePending ? (updateState.status === 'restarting' ? 100 : 2)
+      : runtimeProgress?.percent ?? (resolvedStatus?.available ? 100 : 2)
+  const startupStep = updateState.status === 'checking' ? 'Recherche des mises à jour'
+    : updateState.status === 'downloading' ? `Mise à jour ${updateState.version}`
+      : updateState.status === 'restarting' ? 'Installation de la mise à jour'
+        : updateState.status === 'error' ? 'Mise à jour impossible'
+          : runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Stellan')
+  const startupDetail = updateState.status === 'checking' ? 'Vérification sécurisée de la version disponible…'
+    : updateState.status === 'downloading' ? `Téléchargement optimisé en cours — ${Math.round(updateState.bytesPerSecond / 1_000_000 * 10) / 10} Mo/s`
+      : updateState.status === 'restarting' ? 'Stellan va redémarrer automatiquement.'
+        : updateState.status === 'error' ? updateState.message
+          : runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
+            ? 'Environnement local prêt.'
+            : resolvedStatus?.reason ?? 'Préparation de l’environnement privé…')
 
   useEffect(() => {
     if (startupVisible) startupCardRef.current?.focus()
@@ -281,6 +308,8 @@ export function App(): React.JSX.Element {
         const nextStatus = await window.localAgent.getOllamaStatus()
         setStatus(nextStatus)
         if (nextStatus.available) setInstallationEvidence('detected')
+        localStorage.setItem('local-agent:model', model.id)
+        setPreferredModel(model.id)
         setPullProgress(null)
       }
     } catch {
@@ -316,9 +345,9 @@ export function App(): React.JSX.Element {
             <progress max="100" value={startupPercent} />
             <p>{STARTUP_PHRASES[Math.min(STARTUP_PHRASES.length - 1, Math.floor(startupPercent / 26))]}</p>
             <small className="startup-detail" title={startupDetail}>{startupDetail}</small>
-            {!runtimeBusy && !resolvedStatus?.available && (
+            {updateState.status === 'current' && !runtimeBusy && !resolvedStatus?.available && (
               <div className="startup-card-actions">
-                {ollamaSetup.canOpenDownload && <button type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>Activer WSL 2</button>}
+                {ollamaSetup.canOpenDownload && <button type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>{IS_WINDOWS ? 'Activer WSL 2' : 'Préparer le moteur privé'}</button>}
                 <button type="button" disabled={checkingOllama || startingOllama} onClick={() => void refreshStatus()}>Réessayer</button>
               </div>
             )}
@@ -335,6 +364,8 @@ export function App(): React.JSX.Element {
       <WorkspaceView
         visible={view === 'agent'}
         status={status}
+        catalogModels={setup?.models ?? []}
+        preferredModel={preferredModel}
         shortcut={workspaceShortcut}
         onShortcutHandled={() => setWorkspaceShortcut(null)}
         onOpenSetup={() => setView('setup')}
@@ -399,7 +430,7 @@ export function App(): React.JSX.Element {
             const installed = installedModels.has(normalizeModelName(model.id))
             const downloading = downloadingModel === model.id
             const disabled =
-              installed || Boolean(downloadingModel) || model.compatibility === 'unsupported' ||
+              installed || Boolean(downloadingModel) || ['demanding', 'unsupported'].includes(model.compatibility) ||
               !canDownload
 
             return (
@@ -432,7 +463,13 @@ export function App(): React.JSX.Element {
                   title={!canDownload ? 'Ollama doit être joignable avant de télécharger un modèle.' : undefined}
                   onClick={() => void downloadModel(model)}
                 >
-                  {installed ? 'Installé' : downloading ? 'Téléchargement…' : 'Télécharger ce modèle'}
+                  {installed
+                    ? 'Installé'
+                    : downloading
+                      ? 'Téléchargement…'
+                      : model.compatibility === 'demanding'
+                        ? 'Configuration insuffisante'
+                        : 'Télécharger ce modèle'}
                 </button>
               </article>
             )

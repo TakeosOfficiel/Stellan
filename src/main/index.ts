@@ -1,28 +1,50 @@
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { cp, lstat, mkdir, rm, statfs } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
 import type { ModelPullProgress, OllamaStatus, RuntimeProgress } from '../shared/contracts'
 import { compactConversation, normalizeWorkerPath, runCodingAgent, type AgentToolLifecycleEvent, type WorkerTask } from './agent'
+import {
+  configureMandatoryUpdater,
+  getUpdateState,
+  isInstallingUpdate,
+  startMandatoryUpdate
+} from './app-updater'
 import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
-import { getBasicHardwareInfo, getHardwareInfo } from './hardware'
+import { getBasicHardwareInfo, getHardwareInfo, inferenceModelOptions, inferenceParallelism } from './hardware'
+import { classifyIntent } from './intent-classifier'
+import {
+  configureInferenceWslRuntime,
+  ensureNvidiaInferenceRuntime,
+  inferenceWslServiceUrl,
+  runInferenceDockerCommand,
+  stopInferenceWslRuntime,
+  verifyNvidiaInferenceContainer
+} from './inference-wsl-runtime'
 import { isTrustedMainFrame } from './ipc-security'
-import { getModelCatalog, isCatalogModel } from './model-catalog'
-import { configureOllamaUrl, getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
-import { OLLAMA_HOST_PORT, startOllamaServer } from './ollama-process'
+import {
+  configureManagedLinuxRuntime,
+  ensureManagedLinuxRuntime,
+  stopManagedLinuxRuntime
+} from './linux-runtime'
+import { getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledSpecialistModel } from './model-catalog'
+import { configureOllamaModelOptions, configureOllamaUrl, getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
+import { detectOllamaGpuBackend, OLLAMA_CONTAINER_NAME, OLLAMA_HOST_PORT, startOllamaServer, type OllamaGpuBackend } from './ollama-process'
 import { assertPortalAccess, PortalManager } from './portal'
 import { ProjectTools } from './project-tools'
-import { createThreadWorktree, ensureWorkerContainer, getRuntimeInfo, removeThreadWorktree, removeWorkerContainer } from './runtime'
+import { createReliableEngineRegistry, ReliableActivityService } from './reliable-activities'
+import { createThreadWorktree, ensureWorkerContainer, exposeWorkerPort, getRuntimeInfo, removeThreadWorktree, removeWorkerContainer } from './runtime'
 import { ThreadStore, type AgentRun, type AgentRunSummary as StoredAgentRunSummary } from './storage'
 import { TerminalManager } from './terminal'
 import { createWorkerCommandExecutor } from './worker-runtime'
 import { WorkerScheduler } from './worker-scheduler'
 import {
   configureManagedWslRuntime,
+  ensureManagedWslRuntime,
   importPrivateProject,
   installWslFeature,
   isManagedProjectWindowsPath,
@@ -56,6 +78,7 @@ const CHAT_SEND_NOW_CHANNEL = 'chat:send-now'
 const CHAT_EVENT_CHANNEL = 'chat:event'
 const THREADS_LIST_CHANNEL = 'threads:list'
 const THREADS_SET_ACTIVE_CHANNEL = 'threads:set-active'
+const THREADS_SET_MODEL_CHANNEL = 'threads:set-model'
 const THREADS_CREATE_CHANNEL = 'threads:create'
 const THREADS_MESSAGES_CHANNEL = 'threads:messages'
 const THREADS_DELETE_CHANNEL = 'threads:delete'
@@ -80,6 +103,20 @@ const WINDOW_MINIMIZE_CHANNEL = 'window:minimize'
 const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'window:toggle-maximize'
 const WINDOW_CLOSE_CHANNEL = 'window:close'
 const WINDOW_SET_STARTUP_CHANNEL = 'window:set-startup'
+const UPDATE_GET_STATE_CHANNEL = 'update:get-state'
+const UPDATE_STATE_CHANNEL = 'update:state'
+
+function writeInferenceLog(message: string): void {
+  try {
+    const logPath = join(app.getPath('logs'), 'inference.log')
+    mkdirSync(dirname(logPath), { recursive: true })
+    if (existsSync(logPath) && statSync(logPath).size > 2_000_000) writeFileSync(logPath, '')
+    appendFileSync(logPath, `${new Date().toISOString()} ${message}\n`)
+    console.info(`[Stellan inference] ${message}`)
+  } catch {
+    console.info(`[Stellan inference] ${message}`)
+  }
+}
 
 const modelIdSchema = z.string().min(1).max(100).refine(isCatalogModel)
 const installedModelNameSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/)
@@ -87,17 +124,37 @@ const dictationAudioSchema = z.custom<ArrayBuffer>((value) => value instanceof A
   .refine((audio) => audio.byteLength >= 6_400, 'La dictée est trop courte.')
   .refine((audio) => audio.byteLength <= 3_840_000, 'La dictée dépasse une minute.')
   .refine((audio) => audio.byteLength % 4 === 0, 'Le format audio est invalide.')
+const chatImageSchema = z.object({
+  mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+  data: z.string().min(4).max(14_000_000).regex(/^[A-Za-z0-9+/]+={0,2}$/)
+})
+const chatMessageSchema = z.object({
+  role: z.enum(['system', 'user', 'assistant', 'tool']),
+  content: z.string().max(200_000),
+  images: z.array(chatImageSchema).max(4).optional()
+})
 const chatRequestSchema = z.object({
   requestId: z.uuid(),
   threadId: z.uuid(),
   model: z.string().min(1).max(200),
   projectPath: z.string().min(1).max(10_000).nullable(),
-  messages: z.array(z.object({
-    role: z.enum(['system', 'user', 'assistant', 'tool']),
-    content: z.string().max(200_000)
-  })).min(1).max(200)
-})
+  messages: z.array(chatMessageSchema).min(1).max(200)
+}).refine(
+  (request) => request.messages.reduce(
+    (total, message) => total + (message.images ?? []).reduce((sum, image) => sum + image.data.length, 0),
+    0
+  ) <= 28_000_000,
+  'Les images jointes dépassent la limite autorisée.'
+)
 const requestIdSchema = z.uuid()
+const deleteThreadSchema = z.object({
+  threadId: z.uuid(),
+  discardChanges: z.boolean()
+})
+const setThreadModelSchema = z.object({
+  threadId: z.uuid(),
+  model: installedModelNameSchema
+})
 const projectFileRequestSchema = z.object({
   threadId: z.uuid(),
   path: z.string().min(1).max(10_000)
@@ -143,6 +200,7 @@ const projectResourcesSchema = z.object({
   automaticCpuMemory: z.boolean()
 })
 let activeDownload: string | null = null
+let activeDownloadPromise: Promise<Awaited<ReturnType<typeof pullOllamaModel>>> | null = null
 let dictationActive = false
 const activeChats = new Map<string, AbortController>()
 const activeThreadChats = new Map<string, string>()
@@ -153,6 +211,8 @@ let recoveredQueueScheduled = false
 let threadStore: ThreadStore | null = null
 let mainWindow: BrowserWindow | null = null
 let ollamaStartPromise: Promise<OllamaStatus> | null = null
+let ollamaGpuBackend: OllamaGpuBackend = 'cpu'
+let ollamaGpuBackendResolved = false
 let shutdownReady = false
 let shutdownCleanup: Promise<void> | null = null
 const pendingWindowCleanups = new Set<Promise<void>>()
@@ -163,10 +223,29 @@ const terminalManager = new TerminalManager((ownerId, terminalEvent) => {
   }
 })
 const portalManager = new PortalManager()
+const reliableEngineRegistry = createReliableEngineRegistry()
 
 function sendRuntimeProgress(progress: RuntimeProgress): void {
   const contents = mainWindow?.webContents
   if (contents && !contents.isDestroyed()) contents.send(RUNTIME_PROGRESS_CHANNEL, progress)
+}
+
+async function downloadModel(
+  model: string,
+  onProgress: (progress: ModelPullProgress) => void
+) {
+  if (activeDownloadPromise) {
+    if (activeDownload === model) return activeDownloadPromise
+    return { success: false as const, reason: `Le téléchargement de ${activeDownload} est déjà en cours.` }
+  }
+  activeDownload = model
+  activeDownloadPromise = pullOllamaModel(model, onProgress)
+  try {
+    return await activeDownloadPromise
+  } finally {
+    activeDownload = null
+    activeDownloadPromise = null
+  }
 }
 
 function ensureOllamaRunning(): Promise<OllamaStatus> {
@@ -175,12 +254,72 @@ function ensureOllamaRunning(): Promise<OllamaStatus> {
   ollamaStartPromise = (async () => {
     sendRuntimeProgress({ step: 'Détection du matériel', detail: 'Vérification du GPU pour choisir le meilleur mode…', percent: 3 })
     const hardware = await getHardwareInfo()
-    const started = await startOllamaServer({
-      useNvidiaGpu: hardware.gpus.some((gpu) => /nvidia|geforce|quadro|rtx|gtx/i.test(gpu.model)),
-      onProgress: sendRuntimeProgress
-    })
+    configureOllamaModelOptions(inferenceModelOptions(hardware))
+    const gpuBackend = ollamaGpuBackendResolved
+      ? ollamaGpuBackend
+      : await detectOllamaGpuBackend(hardware, runManagedWslCommand)
+    let serviceUrl: string | null = null
+    let inferenceRuntime = process.platform === 'win32'
+      ? 'alpine'
+      : process.platform === 'linux' ? 'private-linux' : 'host'
+    let started
+    if (gpuBackend === 'nvidia' && process.platform === 'win32') {
+      try {
+        await ensureNvidiaInferenceRuntime()
+        started = await startOllamaServer({
+          gpuBackend: 'nvidia',
+          numParallel: inferenceParallelism(hardware, 'nvidia'),
+          onProgress: sendRuntimeProgress
+        }, runInferenceDockerCommand)
+        if (!started.success || started.backend !== 'nvidia') {
+          throw new Error(started.success
+            ? started.fallbackReason ?? 'Le conteneur Ollama n’a pas conservé le backend NVIDIA.'
+            : started.reason)
+        }
+        const candidateUrl = inferenceWslServiceUrl(OLLAMA_HOST_PORT)
+        if (!candidateUrl) throw new Error('L’adresse du runtime Ubuntu est indisponible.')
+        let candidateStatus: OllamaStatus = { available: false, reason: 'Ollama Ubuntu démarre.' }
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          candidateStatus = await getOllamaStatusAt(candidateUrl)
+          if (candidateStatus.available) break
+          await new Promise((resolve) => setTimeout(resolve, 1_000))
+        }
+        if (!candidateStatus.available) throw new Error(candidateStatus.reason)
+        await verifyNvidiaInferenceContainer()
+        await runManagedWslCommand('docker', ['stop', OLLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
+        serviceUrl = `http://127.0.0.1:${OLLAMA_HOST_PORT}`
+        let stableStatus: OllamaStatus = { available: false, reason: 'Le relais Windows vers Ollama démarre.' }
+        for (let attempt = 0; attempt < 15; attempt += 1) {
+          stableStatus = await getOllamaStatusAt(serviceUrl)
+          if (stableStatus.available) break
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+        if (!stableStatus.available) throw new Error(`Relais Windows vers Ubuntu indisponible : ${stableStatus.reason}`)
+        inferenceRuntime = 'ubuntu'
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'échec inconnu'
+        writeInferenceLog(`ollama.runtime.nvidia unavailable reason=${JSON.stringify(reason)}`)
+        sendRuntimeProgress({ step: 'Repli processeur', detail: 'Le runtime NVIDIA reste intact pour diagnostic ; Ollama redémarre sans modifier vos anciennes données.', percent: 89 })
+        await runInferenceDockerCommand('docker', ['stop', OLLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
+        started = await startOllamaServer({
+          gpuBackend: 'cpu',
+          numParallel: 1,
+          onProgress: sendRuntimeProgress
+        })
+      }
+    } else {
+      started = await startOllamaServer({
+        gpuBackend,
+        numParallel: inferenceParallelism(hardware, gpuBackend),
+        onProgress: sendRuntimeProgress
+      })
+    }
     if (!started.success) return { available: false as const, reason: started.reason }
-    configureOllamaUrl(managedWslServiceUrl(OLLAMA_HOST_PORT))
+    const detectedGpus = hardware.gpus.length
+      ? hardware.gpus.map((gpu) => `${gpu.model}[vramBytes=${gpu.vramBytes ?? 'unknown'}]`).join(',')
+      : 'none'
+    writeInferenceLog(`ollama.runtime backend=${started.backend} runtime=${inferenceRuntime} parallelism=${inferenceParallelism(hardware, started.backend)} cpuCores=${hardware.cpuCores} memoryBytes=${hardware.totalMemoryBytes} detectedGpus=${detectedGpus}${started.fallbackReason ? ` fallbackReason=${JSON.stringify(started.fallbackReason)}` : ''}`)
+    configureOllamaUrl(serviceUrl ?? managedWslServiceUrl(OLLAMA_HOST_PORT))
 
     for (let attempt = 0; attempt < 30; attempt += 1) {
       if (attempt === 0 || attempt % 5 === 0) {
@@ -193,6 +332,8 @@ function ensureOllamaRunning(): Promise<OllamaStatus> {
       await new Promise((resolve) => setTimeout(resolve, 1_000))
       const status = await getOllamaStatus()
       if (status.available) {
+        ollamaGpuBackend = started.backend
+        ollamaGpuBackendResolved = true
         sendRuntimeProgress({ step: 'Runtime prêt', detail: 'Ollama répond et les modèles sont accessibles.', percent: 100 })
         return status
       }
@@ -270,14 +411,20 @@ function requireActiveProjectThread(ownerId: number, threadId: string) {
 async function defaultWorkerProfile(projectPath: string) {
   const cpuCores = os.cpus().length
   const totalMemoryMb = os.totalmem() / 1_000_000
+  const hardware = await getHardwareInfo()
+  if (process.platform === 'win32') await ensureManagedWslRuntime()
+  else if (process.platform === 'linux') await ensureManagedLinuxRuntime()
+  else throw new Error('Les environnements sécurisés Stellan sont disponibles uniquement sous Windows et Linux.')
   const runtime = await getRuntimeInfo()
-  const containerRuntime = runtime.docker.available ? 'docker' as const : null
+  if (!runtime.docker.available) {
+    throw new Error('Le moteur Docker privé de Stellan est indisponible. L’accès direct à votre machine reste bloqué par sécurité.')
+  }
   const cpuLimit = Math.max(1, Math.min(4, Math.floor(cpuCores / 2)))
   const memoryMb = Math.max(1024, Math.min(8192, Math.floor(totalMemoryMb / 4)))
   return {
     projectPath,
-    mode: containerRuntime ? 'container' as const : 'direct' as const,
-    runtime: containerRuntime,
+    mode: 'container' as const,
+    runtime: 'docker' as const,
     cpuLimit,
     memoryMb,
     storageGb: 20,
@@ -285,7 +432,7 @@ async function defaultWorkerProfile(projectPath: string) {
     image: 'node:22-bookworm',
     network: 'none' as const,
     maxConcurrentWorkers: Math.max(1, Math.min(
-      2,
+      inferenceParallelism(hardware, ollamaGpuBackend),
       Math.floor(cpuCores / cpuLimit),
       Math.floor(totalMemoryMb / memoryMb)
     ))
@@ -318,7 +465,9 @@ async function publicProjectResources(store: ThreadStore, projectPath: string) {
   const profile = await resolveWorkerProfile(store, projectPath)
   const maxCpu = Math.max(1, os.cpus().length)
   const maxMemoryMb = Math.max(1024, Math.floor(os.totalmem() / 1_000_000 * 0.9))
-  const disk = await statfs(join(app.getPath('userData'), 'runtime'))
+  const runtimeDirectory = privateRuntimeRoot()
+  await mkdir(runtimeDirectory, { recursive: true })
+  const disk = await statfs(runtimeDirectory)
   const freeGb = Math.floor((disk.bavail * disk.bsize) / (1024 ** 3))
   const maxStorageGb = Math.min(4_096, Math.max(profile.storageGb, profile.storageGb + Math.max(0, freeGb - 10)))
   return {
@@ -370,6 +519,40 @@ function toPublicRunSummary(run: StoredAgentRunSummary) {
   }
 }
 
+async function resolveVisionModel(run: AgentRun, messages: Awaited<ReturnType<ThreadStore['listPromptMessages']>>): Promise<string> {
+  if (!messages.some((message) => (message.images?.length ?? 0) > 0)) return run.model
+  sendChatEvent(run, { type: 'progress', detail: 'Choix automatique du modèle de vision…', percent: null })
+  if (await modelSupportsVision(run.model)) return run.model
+
+  const [status, hardware] = await Promise.all([getOllamaStatus(), getHardwareInfo()])
+  if (!status.available) throw new Error('Ollama est indisponible pour analyser cette image.')
+  const catalog = getModelCatalog(hardware)
+  const installed = status.models.map((model) => model.name)
+  const installedVision = selectInstalledSpecialistModel(catalog, installed, 'vision', run.model)
+  if (installedVision !== run.model && await modelSupportsVision(installedVision)) return installedVision
+
+  const automaticModel = selectAutomaticVisionModel(catalog)
+  if (!automaticModel) throw new Error('Aucun modèle de vision compatible avec cette machine n’est disponible.')
+  const sendProgress = (progress: ModelPullProgress): void => {
+    const contents = mainWindow?.webContents
+    if (contents && !contents.isDestroyed()) contents.send(MODEL_PULL_PROGRESS_CHANNEL, progress)
+    sendChatEvent(run, {
+      type: 'progress',
+      detail: progress.percent === null
+        ? `${progress.status} · ${automaticModel.name}`
+        : `${progress.status} · ${automaticModel.name} · ${progress.percent}%`,
+      percent: progress.percent
+    })
+  }
+  sendChatEvent(run, { type: 'progress', detail: `Installation automatique de ${automaticModel.name} pour analyser l’image…`, percent: 0 })
+  const downloaded = await downloadModel(automaticModel.id, sendProgress)
+  if (!downloaded.success) throw new Error(downloaded.reason)
+  if (!await modelSupportsVision(automaticModel.id)) {
+    throw new Error(`${automaticModel.name} ne signale pas la capacité de vision attendue.`)
+  }
+  return automaticModel.id
+}
+
 async function scheduleAgentRun(run: AgentRun): Promise<void> {
   if (workerScheduler.has(run.requestId)) return
   const store = getThreadStore()
@@ -413,69 +596,135 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           (candidate) => candidate.requestId === run.requestId
         )
         if (!summary) throw new Error('La génération active est introuvable.')
+        const promptMessages = store.listPromptMessages(thread.id, run.userMessageId)
+        const userImages = promptMessages.at(-1)?.images ?? []
         sendChatEvent(run, {
           type: 'started',
           userMessageId: summary.userMessageId,
-          userContent: summary.userContent
+          userContent: summary.userContent,
+          images: userImages
         })
         const executionPath = thread.workspacePath ?? thread.projectPath
-        const promptMessages = store.listPromptMessages(thread.id, run.userMessageId)
+        const visionModel = await resolveVisionModel(run, promptMessages)
+        const activityService = new ReliableActivityService(store, reliableEngineRegistry)
+        const activityContext = activityService.context(thread.id)
+        const intentClassification = await classifyIntent({
+          model: visionModel,
+          messages: promptMessages,
+          signal: controller.signal,
+          activityContext,
+          onInferenceLog: writeInferenceLog
+        })
+        const startActivity = (engineId: string, input: Record<string, unknown>) =>
+          activityService.start(thread.id, engineId, input)
+        const applyActivity = (activityId: string | undefined, action: Record<string, unknown>) =>
+          activityService.apply(thread.id, activityId, action)
+        let specialistContext: Promise<{ hardware: Awaited<ReturnType<typeof getHardwareInfo>>; installed: string[] }> | null = null
+        const selectSpecialist = async (category: 'general' | 'code', primaryModel = run.model): Promise<string> => {
+          specialistContext ??= Promise.all([getOllamaStatus(), getHardwareInfo()]).then(([status, hardware]) => ({
+            hardware,
+            installed: status.available ? status.models.map((model) => model.name) : []
+          }))
+          const { hardware, installed } = await specialistContext
+          return selectInstalledSpecialistModel(getModelCatalog(hardware), installed, category, primaryModel)
+        }
+        const executionModel = executionPath && visionModel === run.model && intentClassification.intent === 'code'
+          ? await selectSpecialist('code', visionModel)
+          : visionModel
+        if (executionModel !== run.model) {
+          sendChatEvent(run, {
+            type: 'progress',
+            detail: `Modèle spécialisé sélectionné automatiquement : ${executionModel}`,
+            percent: null
+          })
+        }
         const onContent = (content: string): void => {
           assistantContent += content
           sendChatEvent(run, { type: 'content', content })
         }
+        const onToolEvent = async (toolEvent: AgentToolLifecycleEvent): Promise<void> => {
+          const currentStore = getThreadStore()
+          if (toolEvent.type === 'started') {
+            currentStore.recordToolStarted(run.id, toolEvent)
+            sendChatEvent(run, {
+              type: 'tool',
+              callId: toolEvent.callId,
+              tool: toolEvent.tool,
+              status: 'running',
+              input: toolDetail(toolEvent.arguments),
+              output: null
+            })
+          } else {
+            currentStore.recordToolFinished(
+              run.id,
+              toolEvent.callId,
+              toolEvent.status,
+              toolEvent.result
+            )
+            sendChatEvent(run, {
+              type: 'tool',
+              callId: toolEvent.callId,
+              tool: toolEvent.tool,
+              status: toolEvent.status,
+              input: null,
+              output: toolDetail(toolEvent.result)
+            })
+          }
+        }
         if (executionPath) {
-          if (!await modelSupportsTools(run.model)) {
+          if (!await modelSupportsTools(executionModel)) {
             throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
           }
           const directProject = await openThreadProject(thread.id)
           const git = await resolveContainerGit(directProject, executionPath)
           const project = createAgentProjectTools(profile, thread.id, executionPath, directProject, git)
           await runCodingAgent({
-            model: run.model,
+            model: executionModel,
             messages: promptMessages,
             project,
             signal: controller.signal,
             onContent,
             onTool: () => undefined,
-            onToolEvent: async (toolEvent: AgentToolLifecycleEvent) => {
-              const currentStore = getThreadStore()
-              if (toolEvent.type === 'started') {
-                currentStore.recordToolStarted(run.id, toolEvent)
-                sendChatEvent(run, {
-                  type: 'tool',
-                  callId: toolEvent.callId,
-                  tool: toolEvent.tool,
-                  status: 'running',
-                  input: toolDetail(toolEvent.arguments),
-                  output: null
-                })
-              } else {
-                currentStore.recordToolFinished(
-                  run.id,
-                  toolEvent.callId,
-                  toolEvent.status,
-                  toolEvent.result
-                )
-                sendChatEvent(run, {
-                  type: 'tool',
-                  callId: toolEvent.callId,
-                  tool: toolEvent.tool,
-                  status: toolEvent.status,
-                  input: null,
-                  output: toolDetail(toolEvent.result)
-                })
-              }
-            },
+            onInferenceLog: writeInferenceLog,
+            onToolEvent,
             runCommand: createWorkerCommandExecutor(profile, thread.id, executionPath, git),
             isGitRepository: git !== null,
+            readTodos: () => getThreadStore().listTodos(thread.id),
+            writeTodos: (todos) => getThreadStore().replaceTodos(thread.id, todos),
+            activityContext,
+            startActivity,
+            applyActivity,
+            consultAdvisor: async (question) => {
+              const model = await selectSpecialist('general')
+              let advice = ''
+              await streamOllamaChat(
+                model,
+                [
+                  {
+                    role: 'system',
+                    content: 'Tu es le conseiller local de Stellan. Analyse uniquement la question fournie. Donne un avis technique indépendant, précis et concis. Tu es en lecture seule : ne prétends pas avoir consulté ou modifié le projet, ne demande aucun outil et signale clairement tes incertitudes.'
+                  },
+                  { role: 'user', content: question }
+                ],
+                (content) => { advice += content },
+                controller.signal,
+                fetch,
+                undefined,
+                120_000,
+                undefined,
+                undefined,
+                writeInferenceLog
+              )
+              return { model, advice }
+            },
+            intentClassification,
             spawnWorkers: thread.parentThreadId ? undefined : async (tasks: WorkerTask[]) => {
-              const results: Array<{ title: string; summary: string; files: string[] }> = new Array(tasks.length)
-              const batchController = new AbortController()
+              const workerModel = await selectSpecialist('code')
+              const results: Array<{ title: string; summary: string; files: string[]; status: 'done' | 'error' }> = new Array(tasks.length)
               const workers = tasks.map((task, taskIndex) => {
                 const childController = new AbortController()
-                const workerSignal = AbortSignal.any([controller.signal, batchController.signal, childController.signal])
-                const directive = `${task.instructions}\n\nTu es responsable uniquement de ces fichiers :\n${task.files.join('\n')}`
+                const workerSignal = AbortSignal.any([controller.signal, childController.signal])
+                const directive = `${task.instructions}\n\nTu es responsable uniquement de ces chemins de fichiers exacts :\n${task.files.join('\n')}\n\nÉcris directement ces chemins avec write_file. Les dossiers parents manquants sont créés automatiquement ; ne lance pas mkdir.`
                 const createdChild = store.createThread({
                   title: task.title,
                   parentThreadId: thread.id,
@@ -483,12 +732,12 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                   projectPath: thread.projectPath,
                   workspacePath: thread.workspacePath,
                   workspaceMode: thread.workspaceMode,
-                  model: run.model
+                  model: workerModel
                 })
                 const child = thread.projectPath
                   ? store.activateEnvironment(createdChild.id, thread.workspaceMode === 'worktree' ? 'worktree' : 'direct', thread.workspacePath)
                   : createdChild
-                const childRun = store.startAgentRun(child.id, randomUUID(), run.model, directive)
+                const childRun = store.startAgentRun(child.id, randomUUID(), workerModel, directive)
                 activeChats.set(childRun.requestId, childController)
                 activeThreadChats.set(child.id, childRun.requestId)
                 sendChatEvent(run, { type: 'thread-created', child })
@@ -507,7 +756,8 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                   sendChatEvent(childRun, {
                     type: 'started',
                     userMessageId: childRun.userMessageId,
-                    userContent: directive
+                    userContent: directive,
+                    images: []
                   })
                   sendChatEvent(run, {
                     type: 'tool',
@@ -519,7 +769,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                   })
                   try {
                     await runCodingAgent({
-                      model: run.model,
+                      model: workerModel,
                       messages: [{ role: 'user', content: directive }],
                       project,
                       signal: workerSignal,
@@ -528,6 +778,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                         sendChatEvent(childRun, { type: 'content', content })
                       },
                       onTool: () => {},
+                      onInferenceLog: writeInferenceLog,
                       onToolEvent: async (workerToolEvent) => {
                         if (workerToolEvent.type === 'started') {
                           getThreadStore().recordToolStarted(childRun.id, workerToolEvent)
@@ -554,11 +805,13 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                       authorize: async () => true,
                       writeScope: new Set(task.files.map((file) => normalizeWorkerPath(file))),
                       allowRunCommand: false,
-                      isGitRepository: git !== null
+                      isGitRepository: git !== null,
+                      readTodos: () => getThreadStore().listTodos(child.id),
+                      writeTodos: (todos) => getThreadStore().replaceTodos(child.id, todos)
                     })
                     getThreadStore().finishAgentRun(childRun.id, 'completed', summary)
                     sendChatEvent(childRun, { type: 'done' })
-                    results[taskIndex] = { title: task.title, summary, files: task.files }
+                    results[taskIndex] = { title: task.title, summary, files: task.files, status: 'done' }
                     sendChatEvent(run, { type: 'tool', callId, tool: toolName, status: 'done', input: null, output: toolDetail(summary) })
                   } catch (error) {
                     const reason = workerSignal.aborted
@@ -574,7 +827,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                       input: null,
                       output: toolDetail(reason)
                     })
-                    throw error
+                    results[taskIndex] = { title: task.title, summary: reason, files: task.files, status: 'error' }
                   }
                   }
                 ).catch((error) => {
@@ -584,36 +837,41 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                     getThreadStore().finishAgentRun(childRun.id, workerSignal.aborted ? 'interrupted' : 'error', '', reason)
                     sendChatEvent(childRun, { type: 'error', reason })
                   }
-                  throw error
+                  const reason = workerSignal.aborted
+                    ? 'Worker annulé avant son démarrage.'
+                    : error instanceof Error ? error.message : 'Le worker n’a pas pu démarrer.'
+                  results[taskIndex] = { title: task.title, summary: reason, files: task.files, status: 'error' }
                 }).finally(() => {
                   activeChats.delete(childRun.requestId)
                   if (activeThreadChats.get(child.id) === childRun.requestId) activeThreadChats.delete(child.id)
                 })
               })
-              try {
-                await Promise.all(workers)
-              } catch (error) {
-                batchController.abort(error)
-                await Promise.allSettled(workers)
-                throw error
-              }
+              await Promise.all(workers)
               return results
             },
             authorize: async () => !controller.signal.aborted
           })
         } else {
-          await streamOllamaChat(
-            run.model,
-            compactConversation([
-              {
-                role: 'system',
-                content: 'Tu es Stellan, un assistant local utile, précis et concis. Aucun projet n’est ouvert. Réponds directement aux questions générales. Si une demande nécessite de lire, créer ou modifier des fichiers, demande à l’utilisateur d’ouvrir un projet. Ne présente jamais du code collé dans le chat comme une modification réellement effectuée et n’invente aucune action.'
-              },
-              ...promptMessages.filter((message) => message.role !== 'system')
-            ]),
+          if (!await modelSupportsTools(executionModel)) {
+            throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux activités fiables.')
+          }
+          await runCodingAgent({
+            model: executionModel,
+            messages: promptMessages,
             onContent,
-            controller.signal
-          )
+            signal: controller.signal,
+            onTool: () => undefined,
+            onInferenceLog: writeInferenceLog,
+            onToolEvent,
+            authorize: async () => !controller.signal.aborted,
+            isGitRepository: false,
+            readTodos: () => getThreadStore().listTodos(thread.id),
+            writeTodos: (todos) => getThreadStore().replaceTodos(thread.id, todos),
+            intentClassification,
+            activityContext,
+            startActivity,
+            applyActivity
+          })
         }
         getThreadStore().finishAgentRun(
           run.id,
@@ -691,7 +949,8 @@ function createWindow(): void {
   })
 
   window.once('ready-to-show', () => window.show())
-  window.webContents.once('did-finish-load', () => {
+  window.webContents.once('did-finish-load', async () => {
+    if (!await startMandatoryUpdate()) return
     if (recoveredQueueScheduled) return
     recoveredQueueScheduled = true
     for (const run of getThreadStore().listQueuedAgentRuns()) {
@@ -735,9 +994,29 @@ function reuseLegacyUserData(): void {
 
 reuseLegacyUserData()
 
+function privateRuntimeRoot(): string {
+  const legacy = join(app.getPath('userData'), 'runtime')
+  // Keep registered WSL disks exactly where older Stellan versions created them.
+  if (existsSync(legacy)) return legacy
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    return join(process.env.LOCALAPPDATA, 'Stellan', 'runtime')
+  }
+  if (process.platform === 'linux') {
+    return join(process.env.XDG_DATA_HOME ?? join(app.getPath('home'), '.local', 'share'), 'Stellan', 'runtime')
+  }
+  return legacy
+}
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
-  configureManagedWslRuntime(join(app.getPath('userData'), 'runtime'), sendRuntimeProgress)
+  const runtimeRoot = privateRuntimeRoot()
+  configureManagedWslRuntime(runtimeRoot, sendRuntimeProgress)
+  configureManagedLinuxRuntime(runtimeRoot, sendRuntimeProgress)
+  configureInferenceWslRuntime(runtimeRoot, sendRuntimeProgress)
+  configureMandatoryUpdater((updateState) => {
+    const contents = mainWindow?.webContents
+    if (contents && !contents.isDestroyed()) contents.send(UPDATE_STATE_CHANNEL, updateState)
+  })
   threadStore = new ThreadStore(join(app.getPath('userData'), 'local-agent.sqlite'))
   threadStore.recoverInterruptedEnvironments()
   threadStore.recoverInterruptedAgentRuns()
@@ -762,6 +1041,7 @@ app.whenReady().then(() => {
     }
     mainWindow.center()
   })
+  handle(UPDATE_GET_STATE_CHANNEL, () => getUpdateState())
   handle(OLLAMA_STATUS_CHANNEL, () => getOllamaStatus())
   handle(OLLAMA_START_CHANNEL, () => ensureOllamaRunning())
   handle(HARDWARE_BASIC_CHANNEL, () => getBasicHardwareInfo())
@@ -775,6 +1055,7 @@ app.whenReady().then(() => {
       await installWslFeature()
       sendRuntimeProgress({ step: 'WSL 2 activé', detail: 'Vérification et préparation du runtime privé…', percent: 6 })
     }
+    else if (process.platform === 'linux') await ensureManagedLinuxRuntime()
     else await shell.openExternal('https://docs.docker.com/engine/install/')
   })
   handle(MODEL_PULL_CHANNEL, async (event, input: unknown) => {
@@ -783,44 +1064,35 @@ app.whenReady().then(() => {
       return { success: false, reason: 'Ce modèle ne fait pas partie du catalogue autorisé.' }
     }
 
-    if (activeDownload) {
-      return { success: false, reason: `Le téléchargement de ${activeDownload} est déjà en cours.` }
+    const hardware = await getHardwareInfo()
+    const model = getModelCatalog(hardware).find((entry) => entry.id === parsedModel.data)
+    if (!model || model.compatibility === 'unsupported') {
+      return { success: false, reason: "Ce modèle n'est pas disponible sur ce système." }
     }
 
-    activeDownload = parsedModel.data
+    const sendProgress = (progress: ModelPullProgress): void => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send(MODEL_PULL_PROGRESS_CHANNEL, progress)
+      }
+    }
+    const result = await downloadModel(model.id, sendProgress)
+    if (!result.success) return result
+
+    const startedAt = Date.now()
+    sendProgress({ model: model.id, status: 'Chargement du modèle en mémoire…', completed: null, total: null, percent: null })
+    const timer = setInterval(() => sendProgress({
+      model: model.id,
+      status: `Chargement du modèle en mémoire… ${Math.round((Date.now() - startedAt) / 1_000)} s`,
+      completed: null,
+      total: null,
+      percent: null
+    }), 5_000)
     try {
-      const hardware = await getHardwareInfo()
-      const model = getModelCatalog(hardware).find((entry) => entry.id === parsedModel.data)
-      if (!model || model.compatibility === 'unsupported') {
-        return { success: false, reason: "Ce modèle n'est pas disponible sur ce système." }
-      }
-
-      const sendProgress = (progress: ModelPullProgress): void => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send(MODEL_PULL_PROGRESS_CHANNEL, progress)
-        }
-      }
-      const result = await pullOllamaModel(model.id, sendProgress)
-      if (!result.success) return result
-
-      const startedAt = Date.now()
-      sendProgress({ model: model.id, status: 'Chargement du modèle en mémoire…', completed: null, total: null, percent: null })
-      const timer = setInterval(() => sendProgress({
-        model: model.id,
-        status: `Chargement du modèle en mémoire… ${Math.round((Date.now() - startedAt) / 1_000)} s`,
-        completed: null,
-        total: null,
-        percent: null
-      }), 5_000)
-      try {
-        await warmOllamaModel(model.id)
-      } finally {
-        clearInterval(timer)
-      }
-      return result
+      await warmOllamaModel(model.id)
     } finally {
-      activeDownload = null
+      clearInterval(timer)
     }
+    return result
   })
   handle(MODEL_WARM_CHANNEL, async (_event, input: unknown) => {
     const model = installedModelNameSchema.parse(input)
@@ -844,11 +1116,14 @@ app.whenReady().then(() => {
   })
   handle(PROJECT_SELECT_CHANNEL, async () => {
     const result = await dialog.showOpenDialog({
-      title: 'Choisir ou créer un projet',
+      title: 'Importer un dossier projet dans l’environnement sécurisé',
       properties: ['openDirectory', 'createDirectory']
     })
     if (result.canceled || !result.filePaths[0]) return null
     let projectPath = result.filePaths[0]
+    if (process.platform === 'win32' && /^\\\\/.test(projectPath)) {
+      throw new Error('Les dossiers réseau et chemins UNC ne peuvent pas être importés. Copiez le projet sur un disque local puis réessayez.')
+    }
     const tools = await ProjectTools.create(projectPath)
     const repository = await tools.runCommand('git', ['rev-parse', '--show-toplevel'], {
       timeoutMs: 10_000,
@@ -907,6 +1182,17 @@ app.whenReady().then(() => {
     }
     if (threadId) activeThreadOwners.set(event.sender.id, threadId)
     else activeThreadOwners.delete(event.sender.id)
+  })
+  handle(THREADS_SET_MODEL_CHANNEL, async (event, input: unknown) => {
+    const request = setThreadModelSchema.parse(input)
+    requireActiveProjectThread(event.sender.id, request.threadId)
+    const status = await getOllamaStatus()
+    if (!status.available || !status.models.some((model) => model.name === request.model)) {
+      throw new Error('Ce modèle local n’est plus installé ou disponible.')
+    }
+    const result = getThreadStore().setThreadModel(request.threadId, request.model)
+    if (!result) throw new Error('Le thread local est introuvable.')
+    return result
   })
   handle(THREADS_CREATE_CHANNEL, async (event, input: unknown) => {
     const parsed = createThreadSchema.parse(input)
@@ -975,10 +1261,13 @@ app.whenReady().then(() => {
     return getThreadStore().listMessages(threadId)
   })
   handle(THREADS_DELETE_CHANNEL, async (event, input: unknown) => {
-    const threadId = requestIdSchema.parse(input)
+    const { threadId, discardChanges } = deleteThreadSchema.parse(input)
     const store = getThreadStore()
     const thread = store.getThread(threadId)
-    if (!thread) return false
+    if (!thread) return { deleted: false, pendingChanges: null }
+    if (thread.projectPath) {
+      approvedProjectPaths.set(thread.projectPath, thread.workspaceMode === 'worktree' ? 'git' : 'folder')
+    }
     if (workerScheduler.hasThread(threadId) || activeThreadChats.has(threadId)) {
       throw new Error('Arrêtez la génération avant de supprimer ce thread.')
     }
@@ -999,12 +1288,12 @@ app.whenReady().then(() => {
     if (thread.parentThreadId) {
       const profile = thread.projectPath ? store.getWorkerProfile(thread.projectPath) : null
       if (profile?.mode === 'container' && profile.runtime) await removeWorkerContainer(profile.runtime, thread.id)
-      return store.deleteThread(threadId)
+      return { deleted: store.deleteThread(threadId), pendingChanges: null }
     }
     if (thread.environmentStatus === 'terminated') {
       const profile = thread.projectPath ? store.getWorkerProfile(thread.projectPath) : null
       if (profile?.mode === 'container' && profile.runtime) await removeWorkerContainer(profile.runtime, thread.id)
-      return store.deleteThread(threadId)
+      return { deleted: store.deleteThread(threadId), pendingChanges: null }
     }
     if (thread.projectPath && thread.workspacePath) {
       const project = thread.environmentStatus === 'active'
@@ -1023,21 +1312,7 @@ app.whenReady().then(() => {
       const status = managedStatus?.stdout ?? await project.gitStatus()
       let force = false
       if (status.trim()) {
-        const owner = BrowserWindow.fromWebContents(event.sender)
-        const options = {
-          type: 'warning' as const,
-          title: 'Supprimer des modifications locales ?',
-          message: 'Ce thread contient des changements non enregistrés.',
-          detail: status.slice(0, 20_000),
-          buttons: ['Conserver le thread', 'Supprimer définitivement'],
-          defaultId: 0,
-          cancelId: 0,
-          noLink: true
-        }
-        const result = owner
-          ? await dialog.showMessageBox(owner, options)
-          : await dialog.showMessageBox(options)
-        if (result.response !== 1) return false
+        if (!discardChanges) return { deleted: false, pendingChanges: status.slice(0, 20_000) }
         force = true
       }
       try {
@@ -1067,7 +1342,7 @@ app.whenReady().then(() => {
     const profile = thread.projectPath ? store.getWorkerProfile(thread.projectPath) : null
     if (profile?.mode === 'container' && profile.runtime) await removeWorkerContainer(profile.runtime, thread.id)
     if (thread.projectPath) store.transitionEnvironment(thread.id, 'terminated')
-    return store.deleteThread(threadId)
+    return { deleted: store.deleteThread(threadId), pendingChanges: null }
   })
   handle(THREADS_EXPORT_PROJECT_CHANNEL, async (event, input: unknown) => {
     const threadId = requestIdSchema.parse(input)
@@ -1263,6 +1538,24 @@ app.whenReady().then(() => {
       if (!root) throw new Error('Le dossier du projet est indisponible.')
       return portalManager.startProject(request.threadId, event.sender.id, root, request.durationMinutes)
     }
+    const store = getThreadStore()
+    const profile = thread.projectPath ? await resolveWorkerProfile(store, thread.projectPath) : null
+    if (profile?.mode === 'container' && profile.runtime) {
+      const exposure = await exposeWorkerPort(profile.runtime, thread.id, request.port)
+      const targetUrl = process.platform === 'win32'
+        ? managedWslServiceUrl(exposure.hostPort)
+        : `http://127.0.0.1:${exposure.hostPort}`
+      if (!targetUrl) {
+        await exposure.close()
+        throw new Error('L’adresse du relais de portail est indisponible.')
+      }
+      const target = new URL(targetUrl)
+      return portalManager.start(request.threadId, event.sender.id, request.port, request.durationMinutes, {
+        host: target.hostname,
+        port: Number(target.port),
+        close: exposure.close
+      })
+    }
     return portalManager.start(
       request.threadId,
       event.sender.id,
@@ -1323,7 +1616,13 @@ app.whenReady().then(() => {
           : latestUserMessage.content
       })
     }
-    const run = store.startAgentRun(thread.id, parsed.data.requestId, parsed.data.model, latestUserMessage.content)
+    const run = store.startAgentRun(
+      thread.id,
+      parsed.data.requestId,
+      parsed.data.model,
+      latestUserMessage.content,
+      latestUserMessage.images ?? []
+    )
     try {
       await scheduleAgentRun(run)
     } catch (error) {
@@ -1396,14 +1695,21 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
+  if (isInstallingUpdate()) return
   if (shutdownReady) return
   event.preventDefault()
   workerScheduler.shutdown(true)
   for (const controller of activeChats.values()) controller.abort()
+  const stopRuntimes = async (): Promise<void> => {
+    await ollamaStartPromise?.catch(() => undefined)
+    await stopInferenceWslRuntime()
+    await stopManagedLinuxRuntime()
+    await stopManagedWslRuntime()
+  }
   shutdownCleanup ??= Promise.all([
     portalManager.closeAll(),
     terminalManager.closeAll(),
-    stopManagedWslRuntime(),
+    stopRuntimes(),
     ...pendingWindowCleanups
   ]).then(() => undefined)
   void shutdownCleanup
@@ -1422,6 +1728,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(WINDOW_TOGGLE_MAXIMIZE_CHANNEL)
   ipcMain.removeHandler(WINDOW_CLOSE_CHANNEL)
   ipcMain.removeHandler(WINDOW_SET_STARTUP_CHANNEL)
+  ipcMain.removeHandler(UPDATE_GET_STATE_CHANNEL)
   ipcMain.removeHandler(OLLAMA_STATUS_CHANNEL)
   ipcMain.removeHandler(OLLAMA_START_CHANNEL)
   ipcMain.removeHandler(SETUP_INFO_CHANNEL)
@@ -1440,6 +1747,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(CHAT_SEND_NOW_CHANNEL)
   ipcMain.removeHandler(THREADS_LIST_CHANNEL)
   ipcMain.removeHandler(THREADS_SET_ACTIVE_CHANNEL)
+  ipcMain.removeHandler(THREADS_SET_MODEL_CHANNEL)
   ipcMain.removeHandler(THREADS_CREATE_CHANNEL)
   ipcMain.removeHandler(THREADS_MESSAGES_CHANNEL)
   ipcMain.removeHandler(THREADS_DELETE_CHANNEL)

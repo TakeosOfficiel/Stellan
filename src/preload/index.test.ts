@@ -60,4 +60,23 @@ describe('portal preload IPC', () => {
       ['threads:open-project-file', { threadId: 'thread', path: 'src/index.ts' }]
     ])
   })
+
+  it('forwards explicit thread deletion confirmation', async () => {
+    await api.deleteThread({ threadId: 'thread', discardChanges: false })
+    await api.deleteThread({ threadId: 'thread', discardChanges: true })
+
+    expect(mocks.invoke.mock.calls.slice(-2)).toEqual([
+      ['threads:delete', { threadId: 'thread', discardChanges: false }],
+      ['threads:delete', { threadId: 'thread', discardChanges: true }]
+    ])
+  })
+
+  it('persists an explicit primary model selection on the active thread', async () => {
+    await api.setThreadModel({ threadId: 'thread', model: 'qwen3.5:4b' })
+
+    expect(mocks.invoke.mock.calls.at(-1)).toEqual([
+      'threads:set-model',
+      { threadId: 'thread', model: 'qwen3.5:4b' }
+    ])
+  })
 })

@@ -49,13 +49,34 @@ describe('ProjectTools', () => {
     })
   })
 
+  it('edits one exact occurrence and rejects ambiguous replacements', async () => {
+    await expect(tools.editFile('src/hello.txt', 'hello world', 'bonjour')).resolves.toEqual({
+      path: 'src/hello.txt',
+      added: 1,
+      removed: 1
+    })
+    await writeFile(path.join(project, 'repeated.txt'), 'same\nsame\n')
+    await expect(tools.editFile('repeated.txt', 'same', 'other')).rejects.toThrow('apparaît 2 fois')
+    await expect(tools.editFile('repeated.txt', 'same', 'other', true)).resolves.toMatchObject({ path: 'repeated.txt' })
+    await expect(readFile(path.join(project, 'repeated.txt'), 'utf8')).resolves.toBe('other\nother\n')
+  })
+
   it('deletes a project file and reports its removed lines', async () => {
+    await mkdir(path.join(project, 'css', 'nested'), { recursive: true })
+    await writeFile(path.join(project, 'css', 'nested', 'styles.css'), 'body {}\n')
+    await writeFile(path.join(project, 'keep.txt'), 'keep\n')
+
+    await tools.deleteFile('css/nested/styles.css')
+    await expect(stat(path.join(project, 'css'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(path.join(project, 'keep.txt'), 'utf8')).resolves.toBe('keep\n')
+
     await expect(tools.deleteFile('src/hello.txt')).resolves.toEqual({
       path: 'src/hello.txt',
       added: 0,
       removed: 2
     })
     await expect(readFile(path.join(project, 'src', 'hello.txt'), 'utf8')).rejects.toThrow()
+    await expect(stat(project)).resolves.toMatchObject({})
   })
 
   it('returns bounded text previews and rejects binary files', async () => {

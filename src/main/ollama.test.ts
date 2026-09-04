@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { getOllamaStatus, modelSupportsTools, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
+import { getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -53,6 +53,19 @@ describe('getOllamaStatus', () => {
   })
 })
 
+describe('getOllamaStatusAt', () => {
+  it('checks only the candidate runtime URL and never accepts a localhost fallback', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new Error('candidate unavailable'))
+
+    await expect(getOllamaStatusAt('http://172.20.1.2:11435', fetcher)).resolves.toEqual({
+      available: false,
+      reason: "Ollama n'est pas joignable."
+    })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher).toHaveBeenCalledWith('http://172.20.1.2:11435/api/tags', expect.any(Object))
+  })
+})
+
 describe('pullOllamaModel', () => {
   it('parses streamed progress updates', async () => {
     const stream = new ReadableStream({
@@ -91,6 +104,26 @@ describe('modelSupportsTools', () => {
       expect.objectContaining({ body: JSON.stringify({ model: 'coder:latest' }) })
     )
   })
+
+  it('does not expose a raw network error when the runtime disappears', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('fetch failed'))
+
+    await expect(modelSupportsTools('coder:latest', fetcher)).rejects.toThrow(
+      'Le moteur local d’Ollama n’est plus joignable.'
+    )
+  })
+})
+
+describe('modelSupportsVision', () => {
+  it('reads the vision capability reported by Ollama', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ capabilities: ['completion', 'vision'] }))
+
+    await expect(modelSupportsVision('vision:latest', fetcher)).resolves.toBe(true)
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:11435/api/show',
+      expect.objectContaining({ body: JSON.stringify({ model: 'vision:latest' }) })
+    )
+  })
 })
 
 describe('warmOllamaModel', () => {
@@ -106,7 +139,7 @@ describe('warmOllamaModel', () => {
           prompt: '',
           stream: false,
           keep_alive: -1,
-          options: { num_ctx: 8192, num_predict: 2048 }
+          options: { num_ctx: 8192, num_predict: 1024 }
         })
       })
     )
@@ -139,8 +172,103 @@ describe('streamOllamaChat', () => {
       stream: true,
       think: false,
       keep_alive: -1,
-      options: { num_ctx: 8192, num_predict: 2048 }
+      options: { num_ctx: 8192, num_predict: 1024 }
     })
+  })
+
+  it('serializes image data in the Ollama multimodal message format', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"message":{"content":"Une image"},"done":true}\n'))
+        controller.close()
+      }
+    })
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(stream, { status: 200 }))
+
+    await streamOllamaChat(
+      'vision:latest',
+      [{ role: 'user', content: 'Décris', images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }] }],
+      () => undefined,
+      undefined,
+      fetcher
+    )
+
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))
+    expect(body.messages).toEqual([{ role: 'user', content: 'Décris', images: ['aGVsbG8='] }])
+  })
+
+  it('allows a smaller per-request context without exceeding the hardware limit', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"message":{"content":"OK"},"done":true}\n'))
+        controller.close()
+      }
+    })
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(stream, { status: 200 }))
+
+    await streamOllamaChat(
+      'qwen3.5:4b',
+      [{ role: 'user', content: 'A' }],
+      () => undefined,
+      undefined,
+      fetcher,
+      undefined,
+      120_000,
+      256,
+      2_048
+    )
+
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).options).toEqual({
+      num_ctx: 2_048,
+      num_predict: 256
+    })
+  })
+
+  it('reports model residency, GPU allocation, and Ollama timing metrics', async () => {
+    let psCall = 0
+    const fetcher = vi.fn<typeof fetch>((url) => {
+      if (String(url).endsWith('/api/ps')) {
+        psCall += 1
+        return Promise.resolve(response({
+          models: psCall === 1 ? [] : [{
+            name: 'qwen3.5:2b',
+            size: 2_000_000_000,
+            size_vram: 1_900_000_000,
+            expires_at: '2099-01-01T00:00:00Z'
+          }]
+        }))
+      }
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            '{"message":{"content":"OK"},"done":true,"total_duration":2500000000,"load_duration":100000000,"prompt_eval_count":500,"prompt_eval_duration":1000000000,"eval_count":20,"eval_duration":1000000000}\n'
+          ))
+          controller.close()
+        }
+      })
+      return Promise.resolve(new Response(stream, { status: 200 }))
+    })
+    const diagnostics = vi.fn()
+
+    await streamOllamaChat(
+      'qwen3.5:2b',
+      [{ role: 'user', content: 'A' }],
+      () => undefined,
+      undefined,
+      fetcher,
+      undefined,
+      120_000,
+      256,
+      2_048,
+      diagnostics
+    )
+
+    expect(diagnostics).toHaveBeenCalledWith('ollama.ps.before models=none')
+    expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('ollama.metrics model=qwen3.5:2b'))
+    expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('loadMs=100.0 promptEvalMs=1000.0'))
+    expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('generationMs=1000.0 generatedTokens=20 tokensPerSecond=20.0'))
+    expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('ollama.ps.after models=qwen3.5:2b'))
+    expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('vramBytes=1900000000'))
   })
 
   it('accepts thinking chunks without exposing the private reasoning as the answer', async () => {

@@ -26,7 +26,12 @@ export function applyMessageEvent(
   if (event.type === 'started') {
     const withUserMessage = messages.some((message) => message.id === event.userMessageId)
       ? messages
-      : [...messages, { id: event.userMessageId, role: 'user' as const, content: event.userContent }]
+      : [...messages, {
+          id: event.userMessageId,
+          role: 'user' as const,
+          content: event.userContent,
+          images: event.images
+        }]
     return withUserMessage.some((message) => message.id === event.requestId)
       ? current
       : { ...current, [event.threadId]: [...withUserMessage, { id: event.requestId, role: 'assistant', content: '' }] }

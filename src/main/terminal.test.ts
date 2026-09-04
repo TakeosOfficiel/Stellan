@@ -24,11 +24,23 @@ const directLaunch = {
   cwd: '/approved/worktree',
   cols: 80,
   rows: 24,
-  profile: null
+  profile: {
+    projectPath: '/approved/project',
+    mode: 'container' as const,
+    runtime: 'docker' as const,
+    cpuLimit: 2,
+    memoryMb: 2048,
+    storageGb: 20,
+    automaticCpuMemory: true,
+    image: 'node:22-bookworm',
+    network: 'none' as const,
+    maxConcurrentWorkers: 2,
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  }
 }
 
 describe('TerminalManager', () => {
-  it('starts one argv-based PTY per thread in the main-approved cwd and streams events', async () => {
+  it('starts one container PTY per thread in the main-approved workspace and streams events', async () => {
     const fake = fakePty()
     const factory = vi.fn<PtyFactory>(() => fake.pty)
     const send = vi.fn<TerminalEventSink>()
@@ -37,12 +49,12 @@ describe('TerminalManager', () => {
 
     expect(manager.start(directLaunch)).toEqual({
       threadId: directLaunch.threadId,
-      mode: 'direct',
+      mode: 'container',
       reused: false
     })
     expect(factory).toHaveBeenCalledWith(
-      expect.stringMatching(process.platform === 'win32' ? /cmd\.exe$/i : /^\/bin\/(?:ba)?sh$/),
-      [],
+      process.platform === 'win32' ? 'wsl.exe' : 'docker',
+      expect.arrayContaining(['exec', '--interactive', '--tty', '--workdir', '/workspace']),
       expect.objectContaining({ cwd: directLaunch.cwd, cols: 80, rows: 24 })
     )
     expect(manager.start(directLaunch).reused).toBe(true)
@@ -62,6 +74,14 @@ describe('TerminalManager', () => {
     await expect(manager.close(directLaunch.threadId, 7)).resolves.toBe(true)
     expect(kill).toHaveBeenCalledWith(1234)
     expect(fake.pty.kill).toHaveBeenCalledOnce()
+  })
+
+  it('fails closed instead of opening a native host shell', () => {
+    const factory = vi.fn<PtyFactory>()
+    const manager = new TerminalManager(() => {}, factory)
+
+    expect(() => manager.start({ ...directLaunch, profile: null })).toThrow('Aucun shell direct')
+    expect(factory).not.toHaveBeenCalled()
   })
 
   it('enforces session ownership', () => {

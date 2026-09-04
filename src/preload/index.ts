@@ -5,7 +5,8 @@ import type {
   LocalAgentApi,
   ModelPullProgress,
   RuntimeProgress,
-  TerminalEvent
+  TerminalEvent,
+  UpdateState
 } from '../shared/contracts'
 
 const api: LocalAgentApi = {
@@ -13,6 +14,12 @@ const api: LocalAgentApi = {
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   setStartupWindow: (active) => ipcRenderer.invoke('window:set-startup', active),
+  getUpdateState: () => ipcRenderer.invoke('update:get-state'),
+  onUpdateState: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: UpdateState): void => listener(state)
+    ipcRenderer.on('update:state', handler)
+    return () => ipcRenderer.removeListener('update:state', handler)
+  },
   getOllamaStatus: () => ipcRenderer.invoke('ollama:get-status'),
   startOllama: () => ipcRenderer.invoke('ollama:start'),
   getBasicHardwareInfo: () => ipcRenderer.invoke('hardware:get-basic'),
@@ -60,9 +67,10 @@ const api: LocalAgentApi = {
   },
   listThreads: () => ipcRenderer.invoke('threads:list'),
   setActiveThread: (threadId) => ipcRenderer.invoke('threads:set-active', threadId),
+  setThreadModel: (request) => ipcRenderer.invoke('threads:set-model', request),
   createThread: (request) => ipcRenderer.invoke('threads:create', request),
   loadThreadMessages: (threadId) => ipcRenderer.invoke('threads:messages', threadId),
-  deleteThread: (threadId) => ipcRenderer.invoke('threads:delete', threadId),
+  deleteThread: (request) => ipcRenderer.invoke('threads:delete', request),
   exportThreadProject: (threadId) => ipcRenderer.invoke('threads:export-project', threadId),
   getProjectResources: (threadId) => ipcRenderer.invoke('threads:get-project-resources', threadId),
   saveProjectResources: (request) => ipcRenderer.invoke('threads:save-project-resources', request),

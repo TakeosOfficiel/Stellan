@@ -9,7 +9,7 @@ Configurer deux agents x64 natifs :
 - une file `linux-x64` sur Linux avec Node.js, Corepack et les bibliothèques système nécessaires à Electron/AppImage ;
 - une file `windows-x64` sur Windows avec Node.js et Corepack.
 
-Le pipeline active exactement `pnpm@12.0.0`, la version déclarée dans `package.json`, puis installe le lockfile avec `--frozen-lockfile`. Chaque système exécute `typecheck`, les tests et le build. Linux construit un AppImage et un paquet deb ; Windows construit l'installateur NSIS sur Windows, sans Wine.
+Le pipeline active exactement `pnpm@12.0.0`, la version déclarée dans `package.json`, puis installe le lockfile avec `--frozen-lockfile`. Chaque système exécute `typecheck`, les tests et le build. Linux construit un AppImage ; Windows construit l'installateur NSIS sur Windows, sans Wine.
 
 Pour automatiser les exécutions, relier le service CI au dépôt Amp et configurer le webhook `post-receive` du projet Amp. Les identifiants éventuellement nécessaires au clonage d'un dépôt privé relèvent de la connexion entre le service CI et l'hébergeur, pas du build. Le pipeline lui-même ne lit aucun secret applicatif et ne publie aucune release.
 
@@ -18,8 +18,7 @@ Pour automatiser les exécutions, relier le service CI au dépôt Amp et configu
 La découverte automatique de certificat est désactivée avec `CSC_IDENTITY_AUTO_DISCOVERY=false`, et `electron-builder` reçoit `--publish never`. Les sorties attendues sont contrôlées comme fichiers non vides avant leur téléversement par Buildkite :
 
 - `ci-artifacts/unsigned/windows/Stellan-<version>-win-x64.exe` ;
-- `ci-artifacts/unsigned/linux/Stellan-<version>-linux-x86_64.AppImage` ;
-- `ci-artifacts/unsigned/linux/Stellan-<version>-linux-amd64.deb`.
+- `ci-artifacts/unsigned/linux/Stellan-<version>-linux-x86_64.AppImage`.
 
 Ces fichiers sont explicitement **non signés**. Ils servent à la validation CI et ne constituent pas des releases authentifiées.
 

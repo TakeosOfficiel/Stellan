@@ -6,6 +6,7 @@ import {
   createThreadWorktree,
   detectContainerRuntime,
   ensureWorkerContainer,
+  exposeWorkerPort,
   executeInWorkerContainer,
   executeInContainer,
   getRuntimeInfo,
@@ -370,6 +371,27 @@ describe('executeInContainer', () => {
 })
 
 describe('executeInWorkerContainer', () => {
+  it('exposes only one requested port through an internal relay network and cleans it up', async () => {
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result({ stdout: 'node:22-bookworm\n' }))
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result({ stdout: '127.0.0.1:49152\n' }))
+      .mockResolvedValue(result())
+
+    const exposure = await exposeWorkerPort('docker', 'portal-worker', 3000, runner)
+
+    expect(exposure.hostPort).toBe(49152)
+    expect(runner.mock.calls[1]?.[1]).toEqual(expect.arrayContaining(['network', 'create', '--internal']))
+    const relayArgs = runner.mock.calls[4]?.[1] ?? []
+    expect(relayArgs).toContain('127.0.0.1::3000')
+    expect(relayArgs).not.toContain('--network=host')
+    await exposure.close()
+    expect(runner.mock.calls.slice(-3).map((call) => call[1][0])).toEqual(['exec', 'network', 'network'])
+  })
+
   it('creates one persistent resource-limited container then executes inside it', async () => {
     const projectPath = await temporaryDirectory()
     const runner = vi.fn<CommandRunner>()

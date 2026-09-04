@@ -4,6 +4,16 @@ const path = require('node:path')
 const ARCH_NAMES = ['ia32', 'x64', 'armv7l', 'arm64', 'universal']
 
 module.exports = async function afterPack(context) {
+  if (context.electronPlatformName === 'linux') {
+    const unpackedModules = path.join(context.appOutDir, 'resources', 'app.asar.unpacked', 'node_modules')
+    await Promise.all([
+      fs.access(path.join(unpackedModules, '@img', 'sharp-linux-x64', 'lib', 'sharp-linux-x64.node')),
+      fs.access(path.join(unpackedModules, '@img', 'sharp-libvips-linux-x64', 'lib', 'libvips-cpp.so.8.17.3')),
+      fs.access(path.join(unpackedModules, 'node-pty', 'build', 'Release', 'pty.node')),
+      fs.access(path.join(unpackedModules, 'onnxruntime-node', 'bin', 'napi-v3', 'linux', 'x64', 'onnxruntime_binding.node')),
+    ])
+    return
+  }
   if (context.electronPlatformName !== 'win32') return
 
   const arch = typeof context.arch === 'string' ? context.arch : ARCH_NAMES[context.arch]

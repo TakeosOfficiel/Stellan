@@ -86,9 +86,32 @@ fs.mkdirSync(path.dirname(target), { recursive: true }); const chunks = []; proc
     return { path: relativePath, added, removed }
   }
 
+  async editFile(relativePath: string, oldText: string, newText: string, replaceAll = false): Promise<FileWriteResult> {
+    const content = await this.readFile(relativePath)
+    const occurrences = content.split(oldText).length - 1
+    if (occurrences === 0) throw new Error('Le texte à remplacer est introuvable dans le fichier.')
+    if (!replaceAll && occurrences !== 1) {
+      throw new Error(`Le texte à remplacer apparaît ${occurrences} fois. Fournissez plus de contexte ou activez replaceAll.`)
+    }
+    return this.writeFile(
+      relativePath,
+      replaceAll ? content.split(oldText).join(newText) : content.replace(oldText, newText)
+    )
+  }
+
   async deleteFile(relativePath: string): Promise<FileWriteResult> {
     const previous = await this.readFile(relativePath)
-    const output = await this.node('if (!fs.lstatSync(target).isFile()) throw new Error("Le chemin doit désigner un fichier"); fs.unlinkSync(target);', [relativePath])
+    const output = await this.node(`
+if (!fs.lstatSync(target).isFile()) throw new Error('Le chemin doit désigner un fichier');
+fs.unlinkSync(target);
+for (let directory = path.dirname(target); directory !== root; directory = path.dirname(directory)) {
+  try { fs.rmdirSync(directory); }
+  catch (error) {
+    if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') break;
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+`, [relativePath])
     if (output) throw new Error('Suppression Docker inattendue.')
     let removed = 0
     for (const change of diffLines(previous, '')) {
@@ -143,10 +166,11 @@ export function createAgentProjectTools(
   profile: WorkerProfile | null,
   threadId: string,
   projectPath: string,
-  direct: AgentProjectTools,
+  _direct: AgentProjectTools,
   git: { directory: string; commonDirectory: string } | null = null
 ): AgentProjectTools {
-  return profile?.mode === 'container'
-    ? new ContainerProjectTools(profile, threadId, projectPath, git)
-    : direct
+  if (profile?.mode !== 'container' || !profile.runtime) {
+    throw new Error('Le moteur de projet sécurisé est indisponible. L’accès direct à la machine est bloqué.')
+  }
+  return new ContainerProjectTools(profile, threadId, projectPath, git)
 }

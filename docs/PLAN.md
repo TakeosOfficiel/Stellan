@@ -209,20 +209,22 @@ Le coordinateur dispose aussi de `create_workers` pour déléguer automatiquemen
 
 La dictée utilise directement le microphone du renderer avec une permission Electron limitée à l’audio de la frame principale. Le PCM borné est transmis au processus principal, où Transformers.js exécute Whisper large-v3-turbo quantifié. Les poids sont téléchargés à la demande dans le dossier utilisateur puis réutilisés hors ligne ; ils ne gonflent pas l’installeur. Une petite normalisation de commandes vocales de code reste déterministe afin de ne pas réinterpréter la demande.
 
+Le compositeur accepte aussi jusqu’à quatre images PNG, JPEG ou WebP par collage, dépôt ou sélection. Les données sont validées et bornées à l’entrée IPC, persistées dans SQLite puis converties au format multimodal d’Ollama. Pour un message visuel, le coordinateur vérifie la capacité réelle du modèle actif, choisit sinon un modèle de vision déjà installé ou télécharge automatiquement un modèle borné à 8 Go et adapté à la mémoire détectée. Ce téléchargement explicite par l’ajout d’une image publie sa progression dans le chat et ne demande aucun passage par les réglages.
+
 ### Phase 3 — Isolation locale
 
 - Git worktree par thread ;
 - runtime WSL 2 headless géré par l’application sous Windows ;
-- Docker Engine direct sous Linux ;
-- runtime Podman sous Linux ;
+- Docker rootless privé géré par l’application sous Linux x86_64 ;
 - limites de ressources et politiques réseau ;
 - suspension, reprise et nettoyage des environnements.
 
-État actuel : sous Windows, Stellan télécharge et vérifie Alpine, retrouve ou importe la distribution technique historique `LocalAgentRuntime`, installe Docker Engine sans interface et pilote toutes ses commandes via `wsl.exe`. Ce nom système reste stable afin que les mises à jour conservent les modèles et projets existants. Chaque projet importé reçoit un fichier ext4 sparse plafonné à 20 Go ; son dépôt et tous ses worktrees y résident, sans écrire dans le dossier Windows original. Chaque conversation principale reçoit un worktree et un conteneur persistant durci ; lectures, recherches, écritures, Git, commandes et terminal y sont exécutés. CPU/RAM et nombre de workers sont calculés automatiquement, le réseau worker est fermé par défaut, et le volume interne `local-agent-worker-data-<thread>` est supprimé avec le thread. Sous Linux, Docker Engine direct et les worktrees hôte restent utilisés. Podman reste un backend ultérieur.
+État actuel : sous Windows, Stellan télécharge et vérifie Alpine, retrouve ou importe la distribution technique historique `LocalAgentRuntime`, installe Docker Engine sans interface et y conserve les projets et workers. Sur NVIDIA, une migration parallèle crée `StellanInferenceRuntime` avec une image Ubuntu 24.04 vérifiée, Docker et NVIDIA Container Toolkit. Les modèles Ollama sont copiés et comparés fichier par fichier avant la bascule ; Alpine et son volume source restent intacts en cas de retour arrière. Sous Linux x86_64, Stellan installe transactionnellement les binaires statiques officiels Docker/rootless et `slirp4netns`, vérifiés par SHA-256, puis utilise exclusivement son socket, son HOME et son stockage privés. Aucun daemon Docker système n’est requis ; les espaces de noms, `uidmap`, `iptables`, TUN et, pour le GPU NVIDIA, le pilote/toolkit restent des capacités hôte. Chaque conversation principale reçoit un worktree et un conteneur persistant durci ; lectures, recherches, écritures, Git, commandes et terminal y sont exécutés. CPU/RAM et nombre de workers sont calculés automatiquement, le réseau worker est fermé par défaut, et le volume interne `local-agent-worker-data-<thread>` est supprimé avec le thread. Les portails ajoutent temporairement un réseau interne et un relais loopback limité au seul port demandé, puis les nettoient à la fermeture.
 
 ### Phase 4 — Fiabilité et expérience
 
 - terminal intégré ;
+- édition ciblée, annulation d’une modification et plan TODO persistant ;
 - reprise après fermeture ou erreur ;
 - compression des longues conversations ;
 - diagnostic et recommandation de modèle ;
@@ -233,7 +235,9 @@ La dictée utilise directement le microphone du renderer avec une permission Ele
 
 État actuel des portails : un thread de projet actif peut servir automatiquement son `index.html` dans un aperçu Chromium intégré ou créer un proxy HTTP/WebSocket vers un serveur local déjà lancé. Les deux modes restent liés uniquement à `127.0.0.1` sur un port aléatoire. Le renderer transmet seulement le thread, la source, une durée bornée et éventuellement le port cible ; Electron valide le propriétaire, la frame, le thread et l’environnement. Le serveur statique bloque les sorties du projet, y compris par lien symbolique, tandis que le proxy fixe l’amont à `127.0.0.1` ou `::1`, assainit les requêtes et contrôle sa disponibilité. L’URL peut être copiée, ouverte, prévisualisée avec plusieurs formats d’appareil et arrêtée. L’état n’est jamais persisté et les sockets sont nettoyés avec le thread, la fenêtre, l’expiration ou l’application. L’accès LAN, Cloudflare et toute promesse d’accès public restent désactivés jusqu’à l’ajout d’un véritable tunnel et de contrôles d’accès.
 
-État actuel de la reprise agent : le processus principal journalise dans SQLite chaque exécution et les transitions ordonnées des appels d’outils avec leurs arguments et résultats. Une annulation, une erreur ou un redémarrage marque atomiquement l’exécution et les outils encore actifs comme interrompus. Le contexte envoyé au modèle est reconstruit depuis cet historique principal puis borné déterministement à 60 000 caractères en conservant les échanges récents et les paires appel/résultat ; les éléments surdimensionnés sont tronqués, sans prétendre produire un résumé sémantique. La reprise automatique d’une génération interrompue et la réduction sémantique des anciens échanges restent à réaliser.
+État actuel de la reprise agent : le processus principal journalise dans SQLite chaque exécution et les transitions ordonnées des appels d’outils avec leurs arguments et résultats. Une annulation, une erreur ou un redémarrage marque atomiquement l’exécution et les outils encore actifs comme interrompus. Le contexte envoyé au modèle est reconstruit depuis cet historique principal puis borné déterministement à 24 000 caractères en conservant les échanges récents et les paires appel/résultat ; les éléments surdimensionnés sont tronqués, sans prétendre produire un résumé sémantique. La reprise automatique d’une génération interrompue et la réduction sémantique des anciens échanges restent à réaliser.
+
+État actuel des activités fiables : un registre générique relie les outils `activity_start` et `activity_action` à des moteurs autonomes validés par schémas. SQLite conserve séparément l’état privé versionné et un journal immuable des transitions ; une mise à jour concurrente échoue sans écrasement. Chaque moteur projette une vue publique limitée à 8 Kio, seule donnée réinjectée dans le contexte. Une action métier invalide produit une erreur publique structurée sans mutation, puis le même modèle la reformule lors de la seconde passe. Le moteur de pendu constitue la première implémentation et garde le mot hors du contexte jusqu’à la fin de la partie.
 
 ### Phase 5 — Distribution
 
@@ -243,19 +247,28 @@ La dictée utilise directement le microphone du renderer avec une permission Ele
 - assistant de première configuration ;
 - documentation utilisateur et dépannage.
 
-État actuel : les paquets Windows et Linux et leur construction CI non signée sont configurés. Au lancement, une fenêtre compacte affiche la progression de la première installation ou du redémarrage du runtime ; les diagnostics techniques ne surchargent plus les réglages de modèles. Stellan crée ou redémarre en arrière-plan `local-agent-ollama`, tente le GPU NVIDIA puis le CPU, expose l’API uniquement sur `127.0.0.1:11435` et conserve les modèles dans le disque virtuel privé. Le choix et le téléchargement du modèle restent visibles dans le catalogue ; aucun Ollama natif, Docker Desktop ni terminal séparé n’est lancé.
+État actuel : les paquets Windows et Linux et leur construction CI non signée sont configurés. Au lancement, une fenêtre compacte affiche la progression de la première installation ou du redémarrage du runtime ; les diagnostics techniques ne surchargent plus les réglages de modèles. Stellan crée ou redémarre en arrière-plan `local-agent-ollama`, choisit CUDA pour NVIDIA, ROCm ou Vulkan pour AMD, Vulkan pour Intel et les autres GPU compatibles, puis revient au CPU en cas d’échec. Les périphériques AMD/Intel ne sont transmis au conteneur que lorsqu’ils existent réellement dans le runtime Linux. L’API reste limitée à `127.0.0.1:11435` et les modèles restent dans le disque virtuel privé. Le choix et le téléchargement du modèle restent visibles dans le catalogue ; aucun Ollama natif, Docker Desktop ni terminal séparé n’est lancé.
 
 Les mises à jour automatiques signées, la signature des artefacts, les smoke tests natifs empaquetés et un diagnostic indépendant de l’installation avant toute tentative de démarrage restent à réaliser. L’état « installation inconnue » est donc volontaire lorsque l’API ne répond pas encore.
 
 ### Phase 6 — Extensions
 
 - agents parallèles lorsque les tâches sont réellement indépendantes ;
+- recherche sémantique avancée dans le code ;
+- recherche web et lecture contrôlée d’URL ;
+- conseiller spécialisé local comparable à Oracle ;
+- diagnostics dédiés accessibles à l’agent ;
+- génération et affichage de diagrammes ;
 - exécution sur un autre PC ou serveur ;
 - client terminal ;
 - plugins avec permissions déclaratives ;
 - contrôle à distance et partage de threads.
 
-Première tranche réalisée pour les agents parallèles locaux : le plafond de workers simultanés est initialisé prudemment depuis les cœurs CPU et la RAM détectés. Un ordonnanceur FIFO conserve l’invariant d’une génération active par conversation, sans mettre les autres conversations du projet dans la même file. Les événements IPC portent l’identifiant du thread et de la requête ; le renderer conserve donc séparément les états `queued`/`running`, les sorties partielles et l’activité des outils pendant les changements de thread. L’annulation retire une entrée de file ou interrompt son worker, et la suppression d’un thread refuse de nettoyer son environnement tant que l’un de ces états existe.
+Première tranche réalisée pour les agents parallèles locaux : le plafond de workers simultanés est initialisé prudemment depuis les ressources détectées. Une petite configuration sérialise les inférences dans Ollama ; deux générations ne sont permises qu’après confirmation d’un backend GPU accéléré disposant d’au moins 16 Go de VRAM et de 24 Go de RAM système, car chaque requête parallèle multiplie la mémoire réservée au contexte. Un ordonnanceur FIFO conserve l’invariant d’une génération active par conversation, sans mettre les autres conversations du projet dans la même file. Les événements IPC portent l’identifiant du thread et de la requête ; le renderer conserve donc séparément les états `queued`/`running`, les sorties partielles et l’activité des outils pendant les changements de thread. L’annulation retire une entrée de file ou interrompt son worker, et la suppression d’un thread refuse de nettoyer son environnement tant que l’un de ces états existe.
+
+Le routage multi-modèles reste entièrement local et n’installe rien silencieusement. Le thread principal conserve le modèle choisi par l’utilisateur ; les workers utilisent automatiquement le meilleur modèle de code déjà installé et compatible avec le matériel, avec repli sur le modèle principal. Pour une incertitude complexe, `consult_advisor` peut interroger en lecture seule le meilleur modèle généraliste installé, puis rend son avis au coordinateur qui garde la décision finale.
+
+Ollama reste le gestionnaire d’inférence par défaut tant qu’un benchmark intégré ne démontre pas un gain sur la machine réelle. Une couche de backend ultérieure pourra sélectionner llama.cpp directement pour minimiser l’empreinte sur CPU et petits GPU, ou vLLM/SGLang pour le débit sur les gros accélérateurs qu’ils prennent effectivement en charge. Cette évolution doit préserver les appels d’outils, la vision, le stockage des modèles et les contrôles réseau avant de remplacer le runtime actuel ; une comparaison théorique ne suffit pas.
 
 Tranche suivante réalisée pour la conversation en file : plusieurs messages peuvent être persistés pendant qu’un run du même thread travaille. SQLite conserve leur ordre et leur contenu ; une entrée en attente reste hors de la conversation et n’y apparaît qu’au démarrage réel de son run. Le processus principal permet de modifier ou supprimer uniquement cette entrée encore en attente, de la placer en tête avec **Envoyer maintenant**, puis d’interrompre le run courant avant de la démarrer. Le contexte de chaque run est reconstruit jusqu’à son propre message et exclut les demandes futures. L’interface affiche la file directement au-dessus du compositeur avec ses actions, tandis qu’un bouton séparé ouvre l’historique des états en cours, terminés, interrompus et en erreur.
 

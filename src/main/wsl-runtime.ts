@@ -3,7 +3,9 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { RuntimeProgress } from '../shared/contracts'
 import {
+  configureManagedDockerPtyBuilder,
   configureManagedDockerRunner,
+  managedDockerPtyCommand,
   runHostCommand,
   type CommandOptions,
   type CommandResult
@@ -423,18 +425,20 @@ export function configureManagedWslRuntime(
   distroAddress = null
   progressReporter = onProgress
   configureManagedDockerRunner(process.platform === 'win32' ? runManagedDocker : null)
+  configureManagedDockerPtyBuilder(process.platform === 'win32'
+    ? (args) => ({
+        executable: 'wsl.exe',
+        args: ['--distribution', MANAGED_WSL_DISTRO, '--user', 'root', '--exec', 'docker', ...args]
+      })
+    : null)
 }
 
 export function managedContainerPtyCommand(args: readonly string[]): {
   executable: string
   args: string[]
+  env?: NodeJS.ProcessEnv
 } {
-  return process.platform === 'win32'
-    ? {
-        executable: 'wsl.exe',
-        args: ['--distribution', MANAGED_WSL_DISTRO, '--user', 'root', '--exec', 'docker', ...args]
-      }
-    : { executable: 'docker', args: [...args] }
+  return managedDockerPtyCommand(args)
 }
 
 export async function installWslFeature(): Promise<void> {

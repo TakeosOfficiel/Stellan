@@ -16,6 +16,13 @@ function getExecutablePath() {
   return 'electron'
 }
 
+function cacheRoot() {
+  if (process.platform === 'win32') {
+    return process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+  }
+  return process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache')
+}
+
 function electronIsInstalled() {
   try {
     require('electron')
@@ -32,9 +39,9 @@ async function checksum(file) {
 }
 
 async function findCachedArchive(filename, expectedChecksum) {
-  const localCache = path.join(os.homedir(), '.cache', 'local-agent', filename)
+  const localCache = path.join(cacheRoot(), 'local-agent', filename)
   const candidates = [localCache]
-  const electronCache = path.join(os.homedir(), '.cache', 'electron')
+  const electronCache = process.env.ELECTRON_CACHE || path.join(cacheRoot(), 'electron')
 
   try {
     for (const entry of await fs.promises.readdir(electronCache)) {
@@ -59,7 +66,7 @@ async function downloadArchive(version, filename, expectedChecksum) {
   const cached = await findCachedArchive(filename, expectedChecksum)
   if (cached) return cached
 
-  const cacheDirectory = path.join(os.homedir(), '.cache', 'local-agent')
+  const cacheDirectory = path.join(cacheRoot(), 'local-agent')
   const archive = path.join(cacheDirectory, filename)
   const temporaryArchive = `${archive}.partial`
   await fs.promises.mkdir(cacheDirectory, { recursive: true })
@@ -94,7 +101,15 @@ async function repairElectron() {
 
   await fs.promises.rm(distributionDirectory, { recursive: true, force: true })
   await fs.promises.mkdir(distributionDirectory, { recursive: true })
-  await execFileAsync('unzip', ['-q', archive, '-d', distributionDirectory])
+  if (process.platform === 'win32') {
+    await execFileAsync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force',
+      archive, distributionDirectory
+    ])
+  } else {
+    await execFileAsync('unzip', ['-q', archive, '-d', distributionDirectory])
+  }
 
   const bundledTypes = path.join(distributionDirectory, 'electron.d.ts')
   if (fs.existsSync(bundledTypes)) {

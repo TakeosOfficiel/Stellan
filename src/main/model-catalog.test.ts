@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { HardwareInfo } from '../shared/contracts'
-import { getModelCatalog, isCatalogModel } from './model-catalog'
+import { getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledSpecialistModel } from './model-catalog'
 
 function hardware(overrides: Partial<HardwareInfo> = {}): HardwareInfo {
   return {
@@ -17,7 +17,9 @@ describe('getModelCatalog', () => {
   it('recommends lighter models and flags demanding ones from available memory', () => {
     const models = getModelCatalog(hardware())
 
-    expect(models.find((model) => model.id === 'qwen2.5-coder:7b')?.compatibility)
+    expect(models.find((model) => model.id === 'qwen3.5:0.8b')?.compatibility)
+      .toBe('recommended')
+    expect(models.find((model) => model.id === 'qwen3.5:4b')?.compatibility)
       .toBe('recommended')
     expect(models.find((model) => model.id === 'qwen3-coder:30b')?.compatibility)
       .toBe('demanding')
@@ -32,7 +34,65 @@ describe('getModelCatalog', () => {
   })
 
   it('only accepts curated model identifiers', () => {
+    expect(isCatalogModel('qwen3.5:0.8b')).toBe(true)
     expect(isCatalogModel('qwen3.5:4b')).toBe(true)
+    expect(isCatalogModel('devstral-small-2:24b')).toBe(true)
+    expect(isCatalogModel('qwen2.5-coder:7b')).toBe(false)
     expect(isCatalogModel('unknown/model')).toBe(false)
+  })
+
+  it('offers several model families instead of a Qwen-only catalog', () => {
+    const modelIds = getModelCatalog(hardware()).map((model) => model.id)
+
+    expect(modelIds).toEqual(expect.arrayContaining([
+      'devstral-small-2:24b',
+      'granite4.2:3b',
+      'gpt-oss:20b',
+      'gemma4:e2b-it-qat'
+    ]))
+  })
+
+  it('routes code work to an installed specialist and otherwise keeps the primary model', () => {
+    const catalog = getModelCatalog(hardware())
+
+    expect(selectInstalledSpecialistModel(
+      catalog,
+      ['granite4.2:8b', 'qwen3.5:9b'],
+      'code',
+      'granite4.2:8b'
+    )).toBe('qwen3.5:9b')
+    expect(selectInstalledSpecialistModel(catalog, ['granite4.2:8b'], 'code', 'granite4.2:8b'))
+      .toBe('granite4.2:8b')
+    expect(selectInstalledSpecialistModel(
+      getModelCatalog(hardware({ totalMemoryBytes: 16_000_000_000 })),
+      ['qwen3.5:4b', 'devstral-small-2:24b'],
+      'code',
+      'qwen3.5:4b'
+    )).toBe('qwen3.5:4b')
+    expect(selectInstalledSpecialistModel(
+      getModelCatalog(hardware({ totalMemoryBytes: 16_000_000_000 })),
+      ['qwen3.5:2b', 'qwen3.5:4b'],
+      'code',
+      'qwen3.5:2b'
+    )).toBe('qwen3.5:4b')
+  })
+
+  it('exposes one polyvalent model in general, code, vision, and fast usages', () => {
+    expect(getModelCatalog(hardware()).find((model) => model.id === 'qwen3.5:4b')?.categories)
+      .toEqual(expect.arrayContaining(['fast', 'general', 'code', 'vision']))
+  })
+
+  it('chooses a bounded automatic vision download suited to available memory', () => {
+    expect(selectAutomaticVisionModel(getModelCatalog(hardware({ totalMemoryBytes: 8_000_000_000 })))?.id)
+      .toBe('qwen3.5:2b')
+    expect(selectAutomaticVisionModel(getModelCatalog(hardware({ totalMemoryBytes: 16_000_000_000 })))?.id)
+      .toBe('qwen3.5:4b')
+    expect(selectAutomaticVisionModel(getModelCatalog(hardware({ totalMemoryBytes: 32_000_000_000 })))?.id)
+      .toBe('qwen3.5:9b')
+  })
+
+  it('keeps the workstation model unavailable on ordinary hardware', () => {
+    expect(getModelCatalog(hardware()).find((model) => model.id === 'devstral-2:123b')?.compatibility)
+      .toBe('demanding')
   })
 })

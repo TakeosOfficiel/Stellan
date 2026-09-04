@@ -10,7 +10,9 @@ import {
   Circle,
   CircleAlert,
   ExternalLink,
+  FolderGit2,
   FolderOpen,
+  ImagePlus,
   Import,
   ListTree,
   LockKeyhole,
@@ -32,14 +34,16 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type {
   AgentRunSummary,
+  CatalogModel,
   ChatEvent,
-  ChatMessage,
+  ChatImage,
   DictationProgress,
   OllamaStatus,
   ProjectSelection,
   ProjectResourceSettings,
   StoredThread
 } from '../../shared/contracts'
+import { MODEL_SELECTION_MESSAGE_PREFIX } from '../../shared/contracts'
 import { prepareWhisperAudio } from './dictation-audio'
 import { WorkbenchPanel } from './WorkbenchPanel'
 import {
@@ -52,6 +56,8 @@ import {
 type WorkspaceViewProps = {
   visible: boolean
   status: OllamaStatus | null | 'loading'
+  catalogModels: CatalogModel[]
+  preferredModel: string
   shortcut: { type: 'new-thread' | 'open-project' } | null
   onShortcutHandled: () => void
   onOpenSetup: () => void
@@ -75,14 +81,45 @@ type FileEditActivity = {
   deleted: boolean
 }
 
+type PendingThreadDeletion = {
+  threadId: string
+  title: string
+  changes: string
+}
+
 type ContentEvent = Extract<ChatEvent, { type: 'content' }>
+
+const CHAT_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
+const MAX_CHAT_IMAGE_BYTES = 8_000_000
+
+function readChatImage(file: File): Promise<ChatImage> {
+  if (!CHAT_IMAGE_TYPES.has(file.type)) return Promise.reject(new Error('Utilisez une image PNG, JPEG ou WebP.'))
+  if (file.size > MAX_CHAT_IMAGE_BYTES) return Promise.reject(new Error('Chaque image doit faire moins de 8 Mo.'))
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('Cette image n’a pas pu être lue.'))
+    reader.onload = () => {
+      const encoded = typeof reader.result === 'string' ? reader.result.split(',', 2)[1] : null
+      if (!encoded) reject(new Error('Cette image est invalide.'))
+      else resolve({ mimeType: file.type as ChatImage['mimeType'], data: encoded })
+    }
+    reader.readAsDataURL(file)
+  })
+}
 
 const TOOL_LABELS: Record<string, string> = {
   list_files: 'Liste des fichiers',
   read_file: 'Lecture de fichier',
   search_files: 'Recherche dans le projet',
   write_file: 'Écriture de fichier',
+  edit_file: 'Édition ciblée',
+  undo_edit: 'Annulation de modification',
   delete_file: 'Suppression de fichier',
+  todo_read: 'Lecture du plan',
+  todo_write: 'Mise à jour du plan',
+  activity_start: 'Démarrage de l’activité',
+  activity_action: 'Action vérifiée',
+  consult_advisor: 'Conseiller local',
   run_command: 'Commande locale',
   git_status: 'Statut Git',
   git_diff: 'Diff Git'
@@ -111,7 +148,19 @@ function toolActivityLabel(activity: ToolActivity): React.JSX.Element {
     const query = typeof input?.query === 'string' ? input.query : ''
     return <>{running ? 'Recherche dans le code' : 'Recherché dans le code'}{query && <> · <code>{query}</code></>}{running ? '…' : ''}</>
   }
-  if (activity.tool === 'write_file') return <>{running ? 'Modification de ' : 'Modifié '}<code>{path}</code>{running ? '…' : ''}</>
+  if (activity.tool === 'write_file' || activity.tool === 'edit_file') return <>{running ? 'Modification de ' : 'Modifié '}<code>{path}</code>{running ? '…' : ''}</>
+  if (activity.tool === 'undo_edit') return <>{running ? 'Annulation d’une modification…' : 'Modification annulée'}</>
+  if (activity.tool === 'todo_read') return <>{running ? 'Lecture du plan…' : 'Plan consulté'}</>
+  if (activity.tool === 'todo_write') return <>{running ? 'Mise à jour du plan…' : 'Plan mis à jour'}</>
+  if (activity.tool === 'activity_start') {
+    const failed = output && typeof output === 'object' && 'ok' in output && output.ok === false
+    return <>{running ? 'Préparation de l’activité…' : failed ? 'Activité non démarrée' : 'Activité fiable démarrée'}</>
+  }
+  if (activity.tool === 'activity_action') {
+    const failed = output && typeof output === 'object' && 'ok' in output && output.ok === false
+    return <>{running ? 'Vérification de l’action…' : failed ? 'Action refusée par le moteur' : 'Action vérifiée par le moteur'}</>
+  }
+  if (activity.tool === 'consult_advisor') return <>{running ? 'Consultation d’un autre modèle…' : 'Conseiller consulté'}</>
   if (activity.tool === 'delete_file') return <>{running ? 'Suppression de ' : 'Supprimé '}<code>{path}</code>{running ? '…' : ''}</>
   if (activity.tool === 'run_command') {
     const command = [input?.command, ...(Array.isArray(input?.args) ? input.args : [])].filter((part) => typeof part === 'string').join(' ')
@@ -128,12 +177,13 @@ function toolActivityLabel(activity: ToolActivity): React.JSX.Element {
 }
 
 function fileEditActivity(activity: ToolActivity): FileEditActivity | null {
-  if (!['write_file', 'delete_file'].includes(activity.tool) || (activity.status !== 'done' && activity.status !== 'running')) return null
+  if (!['write_file', 'edit_file', 'delete_file'].includes(activity.tool) || (activity.status !== 'done' && activity.status !== 'running')) return null
   const input = parsedToolValue(activity.input) as Record<string, unknown> | null
   const output = parsedToolValue(activity.output) as Record<string, unknown> | null
   if (
     typeof input?.path !== 'string' ||
-    (activity.tool === 'write_file' && typeof input.content !== 'string')
+    (activity.tool === 'write_file' && typeof input.content !== 'string') ||
+    (activity.tool === 'edit_file' && typeof input.oldText !== 'string')
   ) return null
   return {
     path: input.path,
@@ -146,6 +196,16 @@ function fileEditActivity(activity: ToolActivity): FileEditActivity | null {
 
 function projectName(projectPath: string): string {
   return projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? projectPath
+}
+
+function localChangeDetails(line: string): { path: string; label: string } {
+  const status = line.slice(0, 2)
+  const path = line.slice(3).trim() || line.trim()
+  if (status === '??') return { path, label: 'Nouveau fichier' }
+  if (status.includes('D')) return { path, label: 'Supprimé' }
+  if (status.includes('R')) return { path, label: 'Renommé' }
+  if (status.includes('A')) return { path, label: 'Ajouté' }
+  return { path, label: 'Modifié' }
 }
 
 function MarkdownMessage({ content }: { content: string }): React.JSX.Element {
@@ -174,11 +234,17 @@ type DictationCapture = {
 export function WorkspaceView({
   visible,
   status,
+  catalogModels,
+  preferredModel,
   shortcut,
   onShortcutHandled,
   onOpenSetup
 }: WorkspaceViewProps): React.JSX.Element {
-  const models = status && status !== 'loading' && status.available ? status.models : []
+  const installedModels = status && status !== 'loading' && status.available ? status.models : []
+  const catalogModelIds = new Set(catalogModels.map((model) => model.id.replace(/:latest$/, '')))
+  const models = catalogModelIds.size > 0
+    ? installedModels.filter((model) => catalogModelIds.has(model.name.replace(/:latest$/, '')))
+    : installedModels
   const hasOllama = Boolean(status && status !== 'loading' && status.available)
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
   const [project, setProject] = useState<ProjectSelection | null>(null)
@@ -194,7 +260,10 @@ export function WorkspaceView({
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
   const [messagesByThread, setMessagesByThread] = useState<Record<string, UiMessage[]>>({})
   const [prompt, setPrompt] = useState('')
+  const [pendingImages, setPendingImages] = useState<ChatImage[]>([])
+  const [imageError, setImageError] = useState<string | null>(null)
   const [runsByThread, setRunsByThread] = useState<ThreadRunState>({})
+  const [runProgressByThread, setRunProgressByThread] = useState<Record<string, string>>({})
   const [runHistoryByThread, setRunHistoryByThread] = useState<Record<string, AgentRunSummary[]>>({})
   const [runHistoryOpen, setRunHistoryOpen] = useState(false)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
@@ -205,11 +274,21 @@ export function WorkspaceView({
   const [threadMenuOpen, setThreadMenuOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [mobileWorkbenchOpen, setMobileWorkbenchOpen] = useState(false)
+  const [pendingThreadDeletion, setPendingThreadDeletion] = useState<PendingThreadDeletion | null>(null)
+  const [deletingThread, setDeletingThread] = useState(false)
+  const [visitedWorkbenchThreads, setVisitedWorkbenchThreads] = useState<string[]>([])
+  const [workbenchWidth, setWorkbenchWidth] = useState(() => {
+    const stored = Number(localStorage.getItem('stellan:workbench-width'))
+    return Number.isFinite(stored) ? Math.max(320, Math.min(900, stored)) : 520
+  })
   const [thinkingElapsed, setThinkingElapsed] = useState(0)
+  const [warmingModel, setWarmingModel] = useState(false)
+  const [modelSelectionError, setModelSelectionError] = useState<string | null>(null)
   const [dictationState, setDictationState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
   const [dictationProgress, setDictationProgress] = useState<DictationProgress | null>(null)
   const [dictationError, setDictationError] = useState<string | null>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
   const dictationCaptureRef = useRef<DictationCapture | null>(null)
   const newThreadButtonRef = useRef<HTMLButtonElement>(null)
   const projectSwitcherRef = useRef<HTMLButtonElement>(null)
@@ -232,6 +311,7 @@ export function WorkspaceView({
   const queuedRuns = activeRunHistory.filter((run) => run.status === 'queued')
   const historyRuns = activeRunHistory.filter((run) => run.status !== 'queued')
   const toolActivities = activeThreadId ? toolsByThread[activeThreadId] ?? [] : []
+  const activeRunProgress = activeThreadId ? runProgressByThread[activeThreadId] : undefined
   const effectiveModel = useMemo(() => {
     if (models.some((model) => model.name === selectedModel)) return selectedModel
     return models[0]?.name ?? ''
@@ -307,9 +387,36 @@ export function WorkspaceView({
   }, [effectiveModel])
 
   useEffect(() => {
-    if (!effectiveModel || !hasOllama || warmedModelRef.current === effectiveModel) return
+    if (preferredModel && models.some((model) => model.name === preferredModel)) {
+      setSelectedModel(preferredModel)
+    }
+  }, [preferredModel])
+
+  useEffect(() => {
+    localStorage.setItem('stellan:workbench-width', String(workbenchWidth))
+  }, [workbenchWidth])
+
+  useEffect(() => {
+    if (!activeThreadId) return
+    setVisitedWorkbenchThreads((current) => current.includes(activeThreadId) ? current : [...current, activeThreadId])
+  }, [activeThreadId])
+
+  useEffect(() => {
+    if (!effectiveModel || !hasOllama || warmedModelRef.current === effectiveModel) {
+      setWarmingModel(false)
+      return
+    }
+    let active = true
     warmedModelRef.current = effectiveModel
+    setWarmingModel(true)
     void window.localAgent.warmModel(effectiveModel)
+      .then((warmed) => {
+        if (!warmed && warmedModelRef.current === effectiveModel) warmedModelRef.current = ''
+      })
+      .finally(() => {
+        if (active) setWarmingModel(false)
+      })
+    return () => { active = false }
   }, [effectiveModel, hasOllama])
 
   useEffect(() => () => {
@@ -348,6 +455,10 @@ export function WorkspaceView({
         setRunsByThread((current) => applyRunEvent(current, event))
         setMessagesByThread((current) => applyMessageEvent(current, event))
         void refreshRunHistory(event.threadId)
+        return
+      }
+      if (event.type === 'progress') {
+        setRunProgressByThread((current) => ({ ...current, [event.threadId]: event.detail }))
         return
       }
       if (event.type === 'tool') {
@@ -389,6 +500,13 @@ export function WorkspaceView({
         flushBufferedContent(event.threadId, event.requestId)
         setMessagesByThread((current) => applyMessageEvent(current, event))
       }
+      if (event.type === 'done' || event.type === 'error') {
+        setRunProgressByThread((current) => {
+          const next = { ...current }
+          delete next[event.threadId]
+          return next
+        })
+      }
       setRunsByThread((current) => applyRunEvent(current, event))
       void refreshRunHistory(event.threadId)
     }
@@ -399,6 +517,12 @@ export function WorkspaceView({
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
+
+      if (pendingThreadDeletion && !deletingThread) {
+        event.preventDefault()
+        setPendingThreadDeletion(null)
+        return
+      }
 
       if (newProjectName !== null && !creatingProject) {
         event.preventDefault()
@@ -428,7 +552,7 @@ export function WorkspaceView({
 
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [creatingProject, newProjectName, resourceSettings, runHistoryOpen, savingResources, threadMenuOpen])
+  }, [creatingProject, deletingThread, newProjectName, pendingThreadDeletion, resourceSettings, runHistoryOpen, savingResources, threadMenuOpen])
 
   useEffect(() => {
     const dialog = dialogRef.current
@@ -458,7 +582,7 @@ export function WorkspaceView({
       dialogTriggerRef.current?.focus()
       dialogTriggerRef.current = null
     }
-  }, [newProjectName !== null, resourceSettings !== null])
+  }, [newProjectName !== null, pendingThreadDeletion !== null, resourceSettings !== null])
 
   useEffect(() => {
     if (!shortcut || handledShortcutRef.current === shortcut) return
@@ -513,6 +637,32 @@ export function WorkspaceView({
     setActiveThreadId(thread.id)
     setMessagesByThread((current) => ({ ...current, [thread.id]: [] }))
     setRunHistoryByThread((current) => ({ ...current, [thread.id]: [] }))
+  }
+
+  async function selectPrimaryModel(model: string): Promise<void> {
+    const previousModel = selectedModel
+    setSelectedModel(model)
+    setModelSelectionError(null)
+    if (!activeThreadId) return
+    try {
+      const result = await window.localAgent.setThreadModel({ threadId: activeThreadId, model })
+      setThreads((current) => current.map((thread) => thread.id === result.thread.id ? result.thread : thread))
+      const message = result.message
+      if (message) {
+        setMessagesByThread((current) => ({
+          ...current,
+          [activeThreadId]: [...(current[activeThreadId] ?? []), {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            images: message.images
+          }]
+        }))
+      }
+    } catch (error) {
+      setSelectedModel(previousModel)
+      setModelSelectionError(error instanceof Error ? error.message : 'Le changement de modèle a échoué.')
+    }
   }
 
   async function chooseProject(): Promise<void> {
@@ -582,7 +732,8 @@ export function WorkspaceView({
         ...storedMessages.map((message) => ({
           id: message.id,
           role: message.role,
-          content: message.content
+          content: message.content,
+          images: message.images
         })),
         ...(ephemeral?.status === 'running' && !storedMessages.some((message) => message.id === ephemeral.requestId)
           ? [ephemeralMessage ?? { id: ephemeral.requestId, role: 'assistant' as const, content: '' }]
@@ -604,23 +755,29 @@ export function WorkspaceView({
       setNewProjectName('')
       return
     }
-    await window.localAgent.setActiveThread(null)
     stickToBottomRef.current = true
     setShowScrollToBottom(false)
-    setActiveThreadId(null)
     setRunHistoryOpen(false)
     setEditingRequestId(null)
-    setMessagesByThread((current) => ({ ...current, __draft__: [] }))
-    if (project) await createProjectThread(project)
+    await createProjectThread(project)
     focusComposer()
   }
 
-  async function removeThread(threadId: string): Promise<void> {
+  async function removeThread(threadId: string, discardChanges = false): Promise<void> {
+    if (discardChanges) setDeletingThread(true)
     try {
-      if (!await window.localAgent.deleteThread(threadId)) return
+      const result = await window.localAgent.deleteThread({ threadId, discardChanges })
+      if (result.pendingChanges) {
+        const thread = threads.find((candidate) => candidate.id === threadId)
+        setPendingThreadDeletion({ threadId, title: thread?.title ?? 'ce thread', changes: result.pendingChanges })
+        return
+      }
+      if (!result.deleted) return
+      setPendingThreadDeletion(null)
       setThreads((current) => current.filter((thread) => thread.id !== threadId && thread.parentThreadId !== threadId))
       if (activeThreadId === threadId || threads.find((thread) => thread.id === activeThreadId)?.parentThreadId === threadId) await newThread()
     } catch { /* Le thread actif reste affiché. */ }
+    finally { setDeletingThread(false) }
   }
 
   async function exportProject(): Promise<void> {
@@ -668,7 +825,7 @@ export function WorkspaceView({
   }
 
   async function sendMessage(): Promise<void> {
-    const content = prompt.trim()
+    const content = prompt.trim() || (pendingImages.length > 0 ? 'Analyse cette image.' : '')
     if (!project || !activeThreadId) {
       await chooseProject()
       return
@@ -695,11 +852,10 @@ export function WorkspaceView({
     }
 
     const requestId = crypto.randomUUID()
-    const history: ChatMessage[] = messages
-      .filter((message) => !message.failed && message.content)
-      .map(({ role, content: messageContent }) => ({ role, content: messageContent }))
-
     setPrompt('')
+    const images = pendingImages
+    setPendingImages([])
+    setImageError(null)
     setRunsByThread((current) => current[threadId]
       ? current
       : { ...current, [threadId]: { requestId, status: 'queued' } })
@@ -716,8 +872,7 @@ export function WorkspaceView({
               ? `Tu es Stellan, un agent de développement local. Le projet sélectionné est ${project.name}.`
               : 'Tu es Stellan, un assistant local utile, précis et concis. Aucun projet n’est ouvert. Si une demande nécessite de créer ou modifier des fichiers, demande d’abord à l’utilisateur d’ouvrir un projet et ne présente jamais du code collé dans le chat comme une modification réellement effectuée.'
           },
-          ...history,
-          { role: 'user', content }
+          { role: 'user', content, ...(images.length > 0 ? { images } : {}) }
         ]
       })
       setThreads((current) => current.map((thread) =>
@@ -728,6 +883,21 @@ export function WorkspaceView({
       await refreshRunHistory(threadId)
     } catch {
       await refreshRunHistory(threadId)
+    }
+  }
+
+  async function addImageFiles(files: File[]): Promise<void> {
+    const available = Math.max(0, 4 - pendingImages.length)
+    if (available === 0) {
+      setImageError('Vous pouvez joindre au maximum 4 images.')
+      return
+    }
+    try {
+      const images = await Promise.all(files.slice(0, available).map(readChatImage))
+      setPendingImages((current) => [...current, ...images].slice(0, 4))
+      setImageError(files.length > available ? 'Seules les 4 premières images ont été ajoutées.' : null)
+    } catch (error) {
+      setImageError(error instanceof Error ? error.message : 'L’image n’a pas pu être ajoutée.')
     }
   }
 
@@ -899,11 +1069,50 @@ export function WorkspaceView({
 
   const activeThread = threads.find((thread) => thread.id === activeThreadId)
   const rootThreads = threads.filter((thread) => !thread.parentThreadId || !threads.some((candidate) => candidate.id === thread.parentThreadId))
-  const workbenchRefreshKey = activeRunHistory.map((run) => `${run.requestId}:${run.status}:${run.finishedAt ?? ''}`).join('|')
+  const threadProjectKey = (thread: StoredThread): string => thread.projectPath ?? `local:${thread.projectName ?? 'local'}`
+  const projectGroups = rootThreads.reduce<Array<{ key: string; name: string; threads: StoredThread[] }>>((groups, thread) => {
+    const key = threadProjectKey(thread)
+    const existing = groups.find((group) => group.key === key)
+    if (existing) existing.threads.push(thread)
+    else groups.push({
+      key,
+      name: thread.projectName ?? (thread.projectPath ? projectName(thread.projectPath) : 'Discussions locales'),
+      threads: [thread]
+    })
+    return groups
+  }, [])
+
+  function startWorkbenchResize(event: React.PointerEvent<HTMLDivElement>): void {
+    if (window.innerWidth <= 980) return
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = workbenchWidth
+    document.body.classList.add('resizing-workbench')
+    const move = (pointer: PointerEvent): void => {
+      const maximum = Math.max(320, Math.min(900, window.innerWidth - 560))
+      setWorkbenchWidth(Math.max(320, Math.min(maximum, startWidth + startX - pointer.clientX)))
+    }
+    const stop = (): void => {
+      document.body.classList.remove('resizing-workbench')
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', stop)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop, { once: true })
+  }
+
+  function resizeWorkbenchWithKeyboard(event: React.KeyboardEvent<HTMLDivElement>): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const direction = event.key === 'ArrowLeft' ? 24 : -24
+    const maximum = Math.max(320, Math.min(900, window.innerWidth - 560))
+    setWorkbenchWidth((current) => Math.max(320, Math.min(maximum, current + direction)))
+  }
 
   return (
     <section
       className={`workspace-view${mobileWorkbenchOpen ? ' show-mobile-workbench' : ''}${visible ? '' : ' app-view-hidden'}`}
+      style={{ '--workbench-width': `${workbenchWidth}px` } as React.CSSProperties}
       aria-hidden={!visible}
     >
       <nav className="app-rail" aria-label="Sections de Stellan">
@@ -953,42 +1162,46 @@ export function WorkspaceView({
         </button>
 
         <div className="thread-list">
-          <div className="thread-group-heading">
-            <span className="agent-mark"><Bot aria-hidden="true" /></span>
-            <strong>Agent de programmation</strong>
-            <span>{threads.length}</span>
-          </div>
-          <div className="thread-tree">
-            {threads.length === 0 && <p>Aucun thread pour le moment</p>}
-            {rootThreads.map((thread) => (
-              <div className="thread-family" key={thread.id}>
-                <div className={`thread-row ${activeThreadId === thread.id ? 'active' : ''}`}>
-                  <span className="branch" aria-hidden="true" />
-                  <span className={`thread-agent ${runsByThread[thread.id]?.status ?? ''}`} aria-label={runsByThread[thread.id]
-                    ? runsByThread[thread.id]?.status === 'queued' ? 'Worker en attente' : 'Worker en cours'
-                    : 'Worker inactif'}><Circle aria-hidden="true" /></span>
-                  <button type="button" title={thread.title} onClick={() => { setMobileWorkbenchOpen(false); void openThread(thread) }}>{thread.title}</button>
-                  <button
-                    className="thread-delete"
-                    type="button"
-                    aria-label={`Supprimer ${thread.title}`}
-                    disabled={Boolean(runsByThread[thread.id])}
-                    onClick={() => void removeThread(thread.id)}
-                  ><X aria-hidden="true" /></button>
-                </div>
-                {threads.filter((child) => child.parentThreadId === thread.id).map((child, childIndex, children) => (
-                  <div className={`thread-row child ${activeThreadId === child.id ? 'active' : ''}`} key={child.id}>
-                    <span className={`branch${childIndex === children.length - 1 ? ' last' : ''}`} aria-hidden="true" />
-                    <span className={`thread-agent ${runsByThread[child.id]?.status ?? ''}`} aria-label={runsByThread[child.id]
-                      ? runsByThread[child.id]?.status === 'queued' ? 'Worker en attente' : 'Worker en cours'
-                      : 'Worker terminé'}><Circle aria-hidden="true" /></span>
-                    <button type="button" title={child.title} onClick={() => { setMobileWorkbenchOpen(false); void openThread(child) }}>{child.title}</button>
-                    <button className="thread-delete" type="button" aria-label={`Supprimer ${child.title}`} disabled={Boolean(runsByThread[child.id])} onClick={() => void removeThread(child.id)}><X aria-hidden="true" /></button>
+          {threads.length === 0 && <div className="thread-tree"><p>Aucune conversation pour le moment</p></div>}
+          {projectGroups.map((group) => (
+            <section className="project-thread-group" aria-label={`Projet ${group.name}`} key={group.key}>
+              <div className="thread-group-heading">
+                <span className="project-branch-icon" aria-hidden="true"><FolderGit2 /></span>
+                <strong>{group.name}</strong>
+                <span>{threads.filter((thread) => threadProjectKey(thread) === group.key).length}</span>
+              </div>
+              <div className="thread-tree">
+                {group.threads.map((thread) => (
+                  <div className="thread-family" key={thread.id}>
+                    <div className={`thread-row ${activeThreadId === thread.id ? 'active' : ''}`}>
+                      <span className="branch" aria-hidden="true" />
+                      <span className={`thread-agent ${runsByThread[thread.id]?.status ?? ''}`} aria-label={runsByThread[thread.id]
+                        ? runsByThread[thread.id]?.status === 'queued' ? 'Worker en attente' : 'Worker en cours'
+                        : 'Conversation inactive'}><Circle aria-hidden="true" /></span>
+                      <button type="button" title={thread.title} onClick={() => { setMobileWorkbenchOpen(false); void openThread(thread) }}>{thread.title}</button>
+                      <button
+                        className="thread-delete"
+                        type="button"
+                        aria-label={`Supprimer ${thread.title}`}
+                        disabled={Boolean(runsByThread[thread.id])}
+                        onClick={() => void removeThread(thread.id)}
+                      ><X aria-hidden="true" /></button>
+                    </div>
+                    {threads.filter((child) => child.parentThreadId === thread.id).map((child, childIndex, children) => (
+                      <div className={`thread-row child ${activeThreadId === child.id ? 'active' : ''}`} key={child.id}>
+                        <span className={`branch${childIndex === children.length - 1 ? ' last' : ''}`} aria-hidden="true" />
+                        <span className={`thread-agent ${runsByThread[child.id]?.status ?? ''}`} aria-label={runsByThread[child.id]
+                          ? runsByThread[child.id]?.status === 'queued' ? 'Worker en attente' : 'Worker en cours'
+                          : 'Worker terminé'}><Circle aria-hidden="true" /></span>
+                        <button type="button" title={child.title} onClick={() => { setMobileWorkbenchOpen(false); void openThread(child) }}>{child.title}</button>
+                        <button className="thread-delete" type="button" aria-label={`Supprimer ${child.title}`} disabled={Boolean(runsByThread[child.id])} onClick={() => void removeThread(child.id)}><X aria-hidden="true" /></button>
+                      </div>
+                    ))}
                   </div>
                 ))}
               </div>
-            ))}
-          </div>
+            </section>
+          ))}
         </div>
 
         <div className="sidebar-footer">
@@ -1016,16 +1229,21 @@ export function WorkspaceView({
 
           <div className="model-selector">
             {models.length > 0 ? (
-              <select
-                aria-label="Modèle actif"
-                value={effectiveModel}
-                onChange={(event) => setSelectedModel(event.target.value)}
-              >
-                {models.map((model) => <option value={model.name} key={model.name}>{model.name}</option>)}
-              </select>
+              <>
+                <label htmlFor="primary-model">Modèle principal</label>
+                <select
+                  id="primary-model"
+                  title="Modèle principal pour la discussion ; Stellan peut choisir temporairement un spécialiste"
+                  value={effectiveModel}
+                  onChange={(event) => void selectPrimaryModel(event.target.value)}
+                >
+                  {models.map((model) => <option value={model.name} key={model.name}>{model.name}</option>)}
+                </select>
+              </>
             ) : (
               <button type="button" onClick={onOpenSetup}>Configurer un modèle</button>
             )}
+            {modelSelectionError && <small className="model-selection-error" role="alert">{modelSelectionError}</small>}
           </div>
         </div>
       </aside>
@@ -1072,6 +1290,25 @@ export function WorkspaceView({
             <p>Le stockage peut être agrandi, mais pas réduit afin d’éviter toute corruption.</p>
             {resourceError && <p className="resource-error" role="alert">{resourceError}</p>}
             <footer><button type="button" disabled={savingResources} onClick={() => setResourceSettings(null)}>Annuler</button><button type="button" disabled={savingResources} onClick={() => void saveResources()}>{savingResources ? 'Application…' : 'Appliquer'}</button></footer>
+          </section>
+        </div>
+      )}
+
+      {pendingThreadDeletion && (
+        <div className="dialog-backdrop delete-thread-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !deletingThread) setPendingThreadDeletion(null)
+        }}>
+          <section ref={dialogRef} className="dialog-surface delete-thread-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-thread-title" aria-describedby="delete-thread-description">
+            <header>
+              <div className="delete-thread-heading"><span aria-hidden="true"><CircleAlert /></span><div><small>MODIFICATIONS LOCALES</small><h2 id="delete-thread-title">Supprimer définitivement ?</h2></div></div>
+              <button className="icon-button" type="button" aria-label="Fermer" disabled={deletingThread} onClick={() => setPendingThreadDeletion(null)}><X aria-hidden="true" /></button>
+            </header>
+            <p id="delete-thread-description">Le thread <strong>{pendingThreadDeletion.title}</strong> contient des changements non enregistrés. Ils seront perdus définitivement.</p>
+            <ul className="delete-thread-changes">{pendingThreadDeletion.changes.split('\n').filter(Boolean).map((line) => {
+              const change = localChangeDetails(line)
+              return <li key={line}><code>{change.path}</code><span>{change.label}</span></li>
+            })}</ul>
+            <footer><button data-dialog-initial type="button" disabled={deletingThread} onClick={() => setPendingThreadDeletion(null)}>Conserver le thread</button><button className="danger-button" type="button" disabled={deletingThread} onClick={() => void removeThread(pendingThreadDeletion.threadId, true)}>{deletingThread ? 'Suppression…' : 'Supprimer définitivement'}</button></footer>
           </section>
         </div>
       )}
@@ -1130,6 +1367,16 @@ export function WorkspaceView({
                 ) : <div className="empty-project-actions"><button className="empty-project-button" type="button" onClick={(event) => { dialogTriggerRef.current = event.currentTarget; setNewProjectName('') }}><Plus aria-hidden="true" /> Créer un projet</button><button className="empty-project-button secondary" type="button" onClick={() => void chooseProject()}><FolderOpen aria-hidden="true" /> Importer un dossier</button></div>}
               </div>
             ) : messages.map((message) => {
+              const selectedModelName = message.role === 'system' && message.content.startsWith(MODEL_SELECTION_MESSAGE_PREFIX)
+                ? message.content.slice(MODEL_SELECTION_MESSAGE_PREFIX.length)
+                : null
+              if (selectedModelName) {
+                return (
+                  <div className="model-change-divider" role="status" key={message.id}>
+                    <span>Modèle principal sélectionné : {selectedModelName}</span>
+                  </div>
+                )
+              }
               const requestActivities = message.role === 'assistant'
                 ? toolActivities.filter((activity) => activity.requestId === message.id)
                 : []
@@ -1143,11 +1390,24 @@ export function WorkspaceView({
                       : activeRequest === message.id && requestActivities.length === 0
                         ? <p>{activeRun?.status === 'queued'
                             ? 'En attente dans ce chat…'
+                            : activeRunProgress
+                              ? activeRunProgress
                             : thinkingElapsed < 10
                               ? 'Préparation de la réponse…'
                               : `Analyse en cours… ${thinkingElapsed} s`}</p>
                         : null
                     : <p>{message.content}</p>}
+                  {(message.images?.length ?? 0) > 0 && (
+                    <div className="message-images">
+                      {message.images?.map((image, index) => (
+                        <img
+                          key={`${message.id}:${index}`}
+                          src={`data:${image.mimeType};base64,${image.data}`}
+                          alt={`Image jointe ${index + 1}`}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </article>
               )
             })}
@@ -1228,20 +1488,48 @@ export function WorkspaceView({
         )}
 
         <div className="composer-area">
-          <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
+          <form
+            className="composer"
+            onSubmit={(event) => { event.preventDefault(); void sendMessage() }}
+            onDragOver={(event) => {
+              if ([...event.dataTransfer.items].some((item) => item.kind === 'file' && item.type.startsWith('image/'))) event.preventDefault()
+            }}
+            onDrop={(event) => {
+              const files = [...event.dataTransfer.files].filter((file) => file.type.startsWith('image/'))
+              if (files.length === 0) return
+              event.preventDefault()
+              void addImageFiles(files)
+            }}
+          >
+            {pendingImages.length > 0 && (
+              <div className="composer-images" aria-label="Images jointes">
+                {pendingImages.map((image, index) => (
+                  <div key={`${image.data.slice(0, 24)}:${index}`}>
+                    <img src={`data:${image.mimeType};base64,${image.data}`} alt={`Image à envoyer ${index + 1}`} />
+                    <button type="button" aria-label={`Retirer l’image ${index + 1}`} onClick={() => setPendingImages((current) => current.filter((_, currentIndex) => currentIndex !== index))}><X aria-hidden="true" /></button>
+                  </div>
+                ))}
+              </div>
+            )}
             <textarea
               ref={composerRef}
               aria-label="Votre demande"
-              placeholder={!project ? 'Ouvrez un projet pour commencer…' : effectiveModel ? 'Demandez à Stellan…' : 'Installez d’abord un modèle local…'}
+              placeholder={!project ? 'Ouvrez un projet pour commencer…' : warmingModel ? 'Chargement du modèle dans le GPU…' : effectiveModel ? 'Demandez à Stellan…' : 'Installez d’abord un modèle local…'}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
+              onPaste={(event) => {
+                const files = [...event.clipboardData.files].filter((file) => file.type.startsWith('image/'))
+                if (files.length === 0) return
+                event.preventDefault()
+                void addImageFiles(files)
+              }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault()
                   void sendMessage()
                 }
               }}
-              disabled={!effectiveModel || !project || !activeThreadId}
+              disabled={!effectiveModel || warmingModel || !project || !activeThreadId}
             />
             <div className="composer-toolbar">
               <span>{dictationState === 'recording'
@@ -1250,8 +1538,21 @@ export function WorkspaceView({
                   ? dictationProgress?.status === 'downloading'
                     ? `Whisper se télécharge${dictationProgress.percent === undefined ? '…' : ` · ${dictationProgress.percent}%`}`
                     : 'Transcription locale…'
-                  : project ? <><Box aria-hidden="true" /> {project.name}</> : 'Aucun projet'}</span>
+                  : warmingModel ? 'Chargement du modèle dans le GPU…' : project ? <><Box aria-hidden="true" /> {project.name}</> : 'Aucun projet'}</span>
               <div className="composer-actions">
+                <input
+                  ref={imageInputRef}
+                  className="sr-only"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  multiple
+                  tabIndex={-1}
+                  onChange={(event) => {
+                    void addImageFiles([...(event.target.files ?? [])])
+                    event.target.value = ''
+                  }}
+                />
+                <button type="button" aria-label="Joindre une image" title="Joindre, coller ou déposer une image" disabled={!project || !activeThreadId} onClick={() => imageInputRef.current?.click()}><ImagePlus aria-hidden="true" /></button>
                 <button
                   className={dictationState === 'recording' ? 'dictation-button recording' : 'dictation-button'}
                   type="button"
@@ -1260,26 +1561,59 @@ export function WorkspaceView({
                   disabled={!effectiveModel || !project || !activeThreadId || dictationState === 'transcribing'}
                   onClick={() => void (dictationState === 'recording' ? stopDictation() : startDictation())}
                 >{dictationState === 'recording' ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}</button>
-                {activeRequest && !prompt.trim() ? (
+                {activeRequest && !prompt.trim() && pendingImages.length === 0 ? (
                   <button className="stop-button" type="button" aria-label="Arrêter l’agent" title="Arrêter" onClick={() => void window.localAgent.cancelChat(activeRequest)}><Square aria-hidden="true" /></button>
                 ) : (
-                  <button type="submit" aria-label={activeRequest ? 'Ajouter à la file d’attente' : 'Envoyer'} disabled={!prompt.trim() || !effectiveModel}><ArrowUp aria-hidden="true" /></button>
+                  <button type="submit" aria-label={activeRequest ? 'Ajouter à la file d’attente' : 'Envoyer'} disabled={(!prompt.trim() && pendingImages.length === 0) || !effectiveModel || warmingModel}><ArrowUp aria-hidden="true" /></button>
                 )}
               </div>
             </div>
           </form>
           {dictationError && <small className="dictation-error" role="alert">{dictationError}</small>}
+          {imageError && <small className="image-error" role="alert">{imageError}</small>}
           <small>Entrée pour envoyer · Maj + Entrée pour une nouvelle ligne</small>
         </div>
       </div>
 
-      <WorkbenchPanel
-        thread={activeThread}
-        projectName={activeThread?.projectName ?? (activeThread?.projectPath ? projectName(activeThread.projectPath) : 'Projet')}
-        refreshKey={workbenchRefreshKey}
-        revealFile={fileReveal}
-        onChooseProject={() => void chooseProject()}
+      <div
+        className="workbench-resizer"
+        role="separator"
+        aria-label="Redimensionner les outils du projet"
+        aria-orientation="vertical"
+        aria-valuemin={320}
+        aria-valuemax={900}
+        aria-valuenow={Math.round(workbenchWidth)}
+        tabIndex={0}
+        onPointerDown={startWorkbenchResize}
+        onKeyDown={resizeWorkbenchWithKeyboard}
       />
+      {activeThreadId === null && (
+        <WorkbenchPanel
+          thread={undefined}
+          projectName="Projet"
+          refreshKey=""
+          revealFile={null}
+          onChooseProject={() => void chooseProject()}
+        />
+      )}
+      {visitedWorkbenchThreads.map((threadId) => {
+        const workbenchThread = threads.find((thread) => thread.id === threadId)
+        if (!workbenchThread) return null
+        const refreshKey = (runHistoryByThread[threadId] ?? [])
+          .map((run) => `${run.requestId}:${run.status}:${run.finishedAt ?? ''}`)
+          .join('|')
+        return (
+          <WorkbenchPanel
+            key={threadId}
+            thread={workbenchThread}
+            projectName={workbenchThread.projectName ?? (workbenchThread.projectPath ? projectName(workbenchThread.projectPath) : 'Projet')}
+            refreshKey={refreshKey}
+            revealFile={fileReveal?.threadId === threadId ? fileReveal : null}
+            onChooseProject={() => void chooseProject()}
+            active={activeThreadId === threadId}
+          />
+        )
+      })}
     </section>
   )
 }

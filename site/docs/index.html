@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Documentation officielle de Stellan : installation, modèles locaux, projets, mises à jour et dépannage.">
+    <meta name="theme-color" content="#0b0f0d">
+    <title>Documentation — Stellan</title>
+    <link rel="icon" href="/assets/mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/styles.css?v=20260904-3">
+    <script src="/assets/site.js?v=20260904-3" defer></script>
+  </head>
+  <body class="docs-body">
+    <header class="site-header">
+      <nav class="nav-shell" aria-label="Navigation principale">
+        <a class="brand" href="/"><img src="/assets/mark.svg" alt=""><span>Stellan</span></a>
+        <button class="docs-mobile-trigger" type="button" aria-expanded="false" data-docs-trigger>Menu des guides</button>
+        <button class="menu-button" type="button" aria-label="Ouvrir le menu" aria-expanded="false" data-menu-button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+        <div class="nav-links" data-menu><a href="/">Accueil</a><a href="/docs/" aria-current="page">Documentation</a><a href="/versions/">Versions</a><a href="mailto:contact@takeos.fr">Support</a><a class="nav-cta" href="/#telecharger">Télécharger</a></div>
+      </nav>
+    </header>
+
+    <div class="docs-shell">
+      <aside class="docs-sidebar" data-docs-sidebar>
+        <label class="docs-search"><span class="sr-only">Rechercher dans la documentation</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg><input type="search" placeholder="Rechercher…" data-docs-search></label>
+        <nav class="sidebar-nav" aria-label="Documentation">
+          <p class="sidebar-label">Bien démarrer</p>
+          <a href="#introduction" data-search-label="Introduction présentation commencer">Introduction</a>
+          <a href="#prerequis" data-search-label="Prérequis matériel Windows Linux GPU RAM">Prérequis</a>
+          <a href="#windows" data-search-label="Installation Windows EXE WSL SmartScreen">Installer sur Windows</a>
+          <a href="#linux" data-search-label="Installation Linux AppImage chmod uidmap NVIDIA">Installer sur Linux</a>
+          <p class="sidebar-label">Utilisation</p>
+          <a href="#premier-demarrage" data-search-label="Premier démarrage runtime modèle Ollama">Premier démarrage</a>
+          <a href="#modeles" data-search-label="Modèles Ollama GPU catalogue téléchargement">Choisir un modèle</a>
+          <a href="#projets" data-search-label="Projets Git worktree workers terminal fichiers">Projets et workers</a>
+          <a href="#voix-images" data-search-label="Dictée voix microphone Whisper images vision">Voix et images</a>
+          <p class="sidebar-label">Référence</p>
+          <a href="#mises-a-jour" data-search-label="Mises à jour automatiques modèles conservés">Mises à jour</a>
+          <a href="#donnees" data-search-label="Données confidentialité local stockage suppression">Données et confidentialité</a>
+          <a href="#depannage" data-search-label="Dépannage erreur GPU Docker runtime support">Dépannage</a>
+          <a href="#faq" data-search-label="FAQ questions abonnement internet Docker modèles">Questions fréquentes</a>
+          <p class="search-empty" data-search-empty>Aucun guide trouvé.</p>
+        </nav>
+      </aside>
+
+      <main class="docs-main">
+        <div class="docs-breadcrumb">Documentation / Guide utilisateur</div>
+        <h1>Documentation Stellan</h1>
+        <p class="docs-lede">Installez votre agent local, préparez un modèle et commencez à travailler sur vos projets en toute confidentialité.</p>
+
+        <section class="doc-section" id="introduction">
+          <h2>Introduction</h2>
+          <p>Stellan est un agent de programmation local pour Windows et Linux. Il utilise des modèles Ollama exécutés sur votre ordinateur et dispose d’outils pour lire, modifier et tester un projet.</p>
+          <div class="callout"><strong>Local par conception</strong>Le contenu de vos conversations, vos modèles et vos projets n’est pas envoyé à un service d’inférence cloud.</div>
+          <p>L’application prépare elle-même son moteur de conteneurs privé. Vous n’avez pas besoin d’installer Docker Desktop ou Docker Engine séparément.</p>
+        </section>
+
+        <section class="doc-section" id="prerequis">
+          <h2>Prérequis</h2>
+          <table class="requirements"><thead><tr><th></th><th>Windows</th><th>Linux</th></tr></thead><tbody><tr><td>Système</td><td>Windows 10/11 x64</td><td>Distribution x86_64 récente</td></tr><tr><td>Mémoire</td><td colspan="2">8 Go minimum, 16 Go recommandés</td></tr><tr><td>Stockage</td><td colspan="2">Au moins 12 Go libres, davantage selon les modèles</td></tr><tr><td>GPU</td><td colspan="2">Optionnel. NVIDIA recommandé pour les meilleures performances</td></tr></tbody></table>
+          <p>Une connexion internet est nécessaire pour le premier téléchargement du runtime et des modèles, puis pour vérifier les mises à jour. L’inférence reste locale.</p>
+        </section>
+
+        <section class="doc-section" id="windows">
+          <h2>Installer sur Windows</h2>
+          <ol><li><a href="https://update.stellan.takeos.fr/windows/Stellan-0.1.3-win-x64.exe">Téléchargez l’installateur Windows</a>.</li><li>Ouvrez le fichier puis choisissez le dossier d’installation.</li><li>Au premier lancement, acceptez l’activation de WSL 2 si Stellan la demande.</li><li>Redémarrez Windows si l’activation de WSL 2 l’exige, puis relancez Stellan.</li></ol>
+          <h3 id="windows-smartscreen">Avertissement SmartScreen</h3>
+          <div class="callout warning"><strong>Pourquoi cet avertissement ?</strong>La version actuelle n’utilise pas de certificat Authenticode payant. Le fichier est distribué depuis le serveur officiel de Stellan, mais Windows affiche donc « Éditeur inconnu ».</div>
+          <p>Dans la fenêtre SmartScreen, cliquez sur <strong>Informations complémentaires</strong>, vérifiez que le fichier s’appelle bien <code>Stellan-0.1.3-win-x64.exe</code>, puis choisissez <strong>Exécuter quand même</strong>.</p>
+        </section>
+
+        <section class="doc-section" id="linux">
+          <h2>Installer sur Linux</h2>
+          <p>Stellan est distribué sous la forme d’une AppImage autonome.</p>
+          <ol><li><a href="https://update.stellan.takeos.fr/linux/Stellan-0.1.3-linux-x86_64.AppImage">Téléchargez l’AppImage</a>.</li><li>Ouvrez un terminal dans le dossier de téléchargement.</li><li>Rendez le fichier exécutable puis lancez-le.</li></ol>
+          <pre class="code-block"><button class="copy-button" type="button" data-copy>Copier</button><code>chmod +x Stellan-0.1.3-linux-x86_64.AppImage
+./Stellan-0.1.3-linux-x86_64.AppImage</code></pre>
+          <h3>Dépendances du runtime privé</h3>
+          <p>Sur Ubuntu ou Debian, installez les outils nécessaires à Docker rootless puis reconnectez votre session :</p>
+          <pre class="code-block"><button class="copy-button" type="button" data-copy>Copier</button><code>sudo apt update
+sudo apt install uidmap iptables</code></pre>
+          <p>Pour un GPU NVIDIA, le pilote et NVIDIA Container Toolkit doivent être présents sur le système hôte. Stellan s’occupe ensuite de son daemon Docker privé : n’installez pas Docker Engine pour lui.</p>
+        </section>
+
+        <section class="doc-section" id="premier-demarrage">
+          <h2>Premier démarrage</h2>
+          <p>Stellan détecte le processeur, la mémoire et le GPU, prépare son runtime puis démarre Ollama sur une adresse locale. Cette préparation peut prendre plusieurs minutes, particulièrement lors du premier téléchargement.</p>
+          <ol><li>Laissez la fenêtre de progression terminer la préparation.</li><li>Ouvrez <strong>Modèles</strong>.</li><li>Sélectionnez un modèle adapté à votre mémoire.</li><li>Attendez la fin de son téléchargement avant d’ouvrir un projet.</li></ol>
+          <div class="callout"><strong>Premier message plus lent</strong>Le premier message après un démarrage charge le modèle en mémoire CPU ou GPU. Les réponses suivantes sont normalement beaucoup plus rapides.</div>
+        </section>
+
+        <section class="doc-section" id="modeles">
+          <h2>Choisir un modèle</h2>
+          <p>Le catalogue classe les modèles par usage : rapide, général, code, vision et image. Les recommandations tiennent compte de la mémoire détectée, mais le choix final vous appartient.</p>
+          <ul><li>Choisissez un petit modèle pour une réponse rapide et une faible consommation.</li><li>Choisissez un modèle orienté code pour les modifications complexes.</li><li>Un modèle de vision est sélectionné automatiquement lorsqu’un message contient une image.</li><li>Les modèles restent dans le volume privé de Stellan et survivent aux mises à jour.</li></ul>
+        </section>
+
+        <section class="doc-section" id="projets">
+          <h2>Projets et workers</h2>
+          <p>Un projet est obligatoire pour utiliser l’agent. Chaque conversation principale dispose d’un worktree Git isolé afin de ne pas modifier directement votre dossier de départ.</p>
+          <h3>Outils disponibles</h3>
+          <ul><li>Exploration et recherche dans les fichiers ;</li><li>création, modification et suppression contrôlée ;</li><li>commandes et tests dans un conteneur persistant ;</li><li>terminal interactif, diff Git et aperçu web ;</li><li>workers parallèles lorsque des fichiers indépendants peuvent être traités séparément.</li></ul>
+          <p>Les workers sont créés par le coordinateur lorsque cela accélère réellement la tâche. Ils ne doivent pas modifier le même fichier simultanément.</p>
+        </section>
+
+        <section class="doc-section" id="voix-images">
+          <h2>Voix et images</h2>
+          <p>Le bouton microphone enregistre jusqu’à une minute et transcrit localement avec Whisper. Le modèle de dictée, d’environ 750 Mo, est téléchargé une seule fois puis conservé en cache.</p>
+          <p>Vous pouvez également coller, déposer ou sélectionner jusqu’à quatre images PNG, JPEG ou WebP par message. Stellan choisit un modèle de vision déjà installé ou propose son téléchargement.</p>
+        </section>
+
+        <section class="doc-section" id="mises-a-jour">
+          <h2>Mises à jour</h2>
+          <p>Au lancement, Stellan vérifie automatiquement la version publiée sur <code>update.stellan.takeos.fr</code>. Lorsqu’une nouvelle version existe, elle est téléchargée puis installée avant le démarrage du runtime.</p>
+          <div class="callout"><strong>Vos données sont conservées</strong>Une mise à jour de l’application ne supprime ni les modèles Ollama, ni les projets, ni les runtimes privés.</div>
+          <p>Si la vérification échoue, vérifiez la connexion internet puis relancez Stellan. Une mise à jour obligatoire ne peut pas être ignorée.</p>
+        </section>
+
+        <section class="doc-section" id="donnees">
+          <h2>Données et confidentialité</h2>
+          <p>Les conversations sont stockées dans une base SQLite locale. Les modèles résident dans le volume Ollama du runtime privé et les environnements de travail restent sur le disque de l’ordinateur.</p>
+          <p>Les connexions internet servent aux téléchargements initiaux, au catalogue et aux mises à jour. Les requêtes envoyées aux modèles sont traitées par Ollama localement.</p>
+        </section>
+
+        <section class="doc-section" id="depannage">
+          <h2>Dépannage</h2>
+          <h3>La première réponse prend du temps</h3><p>C’est attendu après le lancement : Ollama doit charger le modèle en mémoire. Vérifiez ensuite dans les journaux que <code>backend=nvidia</code>, <code>rocm</code> ou <code>vulkan</code> apparaît si vous attendez une accélération GPU.</p>
+          <h3>Linux utilise le CPU</h3><p>Vérifiez que le pilote graphique et, pour NVIDIA, NVIDIA Container Toolkit fonctionnent sur l’hôte. Redémarrez ensuite Stellan.</p>
+          <h3>Le moteur local n’est plus joignable</h3><p>Fermez complètement Stellan, attendez quelques secondes puis relancez-le. Si le problème persiste, conservez les journaux avant de contacter le support.</p>
+          <h3>Besoin d’aide</h3><p>Écrivez à <a href="mailto:contact@takeos.fr">contact@takeos.fr</a> avec votre système, la version Stellan et les dernières lignes du journal. Ne partagez jamais de clé privée ou de mot de passe.</p>
+        </section>
+
+        <section class="doc-section" id="faq">
+          <h2>Questions fréquentes</h2>
+          <h3>Stellan est-il gratuit ?</h3><p>Oui. Les modèles locaux ne nécessitent pas d’abonnement à une API d’intelligence artificielle.</p>
+          <h3>Dois-je installer Docker ?</h3><p>Non. Stellan gère son propre runtime privé sous Windows et Linux.</p>
+          <h3>Puis-je travailler sans internet ?</h3><p>Les modèles déjà installés fonctionnent localement. Une connexion reste nécessaire au lancement pour la vérification obligatoire des mises à jour.</p>
+          <h3>Une mise à jour retélécharge-t-elle mes modèles ?</h3><p>Non. Les modèles sont stockés séparément de l’application.</p>
+        </section>
+      </main>
+
+      <aside class="toc" aria-label="Sur cette page"><strong>Sur cette page</strong><a href="#introduction">Introduction</a><a href="#prerequis">Prérequis</a><a href="#windows">Installer sur Windows</a><a href="#linux">Installer sur Linux</a><a href="#premier-demarrage">Premier démarrage</a><a href="#modeles">Choisir un modèle</a><a href="#projets">Projets et workers</a><a href="#mises-a-jour">Mises à jour</a><a href="#depannage">Dépannage</a></aside>
+    </div>
+
+    <footer class="site-footer"><div class="footer-inner"><span>© 2026 Stellan · Documentation officielle</span><div class="footer-links"><a href="/">Accueil</a><a href="/versions/">Versions</a><a href="mailto:contact@takeos.fr">Support</a></div></div></footer>
+  </body>
+</html>

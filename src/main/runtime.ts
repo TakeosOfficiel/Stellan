@@ -127,9 +127,28 @@ export const runHostCommand: CommandRunner = (executable, args, options = {}) =>
   })
 
 let managedDockerRunner: CommandRunner | null = null
+let managedDockerPtyBuilder: ((args: readonly string[]) => {
+  executable: string
+  args: string[]
+  env?: NodeJS.ProcessEnv
+}) | null = null
 
 export function configureManagedDockerRunner(runner: CommandRunner | null): void {
   managedDockerRunner = runner
+}
+
+export function configureManagedDockerPtyBuilder(
+  builder: typeof managedDockerPtyBuilder
+): void {
+  managedDockerPtyBuilder = builder
+}
+
+export function managedDockerPtyCommand(args: readonly string[]): {
+  executable: string
+  args: string[]
+  env?: NodeJS.ProcessEnv
+} {
+  return managedDockerPtyBuilder?.(args) ?? { executable: 'docker', args: [...args] }
 }
 
 export const runCommand: CommandRunner = (executable, args, options) =>
@@ -318,9 +337,7 @@ export async function executeInContainer(
   const identityArgs = process.platform === 'linux'
     ? options.runtime === 'podman'
       ? ['--userns', 'keep-id']
-      : typeof process.getuid === 'function' && typeof process.getgid === 'function'
-        ? ['--user', `${process.getuid()}:${process.getgid()}`]
-        : []
+      : [] // Private rootless Docker maps container root to the signed-in host user.
     : []
   const args = [
     'run', '--rm',
@@ -378,6 +395,64 @@ export function workerContainerName(threadId: string): string {
 export function workerDataVolumeName(threadId: string): string {
   validateIdentifier(threadId, 'threadId')
   return `local-agent-worker-data-${threadId}`
+}
+
+export type WorkerPortExposure = { hostPort: number; close: () => Promise<void> }
+
+/** Publishes one worker loopback port without giving the otherwise isolated worker Internet access. */
+export async function exposeWorkerPort(
+  runtime: ContainerRuntime,
+  threadId: string,
+  port: number,
+  runner: CommandRunner = runCommand
+): Promise<WorkerPortExposure> {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('port is invalid')
+  const worker = workerContainerName(threadId)
+  const suffix = createHash('sha256').update(`${threadId}:${port}`).digest('hex').slice(0, 12)
+  const network = `local-agent-portal-${suffix}`
+  const relay = `local-agent-portal-relay-${suffix}`
+  const relayPort = 40_000 + (Number.parseInt(suffix.slice(0, 6), 16) % 20_000)
+  const pidFile = `/tmp/${relay}.pid`
+  const close = async (): Promise<void> => {
+    await runner(runtime, ['rm', '--force', relay], { timeoutMs: 30_000 })
+    await runner(runtime, ['exec', worker, 'sh', '-c', `kill "$(cat ${pidFile})"; rm -f ${pidFile}`], { timeoutMs: 15_000 })
+    await runner(runtime, ['network', 'disconnect', network, worker], { timeoutMs: 30_000 })
+    await runner(runtime, ['network', 'rm', network], { timeoutMs: 30_000 })
+  }
+  try {
+    const imageResult = await runner(runtime, ['inspect', '--format', '{{.Config.Image}}', worker], { timeoutMs: 15_000 })
+    requireSuccess(imageResult, 'Worker image inspection')
+    const image = imageResult.stdout.trim()
+    if (!IMAGE_PATTERN.test(image)) throw new Error('Worker image is invalid')
+    const createNetwork = await runner(runtime, ['network', 'create', '--internal', network], { timeoutMs: 30_000 })
+    if (createNetwork.exitCode !== 0 && !/already exists/i.test(`${createNetwork.stderr}\n${createNetwork.stdout}`)) {
+      requireSuccess(createNetwork, 'Portal network creation')
+    }
+    const connected = await runner(runtime, ['network', 'connect', '--alias', 'worker', network, worker], { timeoutMs: 30_000 })
+    if (connected.exitCode !== 0 && !/already exists/i.test(`${connected.stderr}\n${connected.stdout}`)) {
+      requireSuccess(connected, 'Worker portal network connection')
+    }
+    const workerScript = "const fs=require('fs'),n=require('net');fs.writeFileSync(process.argv[3],String(process.pid));n.createServer(s=>{const u=n.connect(+process.argv[1],'127.0.0.1');s.pipe(u).pipe(s);u.on('error',()=>s.destroy())}).listen(+process.argv[2],'0.0.0.0')"
+    const workerRelay = await runner(runtime, [
+      'exec', '--detach', worker, 'node', '-e', workerScript, String(port), String(relayPort), pidFile
+    ], { timeoutMs: 15_000 })
+    requireSuccess(workerRelay, 'Worker portal relay creation')
+    const script = "const n=require('net');n.createServer(s=>{const u=n.connect(+process.argv[1],'worker');s.pipe(u).pipe(s);u.on('error',()=>s.destroy())}).listen(+process.argv[2],'0.0.0.0')"
+    const started = await runner(runtime, [
+      'run', '--detach', '--name', relay, '--network', network,
+      '--publish', `127.0.0.1::${port}`, '--read-only', '--security-opt', 'no-new-privileges',
+      '--cap-drop', 'ALL', '--pids-limit', '64', '--', image, 'node', '-e', script, String(relayPort), String(port)
+    ], { timeoutMs: 60_000 })
+    requireSuccess(started, 'Portal relay creation')
+    const mapped = await runner(runtime, ['port', relay, `${port}/tcp`], { timeoutMs: 15_000 })
+    requireSuccess(mapped, 'Portal port inspection')
+    const match = mapped.stdout.trim().match(/:(\d+)$/)
+    if (!match) throw new Error('Portal host port is unavailable')
+    return { hostPort: Number(match[1]), close }
+  } catch (error) {
+    await close()
+    throw error
+  }
 }
 
 function workerContainerConfig(options: PersistentContainerOptions, projectPath: string): string {
@@ -444,9 +519,7 @@ async function ensureWorkerContainerUnlocked(
   const identityArgs = process.platform === 'linux'
     ? options.runtime === 'podman'
       ? ['--userns', 'keep-id']
-      : typeof process.getuid === 'function' && typeof process.getgid === 'function'
-        ? ['--user', `${process.getuid()}:${process.getgid()}`]
-        : []
+      : [] // Private rootless Docker maps container root to the signed-in host user.
     : []
   const created = await runner(options.runtime, [
     'run', '--detach',

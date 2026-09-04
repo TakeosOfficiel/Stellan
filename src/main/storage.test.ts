@@ -37,6 +37,15 @@ describe('ThreadStore', () => {
         createdAt: first.createdAt
       })
       expect(store.updateThread('missing', { title: 'No thread' })).toBeNull()
+
+      const modelSelection = store.setThreadModel(first.id, 'qwen3.5:4b')
+      expect(modelSelection?.thread.model).toBe('qwen3.5:4b')
+      expect(modelSelection?.message).toMatchObject({
+        role: 'system',
+        content: 'stellan:model-selection:qwen3.5:4b'
+      })
+      expect(store.listMessages(first.id)).toContainEqual(modelSelection?.message)
+      expect(store.setThreadModel(first.id, 'qwen3.5:4b')?.message).toBeNull()
       expect(store.deleteThread(second.id)).toBe(true)
       expect(store.deleteThread(second.id)).toBe(false)
       expect(store.getThread(second.id)).toBeNull()
@@ -89,6 +98,46 @@ describe('ThreadStore', () => {
       expect(reopenedStore.listMessages(thread.id)).toEqual([message])
     } finally {
       reopenedStore.close()
+    }
+  })
+
+  it('persists image attachments and restores them in the Ollama prompt', () => {
+    const path = temporaryDatabase()
+    const firstStore = new ThreadStore(path)
+    const thread = firstStore.createThread({ title: 'Vision' })
+    const images = [{ mimeType: 'image/png' as const, data: 'aGVsbG8=' }]
+    const run = firstStore.startAgentRun(thread.id, crypto.randomUUID(), 'vision-model', 'Décris cette image', images)
+    firstStore.close()
+
+    const reopened = new ThreadStore(path)
+    try {
+      reopened.markAgentRunRunning(run.id)
+      expect(reopened.listMessages(thread.id)[0]?.images).toEqual(images)
+      expect(reopened.listPromptMessages(thread.id, run.userMessageId)).toEqual([
+        { role: 'user', content: 'Décris cette image', images }
+      ])
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('persists and replaces an ordered todo plan per thread', () => {
+    const path = temporaryDatabase()
+    const store = new ThreadStore(path)
+    const thread = store.createThread({ title: 'Planned work' })
+    const todos = [
+      { id: 'inspect', content: 'Inspecter le code', status: 'completed' as const, priority: 'high' as const },
+      { id: 'edit', content: 'Appliquer le correctif', status: 'in_progress' as const, priority: 'medium' as const }
+    ]
+    expect(store.replaceTodos(thread.id, todos)).toEqual(todos)
+    store.close()
+
+    const reopened = new ThreadStore(path)
+    try {
+      expect(reopened.listTodos(thread.id)).toEqual(todos)
+      expect(reopened.replaceTodos(thread.id, [todos[1] as typeof todos[number]])).toEqual([todos[1]])
+    } finally {
+      reopened.close()
     }
   })
 
@@ -409,7 +458,7 @@ describe('ThreadStore', () => {
       })
       const version = new DatabaseSync(path, { readOnly: true })
       try {
-        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(11)
+        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(14)
       } finally {
         version.close()
       }

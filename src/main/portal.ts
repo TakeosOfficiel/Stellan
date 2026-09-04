@@ -45,11 +45,18 @@ type PortalSession = {
   server: Server
   resources: Set<{ destroy(error?: Error): void }>
   expirationTimer: ReturnType<typeof setTimeout> | null
+  cleanup?: () => Promise<void>
 }
 
 type PortalManagerOptions = {
   requestTimeoutMs?: number
   healthTimeoutMs?: number
+}
+
+export type PortalTarget = {
+  host?: string
+  port?: number
+  close?: () => Promise<void>
 }
 
 export function assertPortalAccess(
@@ -74,7 +81,7 @@ function connectionTokens(headers: IncomingHttpHeaders): Set<string> {
 
 export function sanitizedRequestHeaders(
   headers: IncomingHttpHeaders,
-  targetHost: '127.0.0.1' | '::1',
+  targetHost: string,
   targetPort: number,
   originalHost: string
 ): IncomingHttpHeaders {
@@ -88,7 +95,7 @@ export function sanitizedRequestHeaders(
       !dynamic.has(lowerName)
     ) result[lowerName] = value
   }
-  result.host = targetHost === '::1' ? `[::1]:${targetPort}` : `127.0.0.1:${targetPort}`
+  result.host = targetHost.includes(':') ? `[${targetHost}]:${targetPort}` : `${targetHost}:${targetPort}`
   result['x-forwarded-for'] = '127.0.0.1'
   result['x-forwarded-host'] = originalHost
   result['x-forwarded-proto'] = 'http'
@@ -240,7 +247,8 @@ export class PortalManager {
     threadId: string,
     ownerId: number,
     targetPort: number,
-    durationMinutes: 15 | 60 | 240 | null = null
+    durationMinutes: 15 | 60 | 240 | null = null,
+    target: PortalTarget = {}
   ): Promise<PortalInfo> {
     this.requireActiveOwner(ownerId)
     const existing = this.sessions.get(threadId)
@@ -250,9 +258,10 @@ export class PortalManager {
       throw new Error('Arrêtez le portail actif avant de choisir un autre port.')
     }
 
-    let targetHost: '127.0.0.1' | '::1' | null = null
-    for (const host of ['127.0.0.1', '::1'] as const) {
-      if (await canConnect(host, targetPort, this.healthTimeoutMs)) {
+    let targetHost: string | null = target.host ?? null
+    const upstreamPort = target.port ?? targetPort
+    for (const host of targetHost ? [targetHost] : ['127.0.0.1', '::1']) {
+      if (await canConnect(host as '127.0.0.1', upstreamPort, this.healthTimeoutMs)) {
         targetHost = host
         break
       }
@@ -269,10 +278,10 @@ export class PortalManager {
         return
       }
 
-      const headers = sanitizedRequestHeaders(request.headers, targetHost, targetPort, request.headers.host ?? '')
+      const headers = sanitizedRequestHeaders(request.headers, targetHost, upstreamPort, request.headers.host ?? '')
       const upstream = httpRequest({
         host: targetHost,
-        port: targetPort,
+        port: upstreamPort,
         method: request.method,
         path: request.url,
         headers,
@@ -313,12 +322,12 @@ export class PortalManager {
         rejectSocket(socket, 400, 'Bad Request')
         return
       }
-      const headers = sanitizedRequestHeaders(request.headers, targetHost, targetPort, request.headers.host ?? '')
+      const headers = sanitizedRequestHeaders(request.headers, targetHost, upstreamPort, request.headers.host ?? '')
       headers.connection = 'Upgrade'
       headers.upgrade = 'websocket'
       const upstreamRequest = httpRequest({
         host: targetHost,
-        port: targetPort,
+        port: upstreamPort,
         method: 'GET',
         path: request.url,
         headers,
@@ -387,7 +396,7 @@ export class PortalManager {
         url: `http://127.0.0.1:${portalPort}`,
         expiresAt: expirationDate(durationMinutes)
       }
-      const session: PortalSession = { ownerId, info, server, resources, expirationTimer: null }
+      const session: PortalSession = { ownerId, info, server, resources, expirationTimer: null, cleanup: target.close }
       this.sessions.set(threadId, session)
       await checkThroughProxy(portalPort, this.healthTimeoutMs)
       this.requireActiveOwner(ownerId)
@@ -396,6 +405,7 @@ export class PortalManager {
     } catch (error) {
       this.sessions.delete(threadId)
       await this.closeServer(server, resources)
+      await target.close?.()
       throw error
     }
   }
@@ -502,6 +512,7 @@ export class PortalManager {
     this.sessions.delete(threadId)
     if (session.expirationTimer) clearTimeout(session.expirationTimer)
     await this.closeServer(session.server, session.resources)
+    await session.cleanup?.()
     return true
   }
 
@@ -513,6 +524,7 @@ export class PortalManager {
         this.sessions.delete(threadId)
         if (session.expirationTimer) clearTimeout(session.expirationTimer)
         await this.closeServer(session.server, session.resources)
+        await session.cleanup?.()
       }))
   }
 
@@ -521,7 +533,10 @@ export class PortalManager {
     const sessions = [...this.sessions.values()]
     this.sessions.clear()
     for (const session of sessions) if (session.expirationTimer) clearTimeout(session.expirationTimer)
-    await Promise.all(sessions.map((session) => this.closeServer(session.server, session.resources)))
+    await Promise.all(sessions.map(async (session) => {
+      await this.closeServer(session.server, session.resources)
+      await session.cleanup?.()
+    }))
   }
 
   private requireOwner(session: PortalSession, ownerId: number): void {

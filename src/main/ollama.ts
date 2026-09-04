@@ -39,7 +39,23 @@ const chatChunkSchema = z.object({
     })).optional()
   }).optional(),
   done: z.boolean().optional(),
+  total_duration: z.number().nonnegative().optional(),
+  load_duration: z.number().nonnegative().optional(),
+  prompt_eval_count: z.number().nonnegative().optional(),
+  prompt_eval_duration: z.number().nonnegative().optional(),
+  eval_count: z.number().nonnegative().optional(),
+  eval_duration: z.number().nonnegative().optional(),
   error: z.string().optional()
+})
+
+const runningModelsSchema = z.object({
+  models: z.array(z.object({
+    name: z.string().optional(),
+    model: z.string().optional(),
+    size: z.number().nonnegative().optional(),
+    size_vram: z.number().nonnegative().optional(),
+    expires_at: z.string().optional()
+  })).default([])
 })
 
 const showResponseSchema = z.object({
@@ -47,13 +63,19 @@ const showResponseSchema = z.object({
 })
 
 const OLLAMA_URLS = ['http://127.0.0.1:11435', 'http://localhost:11435'] as const
-const MODEL_OPTIONS = { num_ctx: 8192, num_predict: 2048 } as const
+let modelOptions = { num_ctx: 8192, num_predict: 1024 }
 let activeOllamaUrl: string = OLLAMA_URLS[0]
 const toolSupportByModel = new Map<string, boolean>()
+const visionSupportByModel = new Map<string, boolean>()
 
 export function configureOllamaUrl(url: string | null): void {
   activeOllamaUrl = url ?? OLLAMA_URLS[0]
   toolSupportByModel.clear()
+  visionSupportByModel.clear()
+}
+
+export function configureOllamaModelOptions(options: { numCtx: number; numPredict: number }): void {
+  modelOptions = { num_ctx: options.numCtx, num_predict: options.numPredict }
 }
 
 export type OllamaToolCall = {
@@ -73,10 +95,53 @@ export type OllamaChatResult = {
   toolCalls: OllamaToolCall[]
 }
 
+type OllamaTimings = {
+  totalDuration?: number
+  loadDuration?: number
+  promptEvalCount?: number
+  promptEvalDuration?: number
+  evalCount?: number
+  evalDuration?: number
+}
+
 export class OllamaIdleTimeoutError extends Error {
   constructor() {
     super('Le modèle ne produit plus de réponse depuis deux minutes. Réessayez ou choisissez un modèle plus léger.')
     this.name = 'OllamaIdleTimeoutError'
+  }
+}
+
+function durationMs(nanoseconds: number | undefined): string {
+  return nanoseconds === undefined ? 'unknown' : (nanoseconds / 1_000_000).toFixed(1)
+}
+
+async function reportRunningModels(
+  phase: 'before' | 'after',
+  report: ((message: string) => void) | undefined,
+  fetcher: typeof fetch,
+  signal?: AbortSignal
+): Promise<void> {
+  if (!report) return
+  try {
+    const timeoutSignal = AbortSignal.timeout(2_000)
+    const response = await fetcher(`${activeOllamaUrl}/api/ps`, {
+      signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    })
+    if (!response.ok) {
+      report(`ollama.ps.${phase} unavailable status=${response.status}`)
+      return
+    }
+    const { models } = runningModelsSchema.parse(await response.json())
+    const summary = models.length === 0
+      ? 'none'
+      : models.map((running) => {
+          const name = running.name ?? running.model ?? 'unknown'
+          return `${name}[sizeBytes=${running.size ?? 'unknown'},vramBytes=${running.size_vram ?? 'unknown'},expiresAt=${running.expires_at ?? 'unknown'}]`
+        }).join(',')
+    report(`ollama.ps.${phase} models=${summary}`)
+  } catch (error) {
+    const reason = error instanceof Error ? error.name : 'unknown'
+    report(`ollama.ps.${phase} unavailable reason=${reason}`)
   }
 }
 
@@ -85,6 +150,30 @@ export async function modelSupportsTools(
   fetcher: typeof fetch = fetch
 ): Promise<boolean> {
   if (fetcher === fetch && toolSupportByModel.has(model)) return toolSupportByModel.get(model) as boolean
+  let response: Response
+  try {
+    response = await fetcher(`${activeOllamaUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(5_000)
+    })
+  } catch {
+    throw new Error("Le moteur local d’Ollama n’est plus joignable. Relancez Stellan pour rétablir la connexion.")
+  }
+  if (!response.ok) {
+    throw new Error(`Ollama n’a pas pu vérifier les capacités du modèle (statut ${response.status}).`)
+  }
+  const supportsTools = showResponseSchema.parse(await response.json()).capabilities.includes('tools')
+  if (fetcher === fetch) toolSupportByModel.set(model, supportsTools)
+  return supportsTools
+}
+
+export async function modelSupportsVision(
+  model: string,
+  fetcher: typeof fetch = fetch
+): Promise<boolean> {
+  if (fetcher === fetch && visionSupportByModel.has(model)) return visionSupportByModel.get(model) as boolean
   const response = await fetcher(`${activeOllamaUrl}/api/show`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -92,11 +181,11 @@ export async function modelSupportsTools(
     signal: AbortSignal.timeout(5_000)
   })
   if (!response.ok) {
-    throw new Error(`Ollama n’a pas pu vérifier les capacités du modèle (statut ${response.status}).`)
+    throw new Error(`Ollama n’a pas pu vérifier les capacités visuelles du modèle (statut ${response.status}).`)
   }
-  const supportsTools = showResponseSchema.parse(await response.json()).capabilities.includes('tools')
-  if (fetcher === fetch) toolSupportByModel.set(model, supportsTools)
-  return supportsTools
+  const supportsVision = showResponseSchema.parse(await response.json()).capabilities.includes('vision')
+  if (fetcher === fetch) visionSupportByModel.set(model, supportsVision)
+  return supportsVision
 }
 
 export async function getOllamaStatus(
@@ -150,6 +239,39 @@ export async function getOllamaStatus(
     reason: timedOut
       ? "Le conteneur Ollama n'a pas répondu dans le délai prévu."
       : "Le service isolé d'Ollama ne répond pas. Relancez le runtime privé puis réessayez."
+  }
+}
+
+export async function getOllamaStatusAt(
+  url: string,
+  fetcher: typeof fetch = fetch
+): Promise<OllamaStatus> {
+  try {
+    const options = { signal: AbortSignal.timeout(5_000) }
+    const tagsResponse = await fetcher(`${url}/api/tags`, options)
+    if (!tagsResponse.ok) return { available: false, reason: `Ollama a répondu avec le statut ${tagsResponse.status}.` }
+    const tags = tagsResponseSchema.parse(await tagsResponse.json())
+    let version: string | null = null
+    try {
+      const versionResponse = await fetcher(`${url}/api/version`, options)
+      if (versionResponse.ok) {
+        const parsedVersion = versionResponseSchema.safeParse(await versionResponse.json())
+        if (parsedVersion.success) version = parsedVersion.data.version
+      }
+    } catch {
+      // The tags endpoint is sufficient to establish readiness.
+    }
+    return {
+      available: true,
+      version,
+      models: tags.models.map((model) => ({ name: model.name, size: model.size, modifiedAt: model.modified_at }))
+    }
+  } catch (error) {
+    const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+    return {
+      available: false,
+      reason: timedOut ? "Ollama n'a pas répondu à temps." : "Ollama n'est pas joignable."
+    }
   }
 }
 
@@ -225,7 +347,7 @@ export async function warmOllamaModel(
         prompt: '',
         stream: false,
         keep_alive: -1,
-        options: MODEL_OPTIONS
+        options: modelOptions
       }),
       signal: AbortSignal.timeout(300_000)
     })
@@ -242,11 +364,15 @@ export async function streamOllamaChat(
   signal?: AbortSignal,
   fetcher: typeof fetch = fetch,
   tools?: readonly unknown[],
-  idleTimeoutMs = 120_000
+  idleTimeoutMs = 120_000,
+  numPredict?: number,
+  numCtx?: number,
+  onDiagnostics?: (message: string) => void
 ): Promise<OllamaChatResult> {
   let content = ''
   const toolCalls: OllamaToolCall[] = []
   let requestMessages = messages
+  let timings: OllamaTimings = {}
   const idleController = new AbortController()
   let idleTimeout: ReturnType<typeof setTimeout> | null = null
   const touch = (): void => {
@@ -254,6 +380,8 @@ export async function streamOllamaChat(
     idleTimeout = setTimeout(() => idleController.abort(), idleTimeoutMs)
   }
   const requestSignal = signal ? AbortSignal.any([signal, idleController.signal]) : idleController.signal
+  await reportRunningModels('before', onDiagnostics, fetcher, signal)
+  const chatStartedAt = performance.now()
 
   try {
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -263,11 +391,22 @@ export async function streamOllamaChat(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model,
-        messages: requestMessages,
+        messages: requestMessages.map(({ images, ...message }) => ({
+          ...message,
+          ...(images?.length ? { images: images.map((image) => image.data) } : {})
+        })),
         stream: true,
         think: false,
         keep_alive: -1,
-        options: MODEL_OPTIONS,
+        options: {
+          ...modelOptions,
+          ...(numCtx === undefined
+            ? {}
+            : { num_ctx: Math.max(1_024, Math.min(modelOptions.num_ctx, Math.floor(numCtx))) }),
+          ...(numPredict === undefined
+            ? {}
+            : { num_predict: Math.max(1, Math.min(modelOptions.num_predict, Math.floor(numPredict))) })
+        },
         ...(tools ? { tools } : {})
       }),
       signal: requestSignal
@@ -299,13 +438,32 @@ export async function streamOllamaChat(
           onContent(chunk.message.content)
         }
         if (chunk.message?.tool_calls) toolCalls.push(...chunk.message.tool_calls)
-        if (chunk.done === true) completed = true
+        if (chunk.done === true) {
+          completed = true
+          timings = {
+            totalDuration: chunk.total_duration,
+            loadDuration: chunk.load_duration,
+            promptEvalCount: chunk.prompt_eval_count,
+            promptEvalDuration: chunk.prompt_eval_duration,
+            evalCount: chunk.eval_count,
+            evalDuration: chunk.eval_duration
+          }
+        }
       }
 
       if (done) break
     }
 
-      if (completed) return { content, toolCalls }
+      if (completed) {
+        const generationSeconds = (timings.evalDuration ?? 0) / 1_000_000_000
+        const tokensPerSecond = generationSeconds > 0 && timings.evalCount !== undefined
+          ? (timings.evalCount / generationSeconds).toFixed(1)
+          : 'unknown'
+        onDiagnostics?.(
+          `ollama.metrics model=${model} wallMs=${(performance.now() - chatStartedAt).toFixed(1)} loadMs=${durationMs(timings.loadDuration)} promptEvalMs=${durationMs(timings.promptEvalDuration)} promptTokens=${timings.promptEvalCount ?? 'unknown'} generationMs=${durationMs(timings.evalDuration)} generatedTokens=${timings.evalCount ?? 'unknown'} tokensPerSecond=${tokensPerSecond} totalMs=${durationMs(timings.totalDuration)}`
+        )
+        return { content, toolCalls }
+      }
       if (attempt === 0 && toolCalls.length === 0) {
         requestMessages = content
           ? [
@@ -320,9 +478,13 @@ export async function streamOllamaChat(
     }
   } catch (error) {
     if (idleController.signal.aborted && !signal?.aborted) throw new OllamaIdleTimeoutError()
+    if (error instanceof TypeError && /fetch failed/i.test(error.message)) {
+      throw new Error("Le moteur local d’Ollama n’est plus joignable. Relancez Stellan pour rétablir la connexion.")
+    }
     throw error
   } finally {
     if (idleTimeout) clearTimeout(idleTimeout)
+    await reportRunningModels('after', onDiagnostics, fetcher, signal)
   }
 
   throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')

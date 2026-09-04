@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import type { OllamaMessage, OllamaToolCall } from './ollama'
+import { MODEL_SELECTION_MESSAGE_PREFIX, type ChatImage } from '../shared/contracts'
 
 export type Thread = {
   id: string
@@ -42,12 +43,14 @@ export type Message = {
   threadId: string
   role: MessageRole
   content: string
+  images: ChatImage[]
   createdAt: string
 }
 
 export type AppendMessageInput = {
   role: MessageRole
   content: string
+  images?: ChatImage[]
 }
 
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'interrupted' | 'error'
@@ -102,6 +105,31 @@ export type WorkerProfile = {
 }
 
 export type SaveWorkerProfileInput = Omit<WorkerProfile, 'updatedAt'>
+
+export type ThreadTodo = {
+  id: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+  priority: 'low' | 'medium' | 'high'
+}
+
+export type StoredReliableActivity = {
+  id: string
+  threadId: string
+  engineId: string
+  state: unknown
+  status: 'active' | 'completed'
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export type StoredReliableActivityEvent = {
+  sequence: number
+  action: unknown
+  result: unknown
+  createdAt: string
+}
 
 type StorageRow = Record<string, SQLInputValue>
 
@@ -291,6 +319,48 @@ const migrations = [
     ALTER TABLE project_worker_profiles ADD COLUMN storage_gb INTEGER NOT NULL DEFAULT 20;
     ALTER TABLE project_worker_profiles ADD COLUMN automatic_cpu_memory INTEGER NOT NULL DEFAULT 1
       CHECK (automatic_cpu_memory IN (0, 1));
+  `,
+  `
+    CREATE TABLE thread_todos (
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'in_progress', 'completed')),
+      priority TEXT NOT NULL CHECK (priority IN ('low', 'medium', 'high')),
+      position INTEGER NOT NULL,
+      PRIMARY KEY (thread_id, id)
+    );
+  `,
+  `
+    ALTER TABLE messages ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]';
+  `,
+  `
+    CREATE TABLE reliable_activities (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      engine_id TEXT NOT NULL,
+      state_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('active', 'completed')),
+      version INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX reliable_activities_one_active_per_thread
+      ON reliable_activities(thread_id) WHERE status = 'active';
+
+    CREATE TABLE reliable_activity_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      activity_id TEXT NOT NULL REFERENCES reliable_activities(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL,
+      action_json TEXT NOT NULL,
+      result_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (activity_id, sequence)
+    );
+
+    CREATE INDEX reliable_activity_events_activity_sequence
+      ON reliable_activity_events(activity_id, sequence);
   `
 ]
 
@@ -317,11 +387,13 @@ function toThread(row: StorageRow): Thread {
 }
 
 function toMessage(row: StorageRow): Message {
+  const images = JSON.parse(String(row.images_json ?? '[]')) as ChatImage[]
   return {
     id: String(row.id),
     threadId: String(row.thread_id),
     role: String(row.role) as MessageRole,
     content: String(row.content),
+    images,
     createdAt: String(row.created_at)
   }
 }
@@ -393,6 +465,28 @@ function toAgentToolEvent(row: StorageRow): AgentToolEvent {
       : JSON.parse(String(row.arguments_json)) as Record<string, unknown>,
     result: row.result === null ? null : String(row.result),
     assistantContent: row.assistant_content === null ? null : String(row.assistant_content),
+    createdAt: String(row.created_at)
+  }
+}
+
+function toReliableActivity(row: StorageRow): StoredReliableActivity {
+  return {
+    id: String(row.id),
+    threadId: String(row.thread_id),
+    engineId: String(row.engine_id),
+    state: JSON.parse(String(row.state_json)),
+    status: String(row.status) as StoredReliableActivity['status'],
+    version: Number(row.version),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
+  }
+}
+
+function toReliableActivityEvent(row: StorageRow): StoredReliableActivityEvent {
+  return {
+    sequence: Number(row.sequence),
+    action: JSON.parse(String(row.action_json)),
+    result: JSON.parse(String(row.result_json)),
     createdAt: String(row.created_at)
   }
 }
@@ -516,6 +610,37 @@ export class ThreadStore {
     return result.changes === 0 ? null : this.getThread(id)
   }
 
+  setThreadModel(id: string, model: string): { thread: Thread; message: Message | null } | null {
+    this.assertOpen()
+    const current = this.getThread(id)
+    if (!current) return null
+    if (current.model === model) return { thread: current, message: null }
+
+    const updatedAt = new Date().toISOString()
+    const message: Message = {
+      id: randomUUID(),
+      threadId: id,
+      role: 'system',
+      content: `${MODEL_SELECTION_MESSAGE_PREFIX}${model}`,
+      images: [],
+      createdAt: updatedAt
+    }
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      this.database.prepare('UPDATE threads SET model = ?, updated_at = ? WHERE id = ?')
+        .run(model, updatedAt, id)
+      this.database.prepare(`
+        INSERT INTO messages (id, thread_id, role, content, images_json, created_at)
+        VALUES (?, ?, 'system', ?, '[]', ?)
+      `).run(message.id, id, message.content, updatedAt)
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+    return { thread: this.getThread(id) as Thread, message }
+  }
+
   activateEnvironment(
     id: string,
     workspaceMode: 'worktree' | 'direct',
@@ -585,12 +710,13 @@ export class ThreadStore {
       threadId,
       role: input.role,
       content: input.content,
+      images: input.images ?? [],
       createdAt: new Date().toISOString()
     }
     this.database.prepare(`
-      INSERT INTO messages (id, thread_id, role, content, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(message.id, message.threadId, message.role, message.content, message.createdAt)
+      INSERT INTO messages (id, thread_id, role, content, images_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(message.id, message.threadId, message.role, message.content, JSON.stringify(message.images), message.createdAt)
 
     return message
   }
@@ -599,7 +725,7 @@ export class ThreadStore {
     this.assertOpen()
 
     return this.database.prepare(`
-      SELECT messages.id, messages.thread_id, messages.role, messages.content, messages.created_at
+      SELECT messages.id, messages.thread_id, messages.role, messages.content, messages.images_json, messages.created_at
       FROM messages
       LEFT JOIN agent_runs ON agent_runs.user_message_id = messages.id
       WHERE messages.thread_id = ?
@@ -608,14 +734,163 @@ export class ThreadStore {
     `).all(threadId).map(toMessage)
   }
 
-  startAgentRun(threadId: string, requestId: string, model: string, userContent: string): AgentRun {
+  listTodos(threadId: string): ThreadTodo[] {
+    this.assertOpen()
+    return this.database.prepare(`
+      SELECT id, content, status, priority
+      FROM thread_todos
+      WHERE thread_id = ?
+      ORDER BY position ASC
+    `).all(threadId).map((row) => ({
+      id: String(row.id),
+      content: String(row.content),
+      status: String(row.status) as ThreadTodo['status'],
+      priority: String(row.priority) as ThreadTodo['priority']
+    }))
+  }
+
+  replaceTodos(threadId: string, todos: ThreadTodo[]): ThreadTodo[] {
+    this.assertOpen()
+    if (!this.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+    if (new Set(todos.map((todo) => todo.id)).size !== todos.length) throw new Error('Todo identifiers must be unique')
+    this.database.exec('BEGIN')
+    try {
+      this.database.prepare('DELETE FROM thread_todos WHERE thread_id = ?').run(threadId)
+      const insert = this.database.prepare(`
+        INSERT INTO thread_todos (thread_id, id, content, status, priority, position)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      todos.forEach((todo, position) => {
+        insert.run(threadId, todo.id, todo.content, todo.status, todo.priority, position)
+      })
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+    return this.listTodos(threadId)
+  }
+
+  createReliableActivity(input: {
+    id: string
+    threadId: string
+    engineId: string
+    state: unknown
+    event: unknown
+  }): StoredReliableActivity {
+    this.assertOpen()
+    if (!this.getThread(input.threadId)) throw new Error(`Thread not found: ${input.threadId}`)
+    const createdAt = new Date().toISOString()
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      this.database.prepare(`
+        INSERT INTO reliable_activities (
+          id, thread_id, engine_id, state_json, status, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'active', 0, ?, ?)
+      `).run(input.id, input.threadId, input.engineId, JSON.stringify(input.state), createdAt, createdAt)
+      this.database.prepare(`
+        INSERT INTO reliable_activity_events (
+          activity_id, sequence, action_json, result_json, created_at
+        ) VALUES (?, 0, ?, ?, ?)
+      `).run(input.id, JSON.stringify({ type: 'create' }), JSON.stringify(input.event), createdAt)
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+    return this.getReliableActivity(input.id) as StoredReliableActivity
+  }
+
+  getReliableActivity(id: string): StoredReliableActivity | null {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT id, thread_id, engine_id, state_json, status, version, created_at, updated_at
+      FROM reliable_activities
+      WHERE id = ?
+    `).get(id)
+    return row ? toReliableActivity(row) : null
+  }
+
+  getActiveReliableActivity(threadId: string): StoredReliableActivity | null {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT id, thread_id, engine_id, state_json, status, version, created_at, updated_at
+      FROM reliable_activities
+      WHERE thread_id = ? AND status = 'active'
+    `).get(threadId)
+    return row ? toReliableActivity(row) : null
+  }
+
+  listReliableActivityEvents(activityId: string): StoredReliableActivityEvent[] {
+    this.assertOpen()
+    return this.database.prepare(`
+      SELECT sequence, action_json, result_json, created_at
+      FROM reliable_activity_events
+      WHERE activity_id = ?
+      ORDER BY sequence ASC
+    `).all(activityId).map(toReliableActivityEvent)
+  }
+
+  transitionReliableActivity(input: {
+    id: string
+    expectedVersion: number
+    state: unknown
+    completed: boolean
+    action: unknown
+    event: unknown
+  }): StoredReliableActivity | null {
+    this.assertOpen()
+    const updatedAt = new Date().toISOString()
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      const update = this.database.prepare(`
+        UPDATE reliable_activities
+        SET state_json = ?, status = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND status = 'active' AND version = ?
+      `).run(
+        JSON.stringify(input.state),
+        input.completed ? 'completed' : 'active',
+        updatedAt,
+        input.id,
+        input.expectedVersion
+      )
+      if (update.changes === 0) {
+        this.database.exec('ROLLBACK')
+        return null
+      }
+      this.database.prepare(`
+        INSERT INTO reliable_activity_events (
+          activity_id, sequence, action_json, result_json, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(
+        input.id,
+        input.expectedVersion + 1,
+        JSON.stringify(input.action),
+        JSON.stringify(input.event),
+        updatedAt
+      )
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+    return this.getReliableActivity(input.id)
+  }
+
+  startAgentRun(
+    threadId: string,
+    requestId: string,
+    model: string,
+    userContent: string,
+    images: ChatImage[] = []
+  ): AgentRun {
     this.assertOpen()
     const runId = randomUUID()
     const startedAt = new Date().toISOString()
 
     this.database.exec('BEGIN')
     try {
-      const userMessage = this.appendMessage(threadId, { role: 'user', content: userContent })
+      const userMessage = this.appendMessage(threadId, { role: 'user', content: userContent, images })
       this.database.prepare(`
         INSERT INTO agent_runs (
           id, thread_id, request_id, user_message_id, model, status, error, started_at, finished_at
@@ -891,7 +1166,7 @@ export class ThreadStore {
     this.assertOpen()
     const runs = this.listAgentRuns(threadId)
     const messages = new Map(this.database.prepare(`
-      SELECT id, thread_id, role, content, created_at
+      SELECT id, thread_id, role, content, images_json, created_at
       FROM messages
       WHERE thread_id = ?
       ORDER BY created_at ASC, rowid ASC
@@ -902,7 +1177,11 @@ export class ThreadStore {
       if (run.status === 'queued' && run.userMessageId !== throughUserMessageId) continue
       const userMessage = messages.get(run.userMessageId)
       if (!userMessage) continue
-      prompt.push({ role: 'user', content: userMessage.content })
+      prompt.push({
+        role: 'user',
+        content: userMessage.content,
+        ...(userMessage.images.length > 0 ? { images: userMessage.images } : {})
+      })
 
       const events = this.listAgentToolEvents(run.id)
       const starts = events.filter((event) => event.status === 'running')

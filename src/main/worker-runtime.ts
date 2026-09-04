@@ -10,7 +10,9 @@ export function createWorkerCommandExecutor(
   git: { directory: string; commonDirectory: string } | null = null,
   executor: ContainerExecutor = executeInWorkerContainer
 ) {
-  if (!profile || profile.mode === 'direct') return undefined
+  if (!profile || profile.mode === 'direct') {
+    throw new Error('Le moteur de commandes sécurisé est indisponible. L’exécution directe sur la machine est bloquée.')
+  }
   if (!profile.runtime) throw new Error('Le profil conteneur est invalide : aucun runtime n’est défini.')
 
   return (command: string, args: readonly string[], options: {

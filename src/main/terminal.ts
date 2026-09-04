@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { spawn, type IPty } from 'node-pty'
@@ -36,22 +35,10 @@ export type ContainerRemover = (runtime: 'docker' | 'podman', name: string) => P
 
 const MAX_OUTPUT_CHUNK = 64 * 1024
 
-function nativeShell(): { executable: string; args: string[] } {
-  if (process.platform === 'win32') {
-    const configured = process.env.ComSpec
-    return {
-      executable: configured && path.win32.basename(configured).toLowerCase() === 'cmd.exe'
-        ? configured
-        : 'cmd.exe',
-      args: []
-    }
-  }
-  return { executable: existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh', args: [] }
-}
-
 function containerCommand(launch: TerminalLaunch, profile: WorkerProfile): {
   executable: string
   args: string[]
+  env?: NodeJS.ProcessEnv
   name: null
 } {
   if (!profile.runtime) throw new Error('Le profil conteneur n’a pas de runtime.')
@@ -155,16 +142,17 @@ export class TerminalManager {
       return { threadId: launch.threadId, mode: existing.mode, reused: true }
     }
 
-    const command = launch.profile?.mode === 'container'
-      ? containerCommand(launch, launch.profile)
-      : { ...nativeShell(), name: null }
-    const mode = launch.profile?.mode === 'container' ? 'container' as const : 'direct' as const
+    if (launch.profile?.mode !== 'container' || !launch.profile.runtime) {
+      throw new Error('Le terminal sécurisé est indisponible. Aucun shell direct de la machine ne sera ouvert.')
+    }
+    const command = containerCommand(launch, launch.profile)
+    const mode = 'container' as const
     const pty = this.createPty(command.executable, command.args, {
       name: 'xterm-256color',
       cols: launch.cols,
       rows: launch.rows,
       cwd: launch.cwd,
-      env: { ...process.env, TERM: 'xterm-256color' }
+      env: { ...process.env, ...command.env, TERM: 'xterm-256color' }
     })
     const session: Session = {
       ownerId: launch.ownerId,
