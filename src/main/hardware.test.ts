@@ -36,11 +36,11 @@ describe('selectGpus', () => {
     expect(inferenceParallelism({
       ...base,
       gpus: [{ model: 'NVIDIA GeForce RTX', vramBytes: 16_000_000_000 }]
-    }, 'nvidia')).toBe(2)
+    }, 'nvidia')).toBe(1)
     expect(inferenceParallelism({
       ...base,
       gpus: [{ model: 'Intel Arc', vramBytes: 16_000_000_000 }]
-    }, 'vulkan')).toBe(2)
+    }, 'vulkan')).toBe(1)
     expect(inferenceParallelism({
       ...base,
       gpus: [{ model: 'AMD Radeon', vramBytes: 24_000_000_000 }]

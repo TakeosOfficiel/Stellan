@@ -116,4 +116,19 @@ describe('ContainerProjectTools', () => {
       'git', 'diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', 'index.html'
     ])
   })
+
+  it('keeps untracked files separate when the runtime removes NUL separators', async () => {
+    const executor = vi.fn<typeof executeInWorkerContainer>()
+      .mockResolvedValueOnce(result('?? app.js?? index.html'))
+      .mockResolvedValueOnce({ ...result('diff --git a/app.js b/app.js\n--- /dev/null\n+++ b/app.js\n@@ -0,0 +1 @@\n+console.log("ready")\n'), exitCode: 1 })
+      .mockResolvedValueOnce({ ...result('diff --git a/index.html b/index.html\n--- /dev/null\n+++ b/index.html\n@@ -0,0 +1 @@\n+<h1>Boutique</h1>\n'), exitCode: 1 })
+    const tools = new ContainerProjectTools(profile, 'thread-123', 'C:\\project', null, executor)
+
+    await expect(tools.gitChanges()).resolves.toEqual([
+      expect.objectContaining({ path: 'app.js', kind: 'added', added: 1, removed: 0 }),
+      expect.objectContaining({ path: 'index.html', kind: 'added', added: 1, removed: 0 })
+    ])
+    expect(executor.mock.calls[1]?.[0].command).toContain('/dev/null')
+    expect(executor.mock.calls[2]?.[0].command).toContain('/dev/null')
+  })
 })

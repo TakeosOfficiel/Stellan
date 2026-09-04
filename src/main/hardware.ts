@@ -47,7 +47,7 @@ export function inferenceParallelism(
     0
   )
   return gpuBackend !== 'cpu'
-    && largestVram >= 16_000_000_000
+    && largestVram >= 24_000_000_000
     && hardware.totalMemoryBytes >= 24_000_000_000
     ? 2
     : 1

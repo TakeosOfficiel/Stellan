@@ -13,6 +13,15 @@ describe('parseGitStatus', () => {
       { path: 'styles.css', kind: 'added' }
     ])
   })
+
+  it('separates paths when a container transport removes NUL bytes', () => {
+    expect(parseGitStatus('?? app.js?? index.html?? assets/css/style.css?? assets/js/app.js')).toEqual([
+      { path: 'app.js', kind: 'added' },
+      { path: 'index.html', kind: 'added' },
+      { path: 'assets/css/style.css', kind: 'added' },
+      { path: 'assets/js/app.js', kind: 'added' }
+    ])
+  })
 })
 
 describe('ProjectTools', () => {

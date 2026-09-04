@@ -134,8 +134,9 @@ for (let directory = path.dirname(target); directory !== root; directory = path.
       'git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace',
       'status', '--porcelain=v1', '-z', '--untracked-files=all'
     ]))
-    return Promise.all(parseGitStatus(status).map(async (change) => {
-      const untracked = status.includes(`?? ${change.path}\0`)
+    const changes = parseGitStatus(status)
+    return Promise.all(changes.map(async (change) => {
+      const untracked = change.kind === 'added'
       const result = await this.execute(untracked
         ? ['git', 'diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', change.path]
         : ['git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--', change.path])

@@ -24,12 +24,18 @@ export type FileWriteResult = {
   removed: number
 }
 
+function gitStatusTokens(status: string): string[] {
+  return status
+    .split(/\0|\uFFFD|\r?\n|(?=[ MADRCUT?!]{2} )/)
+    .filter((token) => token.length >= 4)
+}
+
 export function parseGitStatus(status: string): Array<Pick<ProjectChange, 'path' | 'kind'>> {
   const entries: Array<Pick<ProjectChange, 'path' | 'kind'>> = []
   // Docker output normally preserves NUL separators. Some Windows runtime
-  // transports replace them with U+FFFD, so accept both forms instead of
-  // displaying every changed path as one concatenated filename.
-  const tokens = status.split(/\0|\uFFFD|\r?\n/)
+  // transports replace them with U+FFFD or remove them, so also recognize
+  // the next porcelain status marker instead of merging changed paths.
+  const tokens = gitStatusTokens(status)
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
     if (!token || token.length < 4) continue
@@ -309,8 +315,9 @@ export class ProjectTools {
     if (status.outputTruncated) throw new Error('Git status exceeded the output limit')
     if (status.exitCode !== 0) throw new Error(status.stderr.trim() || 'Unable to read Git status')
 
+    const statusTokens = gitStatusTokens(status.stdout)
     return Promise.all(parseGitStatus(status.stdout).map(async (change) => {
-      const untracked = status.stdout.includes(`?? ${change.path}\0`)
+      const untracked = statusTokens.some((token) => token === `?? ${change.path}`)
       const result = await this.run('git', untracked
         ? ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', change.path]
         : ['-c', 'core.fsmonitor=false', '-c', `safe.directory=${this.root}`, 'diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--', change.path],

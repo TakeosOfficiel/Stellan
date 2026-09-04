@@ -218,12 +218,12 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Exécute un programme sans shell dans le projet après les contrôles de sécurité.',
+      description: 'Exécute un programme sans shell dans le projet après les contrôles de sécurité. command contient uniquement le nom de l’exécutable ; chaque option appartient séparément à args.',
       parameters: {
         type: 'object',
         properties: {
-          command: { type: 'string' },
-          args: { type: 'array', items: { type: 'string' } }
+          command: { type: 'string', description: 'Nom ou chemin de l’exécutable uniquement, sans argument ni espace. Exemple : npm.' },
+          args: { type: 'array', description: 'Arguments séparés. Exemple : ["test"].', items: { type: 'string' } }
         },
         required: ['command']
       }
@@ -473,7 +473,13 @@ export function commandDenialReason(
   args: readonly string[],
   permissions: { gitCommit: boolean; gitPush: boolean }
 ): string | null {
+  if (/\s/.test(command)) {
+    return 'Le champ command contient une ligne de commande complète. Indiquez uniquement le nom de l’exécutable dans command et placez chaque option séparément dans args.'
+  }
   const executable = commandName(command)
+  if (['mkdir', 'mkdir.exe'].includes(executable)) {
+    return 'Ne créez pas les dossiers avec mkdir : write_file crée automatiquement les dossiers parents du fichier demandé.'
+  }
   if (BLOCKED_COMMANDS.has(executable)) {
     return 'Cette commande est bloquée. Utilisez les outils de fichiers dédiés et non un shell ou une commande destructive.'
   }
@@ -1245,7 +1251,8 @@ OUTILS ET FICHIERS
 - Si l’utilisateur demande de créer ou modifier un fichier, appelle les outils de fichiers au lieu de lui donner du code à copier. Mauvais : « Ajoutez ce CSS vous-même ». Correct : appeler write_file, vérifier, puis annoncer le résultat.
 - Préfère edit_file pour un remplacement local et unique. Utilise write_file pour créer un fichier ou remplacer volontairement tout son contenu. undo_edit annule seulement une modification réalisée pendant la demande actuelle.
 - delete_file supprime un seul fichier nommé. Ne tente jamais de supprimer un dossier, plusieurs fichiers par contournement, ou d’utiliser rm, rmdir, del, un shell ou un interpréteur en ligne pour modifier les fichiers.
-- Utilise run_command pour des commandes ciblées, sans shell, principalement pour installer, construire, tester ou vérifier. Lis le code d’erreur et la sortie avant de changer d’approche.${gitRules}
+- write_file crée automatiquement tous les dossiers parents manquants. N’exécute jamais mkdir avant d’écrire un fichier.
+- Utilise run_command pour des commandes ciblées, sans shell, principalement pour installer, construire, tester ou vérifier. Le champ command contient uniquement l’exécutable et chaque option est une entrée distincte dans args. Lis le code d’erreur et la sortie avant de changer d’approche.${gitRules}
 
 PLAN
 - Pour une tâche complexe comportant plusieurs étapes, utilise todo_write au début, puis mets chaque statut à jour au fil du travail. Utilise todo_read pour reprendre le plan persistant. N’ajoute pas de TODO pour une demande simple.${advisorRule}

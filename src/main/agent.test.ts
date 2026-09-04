@@ -252,6 +252,8 @@ describe('agent guardrails', () => {
     expect(commandDenialReason('powershell.exe', ['-Command', 'Remove-Item'], none)).toMatch(/bloquée/)
     expect(commandDenialReason('node', ['--eval', 'deleteEverything()'], none)).toMatch(/bloquée/)
     expect(commandDenialReason('find', ['.', '-delete'], none)).toMatch(/bloquées/)
+    expect(commandDenialReason('mkdir', ['-p', 'assets/css'], none)).toMatch(/write_file/)
+    expect(commandDenialReason('mkdir -p assets/css assets/js', [], none)).toMatch(/command contient une ligne de commande complète/)
     expect(commandDenialReason('git', ['status'], none)).toBeNull()
     expect(commandDenialReason('git', ['commit', '-m', 'change'], none)).toMatch(/explicitement/)
     expect(commandDenialReason('git', ['commit', '-m', 'change'], { ...none, gitCommit: true })).toBeNull()
@@ -1872,6 +1874,48 @@ describe('runCodingAgent', () => {
 
     expect(authorize).not.toHaveBeenCalled()
     expect(workerCommand).not.toHaveBeenCalled()
+  })
+
+  it('refuses a full command line passed as the executable before reaching the container', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const workerCommand = vi.fn()
+    const authorize = vi.fn().mockResolvedValue(true)
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: {
+          name: 'run_command',
+          arguments: { command: 'mkdir -p assets/css assets/js' }
+        } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [
+          { function: { name: 'write_file', arguments: { path: 'assets/css/style.css', content: 'body { color: white; }' } } },
+          { function: { name: 'write_file', arguments: { path: 'assets/js/app.js', content: 'console.log("ready")' } } }
+        ] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le CSS et le JavaScript sont créés.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [{ role: 'user', content: 'Tu peux faire le CSS et le JS du projet ?' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize,
+      runCommand: workerCommand
+    })
+
+    expect(authorize).not.toHaveBeenCalledWith('run_command', expect.anything())
+    expect(workerCommand).not.toHaveBeenCalled()
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('uniquement le nom de l’exécutable')
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('color: white')
+    await expect(readFile(join(projectPath, 'assets/js/app.js'), 'utf8')).resolves.toContain('ready')
   })
 
   it('enforces the worker write scope in code', async () => {

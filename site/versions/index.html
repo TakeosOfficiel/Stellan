@@ -29,23 +29,35 @@
       <div class="release-list">
         <article class="release-card latest">
           <header class="release-header">
-            <div class="release-title"><h2>Stellan 0.1.9</h2><span class="release-badge">Actuelle</span></div>
+            <div class="release-title"><h2>Stellan 0.1.10</h2><span class="release-badge">Actuelle</span></div>
             <time datetime="2026-09-04">4 septembre 2026</time>
           </header>
           <ul>
-            <li>Questions visuelles très courtes ou imparfaitement écrites reconnues lorsqu’une image est jointe.</li>
-            <li>Présence de l’image rappelée au modèle même si le classificateur local ne parvient pas à déterminer l’intention.</li>
+            <li>GPU de 16 Go mieux exploités grâce à une seule inférence à la fois, sans saturation inutile de la mémoire vidéo.</li>
+            <li>Moteur Ollama privé automatiquement actualisé tout en conservant les modèles téléchargés.</li>
+            <li>Commandes de fichiers mieux encadrées pour éviter les appels <code>mkdir</code> incorrects des petits modèles.</li>
+            <li>Fichiers modifiés correctement séparés après un redémarrage, avec leurs véritables compteurs de lignes.</li>
           </ul>
           <div class="release-downloads">
-            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.9-win-x64.exe">Windows</a>
-            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.9-linux-x86_64.AppImage">Linux AppImage</a>
+            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.10-win-x64.exe">Windows</a>
+            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.10-linux-x86_64.AppImage">Linux AppImage</a>
           </div>
         </article>
 
         <article class="release-card">
           <header class="release-header">
-            <div class="release-title"><h2>Stellan 0.1.8</h2></div>
+            <div class="release-title"><h2>Stellan 0.1.9</h2></div>
             <span class="release-meta">Version précédente</span>
+          </header>
+          <ul>
+            <li>Questions visuelles très courtes ou imparfaitement écrites reconnues lorsqu’une image est jointe.</li>
+            <li>Présence de l’image rappelée au modèle même si le classificateur local ne parvient pas à déterminer l’intention.</li>
+          </ul>
+        </article>
+
+        <article class="release-card">
+          <header class="release-header">
+            <div class="release-title"><h2>Stellan 0.1.8</h2></div>
           </header>
           <ul>
             <li>Images jointes désormais visibles directement dans la conversation.</li>

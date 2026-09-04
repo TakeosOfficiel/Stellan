@@ -20,6 +20,7 @@ export const OLLAMA_ROCM_IMAGE = 'ollama/ollama:rocm'
 export const OLLAMA_HOST_PORT = 11435
 const OLLAMA_MANAGED_LABEL = 'com.local-agent.service=ollama'
 const OLLAMA_CONFIG_LABEL = 'com.local-agent.ollama-config'
+const OLLAMA_CONFIG_VERSION = 'v7'
 
 function failureDetail(result: CommandResult): string {
   return (result.stderr.trim() || result.stdout.trim()).slice(0, 500)
@@ -60,7 +61,7 @@ export async function startOllamaServer(
   const requestedBackend = options.gpuBackend ?? 'cpu'
   const numParallel = options.numParallel ?? 1
   const expectedImage = requestedBackend === 'amd-rocm' ? OLLAMA_ROCM_IMAGE : OLLAMA_IMAGE
-  const expectedConfig = `v6-${requestedBackend}-p${numParallel}`
+  const expectedConfig = `${OLLAMA_CONFIG_VERSION}-${requestedBackend}-p${numParallel}`
   options.onProgress?.({ step: 'Vérification du moteur privé', detail: 'Connexion à Docker…', percent: 79 })
   let docker: CommandResult
   try {
@@ -113,7 +114,7 @@ export async function startOllamaServer(
     '--name', OLLAMA_CONTAINER_NAME,
     '--label', OLLAMA_MANAGED_LABEL,
     '--restart', 'unless-stopped',
-    '--pull', 'missing',
+    '--pull', 'always',
     '--publish', `127.0.0.1:${OLLAMA_HOST_PORT}:11434`,
     '--volume', `${OLLAMA_MODELS_VOLUME}:/root/.ollama`,
     '--env', 'OLLAMA_KEEP_ALIVE=30m',
@@ -134,7 +135,7 @@ export async function startOllamaServer(
     try {
       return await runner('docker', [
         ...baseArgs,
-        '--label', `${OLLAMA_CONFIG_LABEL}=v6-${backend}-p${parallelism}`,
+        '--label', `${OLLAMA_CONFIG_LABEL}=${OLLAMA_CONFIG_VERSION}-${backend}-p${parallelism}`,
         '--env', `OLLAMA_NUM_PARALLEL=${parallelism}`,
         ...(backend === 'nvidia' ? ['--gpus', 'all'] : []),
         ...(backend === 'amd-rocm' ? ['--device', '/dev/kfd', '--device', '/dev/dri'] : []),
