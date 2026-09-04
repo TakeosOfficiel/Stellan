@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  buildConversationSystemPrompt,
   buildCodingAgentSystemPrompt,
   commandDenialReason,
   compactConversation,
@@ -69,6 +70,39 @@ describe('agent guardrails', () => {
     expect(activityPrompt).toContain('activity_start pour démarrer, puis activity_action')
     expect(activityPrompt).toContain('état public autoritatif')
     expect(activityPrompt).not.toContain('mot secret')
+  })
+
+  it('builds a short and non-judgmental prompt for ordinary conversation', () => {
+    const prompt = buildConversationSystemPrompt()
+
+    expect(prompt).toContain('reste simple et chaleureux')
+    expect(prompt).toContain('Ne qualifie jamais le message')
+    expect(prompt).toContain('N’invente ni émotion, ni intention')
+    expect(prompt).not.toContain('write_file')
+    expect(prompt.length).toBeLessThan(1_000)
+  })
+
+  it('handles a simple greeting with the focused prompt and no tools', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(streamResponse([
+      { message: { content: 'Salut ! Oui, merci 😊 Et toi, comment vas-tu ?' }, done: true }
+    ]))
+    vi.stubGlobal('fetch', fetcher)
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:4b',
+      messages: [{ role: 'user', content: 'salut tu vas bien ?' }],
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(false)
+    })
+
+    const request = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))
+    expect(request.tools).toBeUndefined()
+    expect(request.messages[0]?.content).toBe(buildConversationSystemPrompt())
+    expect(request.messages[0]?.content).not.toContain('OUTILS ET FICHIERS')
+    expect(onContent).toHaveBeenCalledWith('Salut ! Oui, merci 😊 Et toi, comment vas-tu ?')
   })
 
   it('keeps an explicitly conversational request in the chat without forcing file tools', async () => {
@@ -317,7 +351,8 @@ describe('runCodingAgent', () => {
     })
 
     const request = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))
-    expect(request.tools.some((tool: { function: { name: string } }) => tool.function.name.startsWith('activity_'))).toBe(false)
+    expect(request.tools).toBeUndefined()
+    expect(request.messages[0]?.content).toBe(buildConversationSystemPrompt())
     expect(startActivity).not.toHaveBeenCalled()
     expect(applyActivity).not.toHaveBeenCalled()
   })
@@ -966,7 +1001,7 @@ describe('runCodingAgent', () => {
       authorize: vi.fn().mockResolvedValue(true)
     })
 
-    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Applique-le maintenant avec write_file')
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Applique-le maintenant avec le format de secours')
     expect(onContent).toHaveBeenCalledOnce()
     expect(onContent).toHaveBeenCalledWith('Les fichiers CSS et JavaScript ont été créés.')
     await expect(readFile(join(projectPath, 'css/styles.css'), 'utf8')).resolves.toBe('body { color: white; }\n')
@@ -1046,8 +1081,8 @@ describe('runCodingAgent', () => {
     const onContent = vi.fn()
 
     await runCodingAgent({
-      model: 'qwen2.5-coder:7b',
-      messages: [{ role: 'user', content: 'Crée une page web Minecraft.' }],
+      model: 'qwen3.5:4b',
+      messages: [{ role: 'user', content: 'Tu peux me créer une page web style jeu cookie clicker, mais version Minecraft ?' }],
       project,
       signal: new AbortController().signal,
       onContent,
@@ -1056,6 +1091,7 @@ describe('runCodingAgent', () => {
     })
 
     expect(authorize).toHaveBeenCalledTimes(2)
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('<stellan_file path=')
     expect(await readFile(join(projectPath, 'index.html'), 'utf8')).toBe('<h1>Minecraft</h1>\n')
     expect(await readFile(join(projectPath, 'css/styles.css'), 'utf8')).toBe('body { color: #62c462; }\n')
     expect(onContent).toHaveBeenCalledWith('La page Minecraft a été créée.')
@@ -1088,14 +1124,14 @@ describe('runCodingAgent', () => {
     await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toBe('<h1>Minecraft</h1>\n')
   })
 
-  it('recovers from malformed Ollama tool XML with the textual tool-call format', async () => {
+  it('recovers from malformed Ollama tool XML with the fallback file format', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
     const project = await ProjectTools.create(projectPath)
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(streamResponse([{ error: 'XML syntax error on line 100: element <function> closed by </parameter>', done: true }]))
       .mockResolvedValueOnce(streamResponse([{
-        message: { content: '<tool_call>\n{"name":"write_file","arguments":{"path":"index.html","content":"<h1>Bonjour</h1>"}}\n</tool_call>' },
+        message: { content: '<stellan_file path="index.html">\n<h1>Bonjour</h1>\n</stellan_file>' },
         done: true
       }]))
       .mockResolvedValueOnce(streamResponse([{ message: { content: 'La page a été créée.' }, done: true }]))
@@ -1111,10 +1147,11 @@ describe('runCodingAgent', () => {
       authorize: vi.fn().mockResolvedValue(true)
     })
 
-    expect(await readFile(join(projectPath, 'index.html'), 'utf8')).toBe('<h1>Bonjour</h1>')
+    expect(await readFile(join(projectPath, 'index.html'), 'utf8')).toBe('<h1>Bonjour</h1>\n')
     expect(fetcher).toHaveBeenCalledTimes(3)
     const recoveryRequest = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))
     expect(recoveryRequest.tools).toBeUndefined()
+    expect(recoveryRequest.messages.at(-1)?.content).toContain('<stellan_file path=')
   })
 
   it('accepts a complete tool-call JSON object emitted in message content', async () => {
@@ -1484,7 +1521,7 @@ describe('runCodingAgent', () => {
     })
 
     expect(fetcher).toHaveBeenCalledTimes(4)
-    expect(String(fetcher.mock.calls[2]?.[1]?.body)).toContain('Applique-le maintenant avec write_file')
+    expect(String(fetcher.mock.calls[2]?.[1]?.body)).toContain('Applique-le maintenant avec le format de secours')
     expect(onContent).toHaveBeenCalledWith('Animation retirée et texte restauré.')
     expect(onContent).not.toHaveBeenCalledWith('Terminé. Les actions demandées ont été exécutées.')
     await expect(readFile(join(projectPath, 'style.css'), 'utf8')).resolves.toBe('.title { opacity: 1; }\n')

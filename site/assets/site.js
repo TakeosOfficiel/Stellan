@@ -67,6 +67,6 @@ if (observedSections.length && 'IntersectionObserver' in window) {
 
 const primaryDownload = document.querySelector('[data-primary-download]')
 if (primaryDownload && /Linux/i.test(navigator.userAgent)) {
-  primaryDownload.href = 'https://update.stellan.takeos.fr/linux/Stellan-0.1.4-linux-x86_64.AppImage'
+  primaryDownload.href = 'https://update.stellan.takeos.fr/linux/Stellan-0.1.5-linux-x86_64.AppImage'
   primaryDownload.querySelector('span').textContent = 'Télécharger pour Linux'
 }

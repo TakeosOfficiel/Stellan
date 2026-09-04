@@ -436,6 +436,12 @@ function parseFallbackToolCalls(content: string): OllamaToolCall[] {
   return parsed.data.map((file) => ({ function: { name: 'write_file', arguments: file } }))
 }
 
+const FALLBACK_FILE_FORMAT = `Réponds uniquement avec un ou plusieurs blocs de fichiers complets dans ce format, sans Markdown, JSON, commentaire ni texte autour :
+<stellan_file path="index.html">
+contenu complet non échappé
+</stellan_file>
+Utilise un bloc distinct par fichier. Les dossiers parents sont créés automatiquement. Chaque bloc sera validé et soumis aux mêmes autorisations que write_file.`
+
 function commandName(command: string): string {
   return command.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase() ?? ''
 }
@@ -1137,6 +1143,15 @@ RÉPONSE
 - N’affiche pas de jargon interne, de raisonnement privé, de JSON d’outil ou de phrase technique inutile.${activityRules}`
 }
 
+export function buildConversationSystemPrompt(): string {
+  return `Tu es Stellan, un assistant local.
+- Réponds naturellement, directement et dans la langue de l’utilisateur.
+- Adapte la longueur de ta réponse à la demande. Pour une salutation, reste simple et chaleureux.
+- Ne qualifie jamais le message, la question ou le comportement de l’utilisateur de bizarre, étrange, évident ou ridicule.
+- N’invente ni émotion, ni intention, ni contexte personnel. N’utilise pas un ton excessivement familier.
+- Ne parle pas de programmation, de projet, de fichiers ou d’outils si l’utilisateur ne le demande pas.`
+}
+
 export function buildActiveActivitySystemPrompt(
   activityContext?: string | null,
   requestedEngine?: ReliableActivityEngineId
@@ -1216,6 +1231,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   const activeActivityMode = Boolean(routedActivityContext)
   const reliableActivityActionRequired = !activityExitRequested && reliableActivityRequested
   const reliableActivityMode = activeActivityMode || reliableActivityActionRequired
+  const discussionMode = intentClassification.intent === 'discussion'
   const promptMessages = reliableActivityMode || activityExitRequested
     ? options.messages.filter((message) => message.role === 'user').slice(-1)
     : options.messages.filter((message) => message.role !== 'system')
@@ -1224,6 +1240,8 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       role: 'system',
       content: reliableActivityMode
         ? buildActiveActivitySystemPrompt(routedActivityContext, requestedActivityEngine)
+        : discussionMode
+          ? buildConversationSystemPrompt()
         : `${buildCodingAgentSystemPrompt({
             ...options,
             activityContext: routedActivityContext,
@@ -1298,7 +1316,9 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
           && (options.project || !PROJECT_TOOL_NAMES.has(tool.function.name))
         )
     const compactedConversation = compactConversation(conversation)
-    const toolsForStep = missingWriteRecoveryAttempted
+    const toolsForStep = discussionMode
+      ? undefined
+      : missingWriteRecoveryAttempted
       ? undefined
       : workerPlanCorrectionRequired
         ? [CREATE_WORKERS_TOOL]
@@ -1338,7 +1358,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         missingWriteRecoveryAttempted = true
         conversation.push({
           role: 'user',
-          content: 'Ton appel d’outil était mal formé. Applique maintenant la modification avec write_file. Réponds uniquement au format textuel suivant, sans XML supplémentaire ni Markdown :\n<tool_call>\n{"name":"write_file","arguments":{"path":"chemin/relatif.ext","content":"contenu complet"}}\n</tool_call>'
+          content: `Ton appel d’outil était mal formé. Applique maintenant la modification avec le format de secours.\n${FALLBACK_FILE_FORMAT}`
         })
         continue
       }
@@ -1356,10 +1376,12 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       throw error
     }
 
-    if (result.toolCalls.length === 0) {
+    if (!discussionMode && result.toolCalls.length === 0) {
       const fallbackCalls = parseFallbackToolCalls(result.content)
       if (fallbackCalls.length > 0) result = { content: '', toolCalls: fallbackCalls }
     }
+
+    if (discussionMode) result.toolCalls = []
 
     if (reliableActivityMode && reliableActivityToolAttempted) {
       result.toolCalls = []
@@ -1431,7 +1453,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
           conversation.push({ role: 'assistant', content: result.content })
           conversation.push({
             role: 'user',
-            content: 'Tu viens de proposer du code sans modifier le projet. Applique-le maintenant avec write_file. Réponds uniquement avec un ou plusieurs appels textuels au format officiel Qwen-Agent, sans Markdown ni autre texte :\n<tool_call>\n{"name":"write_file","arguments":{"path":"chemin/relatif.ext","content":"contenu complet"}}\n</tool_call>\nLes dossiers parents sont créés automatiquement. Chaque appel sera validé et soumis aux mêmes autorisations que write_file.'
+            content: `Tu viens de proposer du code sans modifier le projet. Applique-le maintenant avec le format de secours, en gardant chaque fichier assez concis pour terminer son bloc.\n${FALLBACK_FILE_FORMAT}`
           })
           continue
         }
@@ -1446,7 +1468,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
           conversation.push({ role: 'assistant', content: result.content })
           conversation.push({
             role: 'user',
-            content: `La demande exige des fichiers séparés et il manque encore : ${missingFileKinds.join(', ')}. Crée maintenant chacun de ces fichiers avec write_file, puis vérifie leurs liens depuis index.html. Ne prétends pas avoir terminé avant leur écriture effective.`
+            content: `La demande exige des fichiers séparés et il manque encore : ${missingFileKinds.join(', ')}. Crée maintenant chacun de ces fichiers, puis vérifie leurs liens depuis index.html. Ne prétends pas avoir terminé avant leur écriture effective.\n${FALLBACK_FILE_FORMAT}`
           })
           continue
         }
