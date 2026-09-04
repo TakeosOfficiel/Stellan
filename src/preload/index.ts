@@ -51,6 +51,7 @@ const api: LocalAgentApi = {
   },
   selectProject: () => ipcRenderer.invoke('project:select'),
   createProject: (name) => ipcRenderer.invoke('project:create', name),
+  deleteProject: (request) => ipcRenderer.invoke('project:delete', request),
   startChat: (request) => ipcRenderer.invoke('chat:start', request),
   cancelChat: (requestId) => ipcRenderer.invoke('chat:cancel', requestId),
   listActiveRuns: () => ipcRenderer.invoke('chat:list-active'),

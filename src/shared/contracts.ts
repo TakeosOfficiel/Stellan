@@ -222,6 +222,15 @@ export type DeleteThreadResult = {
   pendingChanges: string | null
 }
 
+export type DeleteProjectRequest = {
+  projectPath: string
+}
+
+export type DeleteProjectResult = {
+  deleted: boolean
+  deletedPrivateData: boolean
+}
+
 export type StoredMessage = {
   id: string
   threadId: string
@@ -343,6 +352,7 @@ export type LocalAgentApi = {
   onDictationProgress: (listener: (progress: DictationProgress) => void) => () => void
   selectProject: () => Promise<ProjectSelection | null>
   createProject: (name: string) => Promise<ProjectSelection>
+  deleteProject: (request: DeleteProjectRequest) => Promise<DeleteProjectResult>
   startChat: (request: ChatRequest) => Promise<AgentRunSummary>
   cancelChat: (requestId: string) => Promise<void>
   listActiveRuns: () => Promise<ActiveRun[]>

@@ -10,7 +10,8 @@ type ContainerExecutor = typeof executeInWorkerContainer
 
 const SAFE_PATH_SCRIPT = `
 const fs = require('node:fs'); const path = require('node:path');
-const rel = process.argv[1] || '.'; if (path.isAbsolute(rel) || rel.includes('\\0') || rel.split(/[\\\\/]/).includes('..')) throw new Error('Chemin de projet invalide');
+const rel = process.argv[1] || '.'; const parts = rel.split(/[\\\\/]/); if (path.isAbsolute(rel) || rel.includes('\\0') || parts.includes('..')) throw new Error('Chemin de projet invalide');
+if (parts.some((part) => part.toLowerCase() === '.git')) throw new Error('Métadonnées Git protégées');
 const root = '/workspace'; const target = path.resolve(root, rel); if (target !== root && !target.startsWith(root + path.sep)) throw new Error('Sortie du projet refusée');
 for (let current = root, parts = path.relative(root, target).split(path.sep).filter(Boolean), i = 0; i < parts.length; i++) { current = path.join(current, parts[i]); if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) throw new Error('Lien symbolique refusé'); }
 `
@@ -60,7 +61,7 @@ const files = []; function walk(dir) { for (const entry of fs.readdirSync(dir, {
   }
 
   async readFile(relativePath: string): Promise<string> {
-    return this.node(`process.stdout.write(fs.readFileSync(target, 'utf8'));`, [relativePath])
+    return this.node(`if (!fs.lstatSync(target).isFile()) throw new Error('Le chemin doit désigner un fichier'); process.stdout.write(fs.readFileSync(target, 'utf8'));`, [relativePath])
   }
 
   async search(query: string, relativePath = '.'): Promise<SearchResult[]> {
@@ -121,7 +122,7 @@ for (let directory = path.dirname(target); directory !== root; directory = path.
   }
 
   async gitStatus(): Promise<string> {
-    return this.success(await this.execute(['git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'status', '--short']))
+    return this.success(await this.execute(['git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'status', '--short', '--untracked-files=all']))
   }
 
   async gitDiff(staged = false): Promise<string> {
@@ -131,7 +132,7 @@ for (let directory = path.dirname(target); directory !== root; directory = path.
   async gitChanges(): Promise<ProjectChange[]> {
     const status = this.success(await this.execute([
       'git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace',
-      'status', '--porcelain=v1', '-z'
+      'status', '--porcelain=v1', '-z', '--untracked-files=all'
     ]))
     return Promise.all(parseGitStatus(status).map(async (change) => {
       const untracked = status.includes(`?? ${change.path}\0`)

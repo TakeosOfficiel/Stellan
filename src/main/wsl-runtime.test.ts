@@ -7,6 +7,7 @@ import {
   isMissingManagedDistroDiskFailure,
   managedContainerPtyCommand,
   managedLinuxPathToWindows,
+  managedPrivateProjectId,
   managedProjectWindowsPath,
   translateWindowsDockerArgument
 } from './wsl-runtime'
@@ -44,6 +45,8 @@ describe('managed WSL runtime arguments', () => {
     expect(managedLinuxPathToWindows('/var/lib/local-agent/project')).toBe(
       '\\\\wsl.localhost\\LocalAgentRuntime\\var\\lib\\local-agent\\project'
     )
+    expect(managedPrivateProjectId(managedProjectWindowsPath(id, 'repository'))).toBe(id)
+    expect(managedPrivateProjectId('C:\\Users\\Alice\\project')).toBeNull()
   })
 
   it('uses the Alpine service supervisor instead of a detached shell process', () => {

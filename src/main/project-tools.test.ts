@@ -100,6 +100,11 @@ describe('ProjectTools', () => {
     await expect(tools.resolveFilePath('../outside.txt')).rejects.toThrow(/traversal/)
   })
 
+  it('reports a clear file error instead of reading a directory', async () => {
+    await expect(tools.readFile('src')).rejects.toThrow('project file')
+    await expect(tools.readFilePreview('src')).rejects.toThrow('project file')
+  })
+
   it('rejects traversal and paths through symlinks', async () => {
     const outside = await mkdtemp(path.join(tmpdir(), 'project-tools-outside-'))
     await writeFile(path.join(outside, 'secret.txt'), 'secret')
@@ -111,6 +116,15 @@ describe('ProjectTools', () => {
     await expect(readFile(path.join(outside, 'secret.txt'), 'utf8')).resolves.toBe('secret')
 
     await rm(outside, { recursive: true, force: true })
+  })
+
+  it('never exposes, reads, changes, or deletes Git metadata', async () => {
+    await expect(tools.listDirectories()).resolves.not.toContain('.git')
+    await expect(tools.readFile('.git/config')).rejects.toThrow(/Git metadata/i)
+    await expect(tools.writeFile('.git/config', 'bad')).rejects.toThrow(/Git metadata/i)
+    await expect(tools.deleteFile('.git/HEAD')).rejects.toThrow(/Git metadata/i)
+    await expect(tools.deleteFile('.GIT')).rejects.toThrow(/Git metadata/i)
+    await expect(stat(path.join(project, '.git'))).resolves.toMatchObject({})
   })
 
   it('fixes command cwd, captures output, enforces limits, and times out', async () => {

@@ -39,6 +39,7 @@ export function parseFileStatuses(status: string): Map<string, FileStatus> {
 export function buildFileTree(files: readonly string[], status: string, directories: readonly string[] = []): FileTreeNode[] {
   const statuses = parseFileStatuses(status)
   const roots: FileTreeNode[] = []
+  const directoryPaths = new Set(directories.map((directory) => directory.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '')))
 
   for (const originalPath of directories) {
     const directoryPath = originalPath.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '')
@@ -58,6 +59,8 @@ export function buildFileTree(files: readonly string[], status: string, director
 
   for (const originalPath of new Set([...files, ...statuses.keys()])) {
     const filePath = originalPath.replaceAll('\\', '/').replace(/^\.\//, '')
+    if (filePath === '.gitkeep') continue
+    if (filePath.endsWith('/') || directoryPaths.has(filePath)) continue
     const parts = filePath.split('/').filter(Boolean)
     let children = roots
     let currentPath = ''

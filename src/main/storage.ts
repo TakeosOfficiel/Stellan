@@ -1277,6 +1277,11 @@ export class ThreadStore {
     return this.getWorkerProfile(input.projectPath) as WorkerProfile
   }
 
+  deleteWorkerProfile(projectPath: string): boolean {
+    this.assertOpen()
+    return this.database.prepare('DELETE FROM project_worker_profiles WHERE project_path = ?').run(projectPath).changes > 0
+  }
+
   close(): void {
     if (this.closed) return
 

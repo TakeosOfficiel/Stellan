@@ -157,8 +157,10 @@ export class ProjectTools {
   }
 
   async readFile(relativePath: string): Promise<string> {
+    const target = await this.safePath(relativePath)
+    if (!(await stat(target)).isFile()) throw new Error('Path must reference a project file')
     const handle = await open(
-      await this.safePath(relativePath),
+      target,
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
     )
     try {
@@ -172,8 +174,10 @@ export class ProjectTools {
     if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 1_000_000) {
       throw new Error('File preview limit is invalid')
     }
+    const target = await this.safePath(relativePath)
+    if (!(await stat(target)).isFile()) throw new Error('Path must reference a project file')
     const handle = await open(
-      await this.safePath(relativePath),
+      target,
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
     )
     try {
@@ -266,7 +270,7 @@ export class ProjectTools {
     const result = await this.run('git', [
       '-c', 'core.fsmonitor=false',
       '-c', `safe.directory=${this.root}`,
-      'status', '--short'
+      'status', '--short', '--untracked-files=all'
     ], {}, sanitizedGitEnvironment())
     if (result.outputTruncated) throw new Error('Git status exceeded the output limit')
     if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Unable to read Git status')
@@ -297,7 +301,7 @@ export class ProjectTools {
     const status = await this.run('git', [
       '-c', 'core.fsmonitor=false',
       '-c', `safe.directory=${this.root}`,
-      'status', '--porcelain=v1', '-z'
+      'status', '--porcelain=v1', '-z', '--untracked-files=all'
     ], {}, sanitizedGitEnvironment())
     if (status.outputTruncated) throw new Error('Git status exceeded the output limit')
     if (status.exitCode !== 0) throw new Error(status.stderr.trim() || 'Unable to read Git status')
@@ -328,8 +332,12 @@ export class ProjectTools {
     if (!relativePath || path.isAbsolute(relativePath) || relativePath.includes('\0')) {
       throw new Error('Path must be relative to the project')
     }
-    if (relativePath.split(/[\\/]/).includes('..')) {
+    const parts = relativePath.split(/[\\/]/)
+    if (parts.includes('..')) {
       throw new Error('Path traversal is not allowed')
+    }
+    if (parts.some((part) => part.toLowerCase() === '.git')) {
+      throw new Error('Git metadata is protected')
     }
 
     const target = path.resolve(this.root, relativePath)

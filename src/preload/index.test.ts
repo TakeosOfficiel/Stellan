@@ -73,6 +73,15 @@ describe('portal preload IPC', () => {
     ])
   })
 
+  it('deletes a project through its persisted project path', async () => {
+    await api.deleteProject({ projectPath: '/private/project' })
+
+    expect(mocks.invoke.mock.calls.at(-1)).toEqual([
+      'project:delete',
+      { projectPath: '/private/project' }
+    ])
+  })
+
   it('persists an explicit primary model selection on the active thread', async () => {
     await api.setThreadModel({ threadId: 'thread', model: 'qwen3.5:4b' })
 

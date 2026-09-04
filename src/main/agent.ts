@@ -436,6 +436,15 @@ function parseFallbackToolCalls(content: string): OllamaToolCall[] {
   return parsed.data.map((file) => ({ function: { name: 'write_file', arguments: file } }))
 }
 
+function parseSingleAssignedFileCall(content: string, writeScope?: ReadonlySet<string>): OllamaToolCall[] {
+  if (!writeScope || writeScope.size !== 1) return []
+  const fences = [...content.matchAll(/```[^\r\n]*\r?\n([\s\S]*?)```/g)]
+  if (fences.length !== 1 || !fences[0]?.[1]?.trim()) return []
+  const path = [...writeScope][0]
+  if (!path) return []
+  return [{ function: { name: 'write_file', arguments: { path, content: fences[0][1].replace(/\r?\n$/, '') } } }]
+}
+
 const FALLBACK_FILE_FORMAT = `Réponds uniquement avec un ou plusieurs blocs de fichiers complets dans ce format, sans Markdown, JSON, commentaire ni texte autour :
 <stellan_file path="index.html">
 contenu complet non échappé
@@ -700,6 +709,30 @@ export type WorkerResult = {
   summary: string
   files: string[]
   status: 'done' | 'error'
+}
+
+export function normalizeWebsiteWorkerTasks(tasks: readonly WorkerTask[]): WorkerTask[] {
+  const files = tasks.flatMap((task) => task.files)
+  const nestedIndexes = files.filter((file) => normalizeWorkerPath(file).toLowerCase() === 'assets/index.html')
+  const isWebsiteBundle = nestedIndexes.length === 1
+    && files.some((file) => /\.css$/i.test(file))
+    && files.some((file) => /\.(?:js|mjs|cjs)$/i.test(file))
+    && !files.some((file) => normalizeWorkerPath(file) === 'index.html')
+  if (!isWebsiteBundle) return tasks.map((task) => ({ ...task, files: [...task.files] }))
+  const nestedIndex = normalizeWorkerPath(nestedIndexes[0]!)
+  return tasks.map((task) => ({
+    ...task,
+    files: task.files.map((file) => normalizeWorkerPath(file) === nestedIndex ? 'index.html' : file)
+  }))
+}
+
+function isCompactWebsiteWorkerPlan(tasks: readonly WorkerTask[]): boolean {
+  const files = tasks.flatMap((task) => task.files)
+  return tasks.length <= 4
+    && files.length <= 4
+    && files.some((file) => /\.html?$/i.test(file))
+    && files.some((file) => /\.css$/i.test(file))
+    && files.some((file) => /\.(?:js|mjs|cjs)$/i.test(file))
 }
 
 type ToolStatus = 'running' | 'done' | 'denied' | 'error'
@@ -996,7 +1029,7 @@ async function executeTool(
     }
     if (name === 'create_workers') {
       if (!options.spawnWorkers) return { content: 'Les workers enfants ne sont pas disponibles ici.', status: 'denied' }
-      const { tasks } = workerTasksSchema.parse(input)
+      const tasks = normalizeWebsiteWorkerTasks(workerTasksSchema.parse(input).tasks)
       const invalidFiles = tasks.flatMap((task) => task.files.filter((file) => !validWorkerFilePath(file)))
       if (invalidFiles.length > 0) {
         return {
@@ -1092,9 +1125,9 @@ export function buildCodingAgentSystemPrompt(options: Pick<CodingAgentOptions,
 >): string {
   const gitRules = options.isGitRepository === false
     ? '\n- Ce projet n’est pas un dépôt Git : n’utilise ni les outils Git ni une commande Git.'
-    : '\n- Utilise git_status et git_diff pour inspecter Git. Ne crée un commit ou un push que si l’utilisateur le demande explicitement dans son message actuel. Les autres commandes Git modificatrices sont interdites.'
+    : '\n- Ne modifie et ne supprime JAMAIS .git, .git/** ou les métadonnées Git. Utilise exclusivement git_status, git_diff et les commandes Git autorisées pour interagir avec Git. Ne crée un commit ou un push que si l’utilisateur le demande explicitement dans son message actuel. Les autres commandes Git modificatrices sont interdites.'
   const workerRules = options.spawnWorkers
-    ? `\n\nWORKERS\n- Utilise create_workers si l’utilisateur demande plusieurs workers, ou si au moins deux tâches réellement indépendantes portent sur des fichiers différents. Pour une petite tâche, travaille directement.\n- Inspecte d’abord l’arborescence et les fichiers pertinents. Si le projet est vide, définis directement une structure cohérente avant de répartir le travail.\n- Attribue à chaque worker des chemins relatifs complets et exclusifs. Chaque worker doit avoir au moins un fichier. Chaque entrée désigne un fichier, jamais un dossier : écris css/styles.css en une seule entrée, pas css et styles.css. Ne crée jamais un worker chargé de créer d’autres workers. Aucun fichier ne doit appartenir à deux workers. Ne délègue pas l’intégration finale.\n- Selon les ressources disponibles, seuls certains workers démarrent immédiatement et les autres attendent automatiquement.\n- Si un worker échoue, conserve tous les résultats marqués done. Ne recrée jamais de worker pour leurs fichiers. Comprends l’erreur avant de redéléguer les tâches en échec ; une seule nouvelle tentative worker est permise. Essaie ensuite une autre approche toi-même ou explique précisément le blocage à l’utilisateur.\n- Après leur retour, le coordinateur relit les résultats, effectue l’intégration nécessaire et lance les vérifications.`
+    ? `\n\nWORKERS\n- Utilise create_workers si l’utilisateur demande plusieurs workers, ou si au moins deux tâches réellement indépendantes portent sur des fichiers différents. Pour une petite tâche, travaille directement. Un petit site HTML/CSS/JavaScript est un ensemble couplé : ne crée pas un worker par fichier sauf demande explicite de l’utilisateur.\n- Inspecte d’abord l’arborescence et les fichiers pertinents. Si le projet est vide, définis directement une structure cohérente avant de répartir le travail. Pour un nouveau site statique, index.html DOIT être à la racine du projet, jamais dans assets ; ses liens doivent viser les chemins CSS et JavaScript exacts.\n- Attribue à chaque worker des chemins relatifs complets et exclusifs. Chaque worker doit avoir au moins un fichier. Chaque entrée désigne un fichier, jamais un dossier : écris css/styles.css en une seule entrée, pas css et styles.css. Ne crée jamais un worker chargé de créer d’autres workers. Aucun fichier ne doit appartenir à deux workers. Ne délègue pas l’intégration finale.\n- Selon les ressources disponibles, seuls certains workers démarrent immédiatement et les autres attendent automatiquement.\n- Si un worker échoue, conserve tous les résultats marqués done. Ne recrée jamais de worker pour leurs fichiers. Comprends l’erreur avant de redéléguer les tâches en échec ; une seule nouvelle tentative worker est permise. Essaie ensuite une autre approche toi-même ou explique précisément le blocage à l’utilisateur.\n- Après leur retour, le coordinateur relit les résultats, effectue l’intégration nécessaire et lance les vérifications.`
     : options.writeScope
       ? '\n\nWORKER ENFANT\n- Tu peux lire le projet pour comprendre le contexte, mais tu ne modifies que les chemins de fichiers exacts qui te sont attribués. write_file crée automatiquement leurs dossiers parents : écris directement le fichier demandé et ne tente pas de lancer mkdir. N’essaie pas de lancer des commandes, de créer d’autres workers ou de modifier un autre fichier.'
       : ''
@@ -1378,6 +1411,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
 
     if (!discussionMode && result.toolCalls.length === 0) {
       const fallbackCalls = parseFallbackToolCalls(result.content)
+      if (fallbackCalls.length === 0) fallbackCalls.push(...parseSingleAssignedFileCall(result.content, options.writeScope))
       if (fallbackCalls.length > 0) result = { content: '', toolCalls: fallbackCalls }
     }
 
@@ -1397,6 +1431,22 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         call.function.arguments = requestedActivityEngine === 'neither-yes-nor-no'
           ? { action: { type: 'answer', text: latestUserContent } }
           : normalizeActivityActionArguments(call.function.arguments)
+      }
+    }
+
+    if (!multipleWorkersRequested && result.toolCalls.length === 1 && result.toolCalls[0]?.function.name === 'create_workers') {
+      const plan = workerTasksSchema.safeParse(result.toolCalls[0].function.arguments)
+      if (plan.success && isCompactWebsiteWorkerPlan(plan.data.tasks)) {
+        if (!workerCoordinationDisabled) {
+          workerCoordinationDisabled = true
+          if (result.content.trim()) conversation.push({ role: 'assistant', content: result.content })
+          conversation.push({
+            role: 'user',
+            content: 'Ce petit site HTML/CSS/JavaScript est un seul ensemble couplé. Ne crée aucun worker. Réalise-le directement avec les outils de fichiers, place index.html à la racine et vérifie ses liens vers le CSS et le JavaScript.'
+          })
+          continue
+        }
+        result = { content: result.content, toolCalls: [] }
       }
     }
 

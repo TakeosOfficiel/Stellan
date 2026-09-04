@@ -52,7 +52,7 @@ describe('ContainerProjectTools', () => {
       memoryLimit: '4096m'
     })
     expect(executor.mock.calls[3]?.[0].command).toEqual([
-      'git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'status', '--short'
+      'git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace', 'status', '--short', '--untracked-files=all'
     ])
     expect(executor.mock.calls[4]?.[0].command).toEqual([
       'git', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=/workspace',
@@ -76,6 +76,26 @@ describe('ContainerProjectTools', () => {
     expect(executor.mock.calls[1]?.[0].command).toContain('src/a.ts')
     expect(executor.mock.calls[1]?.[0].command.join('\n')).toContain('fs.rmdirSync(directory)')
     expect(executor.mock.calls[1]?.[0].command.join('\n')).toContain('directory !== root')
+  })
+
+  it('applies Git metadata protection to every container file operation', async () => {
+    const executor = vi.fn<typeof executeInWorkerContainer>().mockResolvedValue(result())
+    const tools = new ContainerProjectTools(profile, 'thread-123', 'C:\\project', null, executor)
+
+    await tools.readFile('.git/config')
+
+    const script = executor.mock.calls[0]?.[0].command.join('\n') ?? ''
+    expect(script).toContain("part.toLowerCase() === '.git'")
+    expect(script).toContain('Métadonnées Git protégées')
+  })
+
+  it('rejects directories before trying to read them as files in the container', async () => {
+    const executor = vi.fn<typeof executeInWorkerContainer>().mockResolvedValue(result())
+    const tools = new ContainerProjectTools(profile, 'thread-123', 'C:\\project', null, executor)
+
+    await tools.readFile('assets')
+
+    expect(executor.mock.calls[0]?.[0].command.join('\n')).toContain("lstatSync(target).isFile()")
   })
 
   it('returns reviewable changes and line counts for untracked files', async () => {

@@ -118,7 +118,7 @@ export function WorkbenchPanel({
   const [portalBusy, setPortalBusy] = useState<'starting' | 'stopping' | null>(null)
   const [portalError, setPortalError] = useState<string | null>(null)
   const [terminalStartedForThreadId, setTerminalStartedForThreadId] = useState<string | null>(null)
-  const ready = Boolean(thread?.projectPath && thread.environmentStatus === 'active')
+  const ready = Boolean(active && thread?.projectPath && thread.environmentStatus === 'active')
   const panelId = thread?.id ?? 'empty'
 
   useEffect(() => {

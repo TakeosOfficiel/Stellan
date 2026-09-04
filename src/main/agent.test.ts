@@ -9,6 +9,7 @@ import {
   compactConversation,
   MAX_CONVERSATION_CHARACTERS,
   normalizeWorkerPath,
+  normalizeWebsiteWorkerTasks,
   runCodingAgent,
   type WorkerTask
 } from './agent'
@@ -21,6 +22,18 @@ describe('normalizeWorkerPath', () => {
     expect(normalizeWorkerPath('./Src/Index.ts. ', 'win32')).toBe('src/index.ts')
     expect(normalizeWorkerPath('src\\INDEX.ts', 'win32')).toBe('src/index.ts')
     expect(normalizeWorkerPath('Src/Index.ts', 'linux')).toBe('Src/Index.ts')
+  })
+
+  it('keeps a standalone website entry point at the project root', () => {
+    expect(normalizeWebsiteWorkerTasks([
+      { title: 'HTML', instructions: 'Structure', files: ['assets/index.html'] },
+      { title: 'CSS', instructions: 'Styles', files: ['assets/style.css'] },
+      { title: 'JavaScript', instructions: 'Interactions', files: ['assets/script.js'] }
+    ])).toEqual([
+      { title: 'HTML', instructions: 'Structure', files: ['index.html'] },
+      { title: 'CSS', instructions: 'Styles', files: ['assets/style.css'] },
+      { title: 'JavaScript', instructions: 'Interactions', files: ['assets/script.js'] }
+    ])
   })
 })
 
@@ -49,6 +62,7 @@ describe('agent guardrails', () => {
     expect(coordinator).toContain('Ne simule pas toi-même un état ou une vérification')
     expect(coordinator).toContain('avance avec l’hypothèse la plus raisonnable')
     expect(coordinator).toContain('action à risque élevé exige une confirmation')
+    expect(coordinator).toContain('Ne modifie et ne supprime JAMAIS .git')
     expect(coordinator).toContain('Ne crée un commit ou un push que si l’utilisateur le demande explicitement')
     expect(child).toContain('tu ne modifies que les chemins de fichiers exacts')
     expect(child).toContain('write_file crée automatiquement leurs dossiers parents')
@@ -1097,6 +1111,31 @@ describe('runCodingAgent', () => {
     expect(onContent).toHaveBeenCalledWith('La page Minecraft a été créée.')
   })
 
+  it('recovers a single worker file from one Markdown code block', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: 'Voici le style demandé :\n```css\nbody { color: green; }\n```' },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le style est créé.' }, done: true }])))
+
+    await runCodingAgent({
+      model: 'qwen3.5:4b',
+      messages: [{ role: 'user', content: 'Crée le style du site.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      writeScope: new Set(['assets/style.css'])
+    })
+
+    await expect(readFile(join(projectPath, 'assets/style.css'), 'utf8')).resolves.toBe('body { color: green; }')
+  })
+
   it('accepts the official Qwen-Agent textual tool-call format on recovery', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
@@ -1890,6 +1929,50 @@ describe('runCodingAgent', () => {
       'create_workers'
     ])
     expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('explicitement demandé plusieurs workers')
+  })
+
+  it('keeps a small coupled website in the coordinator unless workers were requested', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const tasks = [
+      { title: 'HTML', instructions: 'Structure', files: ['assets/index.html'] },
+      { title: 'CSS', instructions: 'Styles', files: ['assets/style.css'] },
+      { title: 'JavaScript', instructions: 'Interactions', files: ['assets/script.js'] }
+    ]
+    const spawnWorkers = vi.fn()
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'create_workers', arguments: { tasks } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [
+          { function: { name: 'write_file', arguments: { path: 'index.html', content: '<link rel="stylesheet" href="assets/style.css"><script src="assets/script.js"></script>' } } },
+          { function: { name: 'write_file', arguments: { path: 'assets/style.css', content: 'body { color: green; }' } } },
+          { function: { name: 'write_file', arguments: { path: 'assets/script.js', content: 'console.log("ready")' } } }
+        ] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le site est prêt.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+
+    await runCodingAgent({
+      model: 'qwen3.5:4b',
+      messages: [{ role: 'user', content: 'Crée une page web cookie clicker Minecraft.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      spawnWorkers
+    })
+
+    expect(spawnWorkers).not.toHaveBeenCalled()
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('Ne crée aucun worker')
+    await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toContain('assets/style.css')
+    await expect(readFile(join(projectPath, 'assets/style.css'), 'utf8')).resolves.toContain('green')
+    await expect(readFile(join(projectPath, 'assets/script.js'), 'utf8')).resolves.toContain('ready')
   })
 
   it('lets the coordinator inspect an empty project before creating workers', async () => {

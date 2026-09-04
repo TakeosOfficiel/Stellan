@@ -45,6 +45,7 @@ import { createWorkerCommandExecutor } from './worker-runtime'
 import { WorkerScheduler } from './worker-scheduler'
 import {
   configureManagedWslRuntime,
+  deletePrivateProject,
   ensureManagedWslRuntime,
   importPrivateProject,
   installWslFeature,
@@ -69,6 +70,7 @@ const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
 const PROJECT_CREATE_CHANNEL = 'project:create'
+const PROJECT_DELETE_CHANNEL = 'project:delete'
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_CANCEL_CHANNEL = 'chat:cancel'
 const CHAT_LIST_ACTIVE_CHANNEL = 'chat:list-active'
@@ -152,6 +154,9 @@ const requestIdSchema = z.uuid()
 const deleteThreadSchema = z.object({
   threadId: z.uuid(),
   discardChanges: z.boolean()
+})
+const deleteProjectSchema = z.object({
+  projectPath: z.string().min(1).max(10_000)
 })
 const setThreadModelSchema = z.object({
   threadId: z.uuid(),
@@ -742,7 +747,8 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
               const workers = tasks.map((task, taskIndex) => {
                 const childController = new AbortController()
                 const workerSignal = AbortSignal.any([controller.signal, childController.signal])
-                const directive = `${task.instructions}\n\nTu es responsable uniquement de ces chemins de fichiers exacts :\n${task.files.join('\n')}\n\nÉcris directement ces chemins avec write_file. Les dossiers parents manquants sont créés automatiquement ; ne lance pas mkdir.`
+                const projectStructure = tasks.map((candidate) => `- ${candidate.title} : ${candidate.files.join(', ')}`).join('\n')
+                const directive = `${task.instructions}\n\nStructure globale attribuée :\n${projectStructure}\nRespecte ces chemins dans les imports, liens HTML et références entre fichiers.\n\nTu es responsable uniquement de ces chemins de fichiers exacts :\n${task.files.join('\n')}\n\nÉcris directement ces chemins avec write_file. Les dossiers parents manquants sont créés automatiquement ; ne lance pas mkdir.`
                 const createdChild = store.createThread({
                   title: task.title,
                   parentThreadId: thread.id,
@@ -1176,10 +1182,8 @@ app.whenReady().then(() => {
       if (privateProject) await rm(source, { recursive: true, force: true })
       if (!privateProject) {
         const tools = await ProjectTools.create(projectPath)
-        await tools.writeFile('.gitkeep', '')
         await tools.runCommand('git', ['init'], { timeoutMs: 10_000 })
-        await tools.runCommand('git', ['add', '.gitkeep'], { timeoutMs: 10_000 })
-        await tools.runCommand('git', ['-c', 'user.name=Stellan', '-c', 'user.email=stellan@localhost', 'commit', '-m', 'Initial project'], { timeoutMs: 10_000 })
+        await tools.runCommand('git', ['-c', 'user.name=Stellan', '-c', 'user.email=stellan@localhost', 'commit', '--allow-empty', '-m', 'Initial project'], { timeoutMs: 10_000 })
       }
       approvedProjectPaths.set(projectPath, 'git')
       return { path: projectPath, name: projectName }
@@ -1187,6 +1191,64 @@ app.whenReady().then(() => {
       await rm(source, { recursive: true, force: true })
       throw error
     }
+  })
+  handle(PROJECT_DELETE_CHANNEL, async (event, input: unknown) => {
+    const { projectPath } = deleteProjectSchema.parse(input)
+    const store = getThreadStore()
+    const projectThreads = store.listThreads().filter((thread) => thread.projectPath === projectPath)
+    if (projectThreads.length === 0) return { deleted: false, deletedPrivateData: false }
+
+    const projectThreadIds = new Set(projectThreads.map((thread) => thread.id))
+    const activeRun = store.listActiveAgentRuns().some((run) => projectThreadIds.has(run.threadId))
+    if (activeRun || projectThreads.some((thread) => workerScheduler.hasThread(thread.id) || activeThreadChats.has(thread.id))) {
+      throw new Error('Arrêtez les générations et attendez la fin des workers avant de supprimer ce projet.')
+    }
+
+    const profile = store.getWorkerProfile(projectPath)
+    for (const thread of projectThreads) {
+      await portalManager.close(thread.id, event.sender.id)
+      await terminalManager.close(thread.id, event.sender.id)
+      if (profile?.mode === 'container' && profile.runtime) {
+        await removeWorkerContainer(profile.runtime, thread.id)
+      }
+    }
+
+    const rootThreads = projectThreads.filter((thread) => !thread.parentThreadId || !projectThreadIds.has(thread.parentThreadId))
+    for (const thread of rootThreads) {
+      if (!thread.workspacePath || thread.workspaceMode !== 'worktree') continue
+      const managedProject = process.platform === 'win32' && isManagedProjectWindowsPath(projectPath)
+      const workspaceRoot = managedProject
+        ? join(dirname(projectPath), 'worktrees')
+        : join(app.getPath('userData'), 'workspaces')
+      await removeThreadWorktree(
+        projectPath,
+        workspaceRoot,
+        thread.id,
+        true,
+        managedProject ? runManagedWslCommand : undefined
+      )
+    }
+
+    let deletedPrivateData = false
+    if (process.platform === 'win32' && isManagedProjectWindowsPath(projectPath)) {
+      await deletePrivateProject(projectPath)
+      deletedPrivateData = true
+    } else {
+      const privateProjectsRoot = resolve(app.getPath('userData'), 'project-seeds')
+      const candidate = resolve(projectPath)
+      if (dirname(candidate) === privateProjectsRoot && /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(basename(candidate))) {
+        await rm(candidate, { recursive: true, force: true })
+        deletedPrivateData = true
+      }
+    }
+
+    for (const thread of rootThreads) store.deleteThread(thread.id)
+    store.deleteWorkerProfile(projectPath)
+    approvedProjectPaths.delete(projectPath)
+    for (const [senderId, threadId] of activeThreadOwners) {
+      if (projectThreadIds.has(threadId)) activeThreadOwners.delete(senderId)
+    }
+    return { deleted: true, deletedPrivateData }
   })
   handle(THREADS_LIST_CHANNEL, () => getThreadStore().listThreads())
   handle(THREADS_SET_ACTIVE_CHANNEL, async (event, input: unknown) => {
@@ -1759,6 +1821,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
   ipcMain.removeHandler(PROJECT_CREATE_CHANNEL)
+  ipcMain.removeHandler(PROJECT_DELETE_CHANNEL)
   ipcMain.removeHandler(CHAT_START_CHANNEL)
   ipcMain.removeHandler(CHAT_CANCEL_CHANNEL)
   ipcMain.removeHandler(CHAT_LIST_ACTIVE_CHANNEL)

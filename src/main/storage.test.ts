@@ -580,6 +580,9 @@ describe('ThreadStore', () => {
         memoryMb: 2048,
         maxConcurrentWorkers: 3
       })
+      expect(reopened.deleteWorkerProfile('/project')).toBe(true)
+      expect(reopened.deleteWorkerProfile('/project')).toBe(false)
+      expect(reopened.getWorkerProfile('/project')).toBeNull()
     } finally {
       reopened.close()
     }

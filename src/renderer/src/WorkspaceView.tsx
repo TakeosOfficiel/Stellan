@@ -83,6 +83,11 @@ type PendingThreadDeletion = {
   changes: string
 }
 
+type PendingProjectDeletion = {
+  path: string
+  name: string
+}
+
 type ContentEvent = Extract<ChatEvent, { type: 'content' }>
 
 const CHAT_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
@@ -363,6 +368,9 @@ export function WorkspaceView({
   const [mobileWorkbenchOpen, setMobileWorkbenchOpen] = useState(false)
   const [pendingThreadDeletion, setPendingThreadDeletion] = useState<PendingThreadDeletion | null>(null)
   const [deletingThread, setDeletingThread] = useState(false)
+  const [pendingProjectDeletion, setPendingProjectDeletion] = useState<PendingProjectDeletion | null>(null)
+  const [deletingProject, setDeletingProject] = useState(false)
+  const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null)
   const [visitedWorkbenchThreads, setVisitedWorkbenchThreads] = useState<string[]>([])
   const [workbenchWidth, setWorkbenchWidth] = useState(() => {
     const stored = Number(localStorage.getItem('stellan:workbench-width'))
@@ -611,6 +619,12 @@ export function WorkspaceView({
         return
       }
 
+      if (pendingProjectDeletion && !deletingProject) {
+        event.preventDefault()
+        setPendingProjectDeletion(null)
+        return
+      }
+
       if (newProjectName !== null && !creatingProject) {
         event.preventDefault()
         setNewProjectName(null)
@@ -639,7 +653,7 @@ export function WorkspaceView({
 
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [creatingProject, deletingThread, newProjectName, pendingThreadDeletion, resourceSettings, runHistoryOpen, savingResources, threadMenuOpen])
+  }, [creatingProject, deletingProject, deletingThread, newProjectName, pendingProjectDeletion, pendingThreadDeletion, resourceSettings, runHistoryOpen, savingResources, threadMenuOpen])
 
   useEffect(() => {
     const dialog = dialogRef.current
@@ -669,7 +683,7 @@ export function WorkspaceView({
       dialogTriggerRef.current?.focus()
       dialogTriggerRef.current = null
     }
-  }, [newProjectName !== null, pendingThreadDeletion !== null, resourceSettings !== null])
+  }, [newProjectName !== null, pendingProjectDeletion !== null, pendingThreadDeletion !== null, resourceSettings !== null])
 
   useEffect(() => {
     if (!shortcut || handledShortcutRef.current === shortcut) return
@@ -873,6 +887,35 @@ export function WorkspaceView({
       if (activeThreadId === threadId || threads.find((thread) => thread.id === activeThreadId)?.parentThreadId === threadId) await newThread()
     } catch { /* Le thread actif reste affiché. */ }
     finally { setDeletingThread(false) }
+  }
+
+  async function removeProject(): Promise<void> {
+    if (!pendingProjectDeletion) return
+    const { path: projectPath } = pendingProjectDeletion
+    const deletedThreadIds = new Set(threads.filter((thread) => thread.projectPath === projectPath).map((thread) => thread.id))
+    setDeletingProject(true)
+    setDeleteProjectError(null)
+    try {
+      const result = await window.localAgent.deleteProject({ projectPath })
+      if (!result.deleted) {
+        setDeleteProjectError('Ce projet n’existe plus dans Stellan.')
+        return
+      }
+      setThreads((current) => current.filter((thread) => thread.projectPath !== projectPath))
+      setPendingProjectDeletion(null)
+      if (project?.path === projectPath || (activeThreadId && deletedThreadIds.has(activeThreadId))) {
+        await window.localAgent.setActiveThread(null)
+        setProject(null)
+        setActiveThreadId(null)
+        setPrompt('')
+        setPendingImages([])
+        setRunHistoryOpen(false)
+      }
+    } catch (error) {
+      setDeleteProjectError(error instanceof Error ? error.message : 'La suppression du projet a échoué.')
+    } finally {
+      setDeletingProject(false)
+    }
   }
 
   async function exportProject(): Promise<void> {
@@ -1274,7 +1317,21 @@ export function WorkspaceView({
               <div className="thread-group-heading">
                 <span className="project-branch-icon" aria-hidden="true"><FolderGit2 /></span>
                 <strong>{group.name}</strong>
-                <span>{threads.filter((thread) => threadProjectKey(thread) === group.key).length}</span>
+                <span className="thread-group-count">{threads.filter((thread) => threadProjectKey(thread) === group.key).length}</span>
+                {!group.key.startsWith('local:') && (
+                  <button
+                    className="project-delete"
+                    type="button"
+                    aria-label={`Supprimer le projet ${group.name}`}
+                    title="Supprimer le projet de Stellan"
+                    disabled={threads.some((thread) => threadProjectKey(thread) === group.key && Boolean(runsByThread[thread.id]))}
+                    onClick={(event) => {
+                      dialogTriggerRef.current = event.currentTarget
+                      setDeleteProjectError(null)
+                      setPendingProjectDeletion({ path: group.key, name: group.name })
+                    }}
+                  ><Trash2 aria-hidden="true" /></button>
+                )}
               </div>
               <div className="thread-tree">
                 {group.threads.map((thread) => (
@@ -1415,6 +1472,22 @@ export function WorkspaceView({
               return <li key={line}><code>{change.path}</code><span>{change.label}</span></li>
             })}</ul>
             <footer><button data-dialog-initial type="button" disabled={deletingThread} onClick={() => setPendingThreadDeletion(null)}>Conserver le thread</button><button className="danger-button" type="button" disabled={deletingThread} onClick={() => void removeThread(pendingThreadDeletion.threadId, true)}>{deletingThread ? 'Suppression…' : 'Supprimer définitivement'}</button></footer>
+          </section>
+        </div>
+      )}
+
+      {pendingProjectDeletion && (
+        <div className="dialog-backdrop delete-thread-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !deletingProject) setPendingProjectDeletion(null)
+        }}>
+          <section ref={dialogRef} className="dialog-surface delete-thread-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-project-title" aria-describedby="delete-project-description">
+            <header>
+              <div className="delete-thread-heading"><span aria-hidden="true"><CircleAlert /></span><div><small>PROJET ET CONVERSATIONS</small><h2 id="delete-project-title">Supprimer {pendingProjectDeletion.name} ?</h2></div></div>
+              <button className="icon-button" type="button" aria-label="Fermer" disabled={deletingProject} onClick={() => setPendingProjectDeletion(null)}><X aria-hidden="true" /></button>
+            </header>
+            <p id="delete-project-description">Toutes les conversations et tous les environnements privés de ce projet seront supprimés définitivement. Si ce projet a été importé, son dossier original restera intact.</p>
+            {deleteProjectError && <p className="resource-error" role="alert">{deleteProjectError}</p>}
+            <footer><button data-dialog-initial type="button" disabled={deletingProject} onClick={() => setPendingProjectDeletion(null)}>Conserver le projet</button><button className="danger-button" type="button" disabled={deletingProject} onClick={() => void removeProject()}>{deletingProject ? 'Suppression…' : 'Supprimer définitivement'}</button></footer>
           </section>
         </div>
       )}

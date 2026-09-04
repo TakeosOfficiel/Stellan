@@ -42,10 +42,9 @@ if [ ! -d .git ]; then git init; fi
 rm -rf .git/hooks && mkdir -p .git/hooks
 git config core.hooksPath /dev/null
 git config core.fsmonitor false
-[ -n "$(find . -mindepth 1 -maxdepth 1 ! -name .git -print -quit)" ] || touch .gitkeep
 git add -A
 if ! git rev-parse --verify HEAD >/dev/null 2>&1 || ! git diff --cached --quiet; then
-  git -c user.name="Stellan" -c user.email="stellan@localhost" commit --no-verify -m "Stellan snapshot"
+  git -c user.name="Stellan" -c user.email="stellan@localhost" commit --allow-empty --no-verify -m "Stellan snapshot"
 fi`
 export const MANAGED_RUNTIME_PACKAGES = ['openrc', 'docker', 'docker-cli', 'nodejs', 'npm', 'git', 'ripgrep', 'bash', 'coreutils', 'iproute2', 'e2fsprogs', 'util-linux'] as const
 export const WSL_ADDRESS_COMMAND = ['/sbin/ip', '-o', '-4', 'addr', 'show', 'dev', 'eth0'] as const
@@ -278,14 +277,33 @@ export function isManagedProjectWindowsPath(value: string): boolean {
   return managedLinuxPathFromWindows(value)?.startsWith(`${PRIVATE_PROJECTS_ROOT}/projects/`) ?? false
 }
 
+export function managedPrivateProjectId(projectPath: string): string | null {
+  const linuxPath = managedLinuxPathFromWindows(projectPath)
+  const projectId = linuxPath?.match(new RegExp(`^${PRIVATE_PROJECTS_ROOT}/projects/([a-f\\d-]{36})(?:/|$)`, 'i'))?.[1]
+  if (!projectId) return null
+  validateProjectId(projectId)
+  return projectId
+}
+
+export async function deletePrivateProject(projectPath: string): Promise<void> {
+  const projectId = managedPrivateProjectId(projectPath)
+  if (!projectId) throw new Error('Ce dossier n’est pas un projet privé géré par Stellan.')
+  await ensureManagedWslRuntime()
+  const target = `${PRIVATE_PROJECTS_ROOT}/projects/${projectId}`
+  const disk = `${PRIVATE_PROJECTS_ROOT}/disks/${projectId}.img`
+  await requireSuccess('Suppression du projet privé', await distroCommand([
+    '/bin/sh', '-lc',
+    'set -eu; target=$1; disk=$2; if mountpoint -q "$target"; then umount "$target"; fi; rm -rf -- "$target"; rm -f -- "$disk"',
+    'delete-private-project', target, disk
+  ], { timeoutMs: 120_000, maxOutputBytes: 100_000 }))
+}
+
 export async function resizePrivateProject(projectPath: string, storageGb: number): Promise<number> {
   if (!Number.isInteger(storageGb) || storageGb < 20 || storageGb > 4_096) {
     throw new Error('Le stockage doit être compris entre 20 et 4096 Go.')
   }
-  const linuxPath = managedLinuxPathFromWindows(projectPath)
-  const projectId = linuxPath?.match(new RegExp(`^${PRIVATE_PROJECTS_ROOT}/projects/([a-f\\d-]{36})(?:/|$)`, 'i'))?.[1]
+  const projectId = managedPrivateProjectId(projectPath)
   if (!projectId) throw new Error('Ce projet n’utilise pas un disque privé redimensionnable.')
-  validateProjectId(projectId)
   await ensureManagedWslRuntime()
   const bytes = storageGb * 1024 * 1024 * 1024
   const disk = `${PRIVATE_PROJECTS_ROOT}/disks/${projectId}.img`
