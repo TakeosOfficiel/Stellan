@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
-import { getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { configureOllamaModelOptions, getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
+
+beforeEach(() => configureOllamaModelOptions({ numCtx: 8_192, numPredict: 1_024 }))
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -144,6 +146,17 @@ describe('warmOllamaModel', () => {
       })
     )
   })
+
+  it('limits the context of a large model even on a high-memory computer', async () => {
+    configureOllamaModelOptions({ numCtx: 32_768, numPredict: 2_048 })
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ done: true }))
+
+    await expect(warmOllamaModel('qwen3.8:27b', fetcher)).resolves.toBe(true)
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).options).toEqual({
+      num_ctx: 8_192,
+      num_predict: 2_048
+    })
+  })
 })
 
 describe('streamOllamaChat', () => {
@@ -221,6 +234,30 @@ describe('streamOllamaChat', () => {
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).options).toEqual({
       num_ctx: 2_048,
       num_predict: 256
+    })
+  })
+
+  it('caps large-model chat context while preserving the configured response budget', async () => {
+    configureOllamaModelOptions({ numCtx: 32_768, numPredict: 2_048 })
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"message":{"content":"OK"},"done":true}\n'))
+        controller.close()
+      }
+    })
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(stream, { status: 200 }))
+
+    await streamOllamaChat(
+      'qwen3.8:27b',
+      [{ role: 'user', content: 'A' }],
+      () => undefined,
+      undefined,
+      fetcher
+    )
+
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).options).toEqual({
+      num_ctx: 8_192,
+      num_predict: 2_048
     })
   })
 

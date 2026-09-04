@@ -65,6 +65,15 @@ function compatibilityLabel(model: CatalogModel): string {
   return 'Non disponible'
 }
 
+function executionEstimate(model: CatalogModel, hardware: SetupInfo['hardware'] | undefined): string {
+  const vram = hardware?.gpus.reduce((largest, gpu) => Math.max(largest, gpu.vramBytes ?? 0), 0) ?? 0
+  if (vram === 0) return 'Calcul prévu : processeur, sauf si une mémoire GPU compatible est détectée.'
+  if (vram >= model.downloadSizeBytes * 1.15) {
+    return `GPU : devrait tenir dans vos ${formatSize(vram)} de VRAM.`
+  }
+  return `GPU + processeur probable : modèle trop grand pour vos ${formatSize(vram)} de VRAM.`
+}
+
 type AppView = 'agent' | 'setup'
 type WorkspaceShortcut = { type: 'new-thread' | 'open-project' }
 
@@ -404,7 +413,7 @@ export function App(): React.JSX.Element {
       <section className="models-section">
         <div className="section-heading">
           <div><p className="eyebrow">CATALOGUE</p><h3>Installer un modèle</h3></div>
-          <p>Les tailles sont approximatives. Le téléchargement nécessite Internet une seule fois.</p>
+          <p>Le téléchargement occupe le disque. La RAM charge le modèle ; la VRAM détermine la part accélérée par le GPU.</p>
         </div>
 
         {setupError && (
@@ -451,9 +460,10 @@ export function App(): React.JSX.Element {
                 <code>{model.id}</code>
                 <p>{model.description}</p>
                 <div className="model-meta">
-                  <span>≈ {formatSize(model.downloadSizeBytes)}</span>
-                  <span>RAM conseillée : {formatSize(model.minimumMemoryBytes)}</span>
+                  <span><strong>Téléchargement</strong> ≈ {formatSize(model.downloadSizeBytes)} sur le disque</span>
+                  <span><strong>Mémoire minimale</strong> {formatSize(model.minimumMemoryBytes)} de RAM</span>
                 </div>
+                <p className="model-execution">{executionEstimate(model, setup?.hardware)}</p>
                 <small>{model.compatibilityReason}</small>
 
                 {downloading && pullProgress?.model === model.id && (

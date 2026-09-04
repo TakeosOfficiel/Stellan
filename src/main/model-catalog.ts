@@ -182,16 +182,20 @@ function getCompatibility(
     .map((gpu) => gpu.vramBytes ?? 0)
     .reduce((largest, current) => Math.max(largest, current), 0)
   const availableMemory = Math.max(knownVram, hardware.totalMemoryBytes * 0.65)
+  const fitsGpu = knownVram >= model.downloadSizeBytes * 1.15
+  const lightweight = model.downloadSizeBytes <= 8 * GB
 
   let compatibility: ModelCompatibility
   let compatibilityReason: string
 
-  if (availableMemory >= model.minimumMemoryBytes * 1.25) {
+  if (availableMemory >= model.minimumMemoryBytes * 1.25 && (fitsGpu || lightweight)) {
     compatibility = 'recommended'
     compatibilityReason = 'Recommandé pour la mémoire détectée.'
   } else if (availableMemory >= model.minimumMemoryBytes) {
     compatibility = 'compatible'
-    compatibilityReason = 'Compatible, avec une vitesse variable selon le GPU.'
+    compatibilityReason = knownVram > 0 && !fitsGpu
+      ? 'Compatible via la RAM, mais une partie du modèle utilisera le processeur.'
+      : 'Compatible, avec une vitesse variable selon le matériel.'
   } else {
     compatibility = 'demanding'
     compatibilityReason = 'Peut être lent ou manquer de mémoire sur cette machine.'

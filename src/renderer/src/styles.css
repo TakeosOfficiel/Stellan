@@ -218,7 +218,9 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .model-card h4 { margin: 18px 0 5px; font-size: 20px; letter-spacing: -0.025em; }
 .model-card code { color: #858995; font-size: 11px; }
 .model-card > p { min-height: 40px; margin: 18px 0 13px; color: #a1a4ad; font-size: 13px; line-height: 1.5; }
-.model-meta { display: flex; gap: 13px; margin-bottom: 10px; color: #70747e; font-size: 10px; }
+.model-meta { display: grid; gap: 5px; margin-bottom: 9px; color: #858a93; font-size: 10px; }
+.model-meta strong { color: #b5bab7; font-weight: 650; }
+.model-card > .model-execution { min-height: 0; margin: 0 0 9px; color: #94aa98; font-size: 10px; line-height: 1.4; }
 .model-card small { min-height: 30px; color: #727681; line-height: 1.4; }
 .model-card > button { width: 100%; margin-top: auto; }
 .progress-block { margin: 14px 0; }

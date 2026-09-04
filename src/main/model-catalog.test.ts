@@ -25,6 +25,16 @@ describe('getModelCatalog', () => {
       .toBe('demanding')
   })
 
+  it('does not recommend a large model that cannot fit in detected VRAM', () => {
+    const model = getModelCatalog(hardware({
+      totalMemoryBytes: 64_000_000_000,
+      gpus: [{ model: 'GPU 16 GB', vramBytes: 16_000_000_000 }]
+    })).find((entry) => entry.id === 'qwen3.8:27b')
+
+    expect(model?.compatibility).toBe('compatible')
+    expect(model?.compatibilityReason).toContain('utilisera le processeur')
+  })
+
   it('marks experimental image generation unsupported on Windows', () => {
     const imageModel = getModelCatalog(hardware()).find(
       (model) => model.id === 'x/flux2-klein:4b'

@@ -68,6 +68,15 @@ let activeOllamaUrl: string = OLLAMA_URLS[0]
 const toolSupportByModel = new Map<string, boolean>()
 const visionSupportByModel = new Map<string, boolean>()
 
+function modelContextOptions(model: string, numCtx?: number): typeof modelOptions {
+  const parameterCount = model.match(/(?:^|[:_-])(\d+(?:\.\d+)?)b(?:$|[_-])/i)?.[1]
+  const modelLimit = parameterCount !== undefined && Number(parameterCount) >= 20 ? 8_192 : modelOptions.num_ctx
+  return {
+    num_ctx: Math.max(1_024, Math.min(modelLimit, numCtx === undefined ? modelOptions.num_ctx : Math.floor(numCtx))),
+    num_predict: modelOptions.num_predict
+  }
+}
+
 export function configureOllamaUrl(url: string | null): void {
   activeOllamaUrl = url ?? OLLAMA_URLS[0]
   toolSupportByModel.clear()
@@ -347,7 +356,7 @@ export async function warmOllamaModel(
         prompt: '',
         stream: false,
         keep_alive: -1,
-        options: modelOptions
+        options: modelContextOptions(model)
       }),
       signal: AbortSignal.timeout(300_000)
     })
@@ -399,10 +408,7 @@ export async function streamOllamaChat(
         think: false,
         keep_alive: -1,
         options: {
-          ...modelOptions,
-          ...(numCtx === undefined
-            ? {}
-            : { num_ctx: Math.max(1_024, Math.min(modelOptions.num_ctx, Math.floor(numCtx))) }),
+          ...modelContextOptions(model, numCtx),
           ...(numPredict === undefined
             ? {}
             : { num_predict: Math.max(1, Math.min(modelOptions.num_predict, Math.floor(numPredict))) })
