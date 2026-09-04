@@ -64,6 +64,16 @@ function activeActivityAction(request: string): boolean {
     || /^(?:stop|arrete|on arrete|fin (?:du jeu|de la partie))[\s:;!.,?]*$/.test(request)
 }
 
+function requestsImageAnalysis(messages: readonly ChatMessage[]): boolean {
+  const latestUser = [...messages].reverse().find((message) => message.role === 'user')
+  if (!latestUser) return false
+  const request = normalizedLatestRequest(messages)
+  const referencesImage = /\b(?:image|photo|capture|screenshot|piece jointe)\b/.test(request)
+  const requestsInspection = /\b(?:analyse|analyser|decris|decrire|regarde|regarder|vois|voit|voir|montre|identifier|quoi|cette)\b/.test(request)
+  return (referencesImage && (requestsInspection || (latestUser.images?.length ?? 0) > 0))
+    || ((latestUser.images?.length ?? 0) > 0 && /\b(?:cette|voici|regarde|analyse|decris)\b/.test(request))
+}
+
 export function classifyIntentByRule(
   messages: readonly ChatMessage[],
   activityContext?: string | null
@@ -74,6 +84,9 @@ export function classifyIntentByRule(
   if (!request) return { intent: 'discussion', clear: true, source: 'rule', reason: 'empty-request' }
   if (requestsSoftwareArtifact(messages)) {
     return { intent: 'code', clear: true, source: 'rule', reason: 'explicit-software-artifact' }
+  }
+  if (requestsImageAnalysis(messages)) {
+    return { intent: 'discussion', clear: true, source: 'rule', reason: 'attached-image-analysis' }
   }
   if (explanatoryActivityRequest(request)) {
     return { intent: 'discussion', clear: true, source: 'rule', reason: 'activity-explanation' }
@@ -109,7 +122,7 @@ function classificationTranscript(messages: readonly ChatMessage[]): string {
   return messages
     .filter((message) => message.role === 'user' || message.role === 'assistant')
     .slice(-3)
-    .map((message) => `${message.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${message.content.slice(0, 1_000)}`)
+    .map((message) => `${message.role === 'user' ? 'Utilisateur' : 'Assistant'}${message.images?.length ? ` [${message.images.length} image${message.images.length > 1 ? 's' : ''} jointe${message.images.length > 1 ? 's' : ''}]` : ''}: ${message.content.slice(0, 1_000)}`)
     .join('\n')
 }
 
@@ -132,7 +145,7 @@ export async function classifyIntent(options: ClassifyIntentOptions): Promise<In
       [
         {
           role: 'system',
-          content: 'Classe uniquement la dernière demande avec son contexte immédiat. CODE = travailler sur un logiciel ou ses fichiers, y compris critiquer, corriger ou demander implicitement de reprendre le résultat logiciel précédent sans employer un verbe d’action. ACTIVITE = jouer ou poursuivre une activité à état. DISCUSSION = répondre ou expliquer sans agir sur le projet. Réponds par exactement un mot : CODE, ACTIVITE ou DISCUSSION.'
+          content: 'Classe uniquement la dernière demande avec son contexte immédiat. CODE = travailler sur un logiciel ou ses fichiers, y compris critiquer, corriger ou demander implicitement de reprendre le résultat logiciel précédent sans employer un verbe d’action. ACTIVITE = jouer ou poursuivre une activité à état. DISCUSSION = répondre, expliquer ou analyser une image jointe sans agir sur le projet. Réponds par exactement un mot : CODE, ACTIVITE ou DISCUSSION.'
         },
         { role: 'user', content: classificationTranscript(options.messages) }
       ],

@@ -861,11 +861,11 @@ body.resizing-workbench { cursor: col-resize; user-select: none; }
 .workbench-empty button { padding: 8px 11px; color: #172019; background: #d9e7dc; font-size: 9px; }
 .workbench-zero { min-height: 260px; }
 .workbench-zero p { margin: 0; font-size: 10px; }
-.change-list { display: grid; gap: 3px; }
-.change-list article { overflow: hidden; border: 1px solid #29312c; border-radius: 6px; background: #131814; }
+.change-list { border-top: 1px solid #202a25; }
+.change-list article { overflow: hidden; border-bottom: 1px solid #202a25; background: transparent; }
 .change-list button {
   display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px;
-  width: 100%; padding: 8px 9px; color: #aeb8b1; background: transparent; text-align: left;
+  width: 100%; padding: 9px 7px; border-radius: 0; color: #aeb8b1; background: transparent; text-align: left;
 }
 .change-list button:hover { background: #18201b; }
 .change-list button > svg { width: 12px; height: 12px; transition: transform 120ms ease; }

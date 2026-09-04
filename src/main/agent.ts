@@ -609,6 +609,10 @@ async function validateStaticWebsite(
   return issues
 }
 
+function staticWebsiteRepairPrompt(issues: readonly string[]): string {
+  return `Le contrôle déterministe du site a trouvé ces problèmes : ${issues.join(' ; ')}. Corrige-les maintenant. La structure obligatoire est index.html, assets/css/style.css et assets/js/game.js. index.html doit référencer exactement les deux chemins assets. Vérifie aussi que chaque identifiant demandé par le JavaScript existe dans le HTML.\n${FALLBACK_FILE_FORMAT}`
+}
+
 function requestsActivityExit(messages: readonly ChatMessage[]): boolean {
   const request = [...messages].reverse().find((message) => message.role === 'user')?.content.trim()
     .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase() ?? ''
@@ -878,7 +882,11 @@ function compactResult(value: unknown): string {
 }
 
 function contextSize(messages: OllamaMessage[]): number {
-  return JSON.stringify(messages).length
+  return JSON.stringify(messages, (key, value: unknown) =>
+    key === 'images' && Array.isArray(value)
+      ? value.map(() => '[image jointe]')
+      : value
+  ).length
 }
 
 function compactToolArguments(message: OllamaMessage): OllamaMessage {
@@ -1254,13 +1262,13 @@ RÉPONSE
 - N’affiche pas de jargon interne, de raisonnement privé, de JSON d’outil ou de phrase technique inutile.${activityRules}`
 }
 
-export function buildConversationSystemPrompt(): string {
+export function buildConversationSystemPrompt(hasAttachedImages = false): string {
   return `Tu es Stellan, un assistant local.
 - Réponds naturellement, directement et dans la langue de l’utilisateur.
 - Adapte la longueur de ta réponse à la demande. Pour une salutation, reste simple et chaleureux.
 - Ne qualifie jamais le message, la question ou le comportement de l’utilisateur de bizarre, étrange, évident ou ridicule.
 - N’invente ni émotion, ni intention, ni contexte personnel. N’utilise pas un ton excessivement familier.
-- Ne parle pas de programmation, de projet, de fichiers ou d’outils si l’utilisateur ne le demande pas.`
+- Ne parle pas de programmation, de projet, de fichiers ou d’outils si l’utilisateur ne le demande pas.${hasAttachedImages ? '\n- Une ou plusieurs images sont réellement jointes à la conversation et accessibles dans les messages. Si l’utilisateur demande ce qu’elles montrent, analyse la plus récente directement : ne prétends pas ne pas l’avoir reçue et ne réponds pas par une salutation générique.' : ''}`
 }
 
 export function buildActiveActivitySystemPrompt(
@@ -1358,7 +1366,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       content: reliableActivityMode
         ? buildActiveActivitySystemPrompt(routedActivityContext, requestedActivityEngine)
         : discussionMode
-          ? buildConversationSystemPrompt()
+          ? buildConversationSystemPrompt(promptMessages.some((message) => (message.images?.length ?? 0) > 0))
         : `${buildCodingAgentSystemPrompt({
             ...options,
             activityContext: routedActivityContext,
@@ -1374,6 +1382,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   let missingWriteRecoveryAttempted = false
   let missingRequestedFilesRecoveryAttempted = false
   let staticWebsiteRecoveryAttempted = false
+  let fallbackFileFormatRequired = false
   let mutationToolAttempted = false
   let workerRequestRecoveryAttempted = false
   let workerToolAttempted = false
@@ -1444,7 +1453,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     const compactedConversation = compactConversation(conversation)
     const toolsForStep = discussionMode
       ? undefined
-      : missingWriteRecoveryAttempted
+      : missingWriteRecoveryAttempted || fallbackFileFormatRequired
       ? undefined
       : workerPlanCorrectionRequired
         ? [CREATE_WORKERS_TOOL]
@@ -1495,6 +1504,19 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         return
       }
       if (error instanceof OllamaIdleTimeoutError && completedWrites.size > 0) {
+        if (options.staticWebsiteContract && options.project) {
+          const websiteIssues = await validateStaticWebsite(options.project, options.staticWebsiteContract)
+          if (websiteIssues.length > 0) {
+            if (!staticWebsiteRecoveryAttempted) {
+              staticWebsiteRecoveryAttempted = true
+              fallbackFileFormatRequired = true
+              conversation.push({ role: 'user', content: staticWebsiteRepairPrompt(websiteIssues) })
+              continue
+            }
+            options.onContent(`Le site reste incomplet après la tentative de correction : ${websiteIssues.join(' ; ')}. Stellan ne le déclare pas terminé.`)
+            return
+          }
+        }
         const files = [...completedWrites]
         options.onContent(`Terminé. ${files.length} fichier${files.length > 1 ? 's' : ''} modifié${files.length > 1 ? 's' : ''} : ${files.map((file) => `\`${file}\``).join(', ')}.`)
         return
@@ -1631,10 +1653,11 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         if (websiteIssues.length > 0) {
           if (!staticWebsiteRecoveryAttempted) {
             staticWebsiteRecoveryAttempted = true
+            fallbackFileFormatRequired = true
             conversation.push({ role: 'assistant', content: result.content })
             conversation.push({
               role: 'user',
-              content: `Le contrôle déterministe du site a trouvé ces problèmes : ${websiteIssues.join(' ; ')}. Corrige-les maintenant. La structure obligatoire est index.html, assets/css/style.css et assets/js/game.js. index.html doit référencer exactement les deux chemins assets. Vérifie aussi que chaque identifiant demandé par le JavaScript existe dans le HTML.\n${FALLBACK_FILE_FORMAT}`
+              content: staticWebsiteRepairPrompt(websiteIssues)
             })
             continue
           }

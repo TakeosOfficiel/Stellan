@@ -13,6 +13,7 @@ import {
   runCodingAgent,
   type WorkerTask
 } from './agent'
+import { OllamaIdleTimeoutError } from './ollama'
 import { ProjectTools } from './project-tools'
 
 const temporaryDirectories: string[] = []
@@ -117,6 +118,35 @@ describe('agent guardrails', () => {
     expect(request.messages[0]?.content).toBe(buildConversationSystemPrompt())
     expect(request.messages[0]?.content).not.toContain('OUTILS ET FICHIERS')
     expect(onContent).toHaveBeenCalledWith('Salut ! Oui, merci 😊 Et toi, comment vas-tu ?')
+  })
+
+  it('passes an attached image to the vision conversation without project tools', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(streamResponse([
+      { message: { content: 'Je vois une fenêtre sombre avec une conversation.' }, done: true }
+    ]))
+    vi.stubGlobal('fetch', fetcher)
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [{
+        role: 'user',
+        content: 'Tu vois quoi sur cette image ?',
+        images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }]
+      }],
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(false)
+    })
+
+    const request = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))
+    expect(request.tools).toBeUndefined()
+    expect(request.messages[0]?.content).toContain('images sont réellement jointes')
+    expect(request.messages[1]).toEqual({
+      role: 'user',
+      content: 'Tu vois quoi sur cette image ?',
+      images: ['aGVsbG8=']
+    })
   })
 
   it('keeps an explicitly conversational request in the chat without forcing file tools', async () => {
@@ -1683,6 +1713,22 @@ describe('runCodingAgent', () => {
     expect(compacted[1]?.content).not.toContain('ancien')
   })
 
+  it('keeps a large attached image without treating its base64 bytes as text context', () => {
+    const imageData = 'a'.repeat(MAX_CONVERSATION_CHARACTERS * 2)
+    const compacted = compactConversation([
+      { role: 'system', content: 'Analyse les images jointes.' },
+      {
+        role: 'user',
+        content: 'Que vois-tu sur cette image ?',
+        images: [{ mimeType: 'image/png', data: imageData }]
+      }
+    ])
+
+    expect(compacted).toHaveLength(2)
+    expect(compacted[1]?.content).toBe('Que vois-tu sur cette image ?')
+    expect(compacted[1]?.images?.[0]?.data).toBe(imageData)
+  })
+
   it('routes authorized commands through the configured worker executor', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
@@ -2082,6 +2128,77 @@ describe('runCodingAgent', () => {
     expect(String(fetcher.mock.calls[2]?.[1]?.body)).toContain('identifiants HTML utilisés par le JavaScript sont absents : mine')
     await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toContain('id="mine"')
     expect(onContent).toHaveBeenCalledWith('Le site cohérent est prêt.')
+  })
+
+  it('forces strict file blocks when a small model creates only the website entry point', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{ message: { tool_calls: [{
+        function: { name: 'write_file', arguments: { path: 'index.html', content: '<link rel="stylesheet" href="assets/css/style.css"><h1>Site vitrine</h1><script src="assets/js/game.js"></script>' } }
+      }] }, done: true }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le site est prêt.' }, done: true }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: '<stellan_file path="assets/css/style.css">\nbody { color: white; }\n</stellan_file>\n<stellan_file path="assets/js/game.js">\nconsole.log("animations ready")\n</stellan_file>' },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Les trois fichiers sont maintenant présents.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:4b',
+      messages: [{ role: 'user', content: 'Créer moi un site vitrine avec quelques animations.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true)
+    })
+
+    const repairRequest = JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))
+    expect(repairRequest.tools).toBeUndefined()
+    expect(repairRequest.messages.at(-1)?.content).toContain('<stellan_file path=')
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('color: white')
+    await expect(readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).resolves.toContain('animations ready')
+    expect(onContent).toHaveBeenCalledWith('Les trois fichiers sont maintenant présents.')
+  })
+
+  it('repairs an incomplete static website instead of declaring success after an idle timeout', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{ message: { tool_calls: [{
+        function: { name: 'write_file', arguments: { path: 'index.html', content: '<link rel="stylesheet" href="assets/css/style.css"><h1>Boutique</h1><script src="assets/js/game.js"></script>' } }
+      }] }, done: true }]))
+      .mockRejectedValueOnce(new OllamaIdleTimeoutError())
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: '<stellan_file path="assets/css/style.css">\nbody { color: white; }\n</stellan_file>\n<stellan_file path="assets/js/game.js">\nconsole.log("ready")\n</stellan_file>' },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le site complet est prêt.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [{ role: 'user', content: 'Créer moi un site web boutique vitrine.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true)
+    })
+
+    const repairRequest = JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))
+    expect(repairRequest.tools).toBeUndefined()
+    expect(repairRequest.messages.at(-1)?.content).toContain('assets/css/style.css')
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('color: white')
+    await expect(readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).resolves.toContain('ready')
+    expect(onContent).not.toHaveBeenCalledWith(expect.stringMatching(/^Terminé\. 1 fichier/))
+    expect(onContent).toHaveBeenCalledWith('Le site complet est prêt.')
   })
 
   it('does not impose the static-site tree on an existing project', async () => {

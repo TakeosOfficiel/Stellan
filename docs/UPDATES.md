@@ -15,7 +15,7 @@ Stellan vérifie `https://update.stellan.takeos.fr` avant de démarrer Ollama ou
     └── Stellan-<version>-linux-x86_64.AppImage
 ```
 
-Conserver les anciens installateurs, AppImages et blockmaps : ils permettent le téléchargement différentiel depuis une ancienne version. Les manifestes `latest*.yml` doivent avoir `Cache-Control: no-cache, no-store, must-revalidate`; les artefacts versionnés peuvent avoir `Cache-Control: public, max-age=31536000, immutable`. Nginx sert nativement les requêtes `Range` nécessaires. HTTPS est obligatoire.
+Le serveur conserve uniquement les paquets de la version actuelle afin d’éviter l’accumulation d’anciens fichiers. Les manifestes `latest*.yml` doivent avoir `Cache-Control: no-cache, no-store, must-revalidate`; les artefacts versionnés peuvent avoir `Cache-Control: public, max-age=31536000, immutable`. Nginx sert nativement les requêtes `Range` nécessaires. HTTPS est obligatoire.
 
 Exemple Nginx :
 
@@ -48,7 +48,7 @@ STELLAN_UPDATE_ROOT=/var/www/update.stellan.takeos.fr \
 ./scripts/deploy-updates.sh
 ```
 
-Le script vérifie tous les fichiers, transfère vers un répertoire temporaire, publie d’abord les binaires et blockmaps, puis remplace les manifestes en dernier. Il n’efface jamais une ancienne version.
+Le script vérifie tous les fichiers, transfère vers un répertoire temporaire, publie d’abord les binaires et blockmaps, puis remplace les manifestes en dernier. Après la bascule atomique, il supprime les paquets des versions précédentes.
 
 ## Amorçage
 

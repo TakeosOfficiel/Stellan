@@ -45,6 +45,29 @@ describe('intent classifier', () => {
     ])).toMatchObject({ intent: 'code', clear: true, source: 'rule' })
   })
 
+  it('routes direct and follow-up image inspection as discussion', () => {
+    const image = { mimeType: 'image/png' as const, data: 'aGVsbG8=' }
+    expect(classifyIntentByRule([
+      { role: 'user', content: 'Tu vois quoi sur cette image ?', images: [image] }
+    ])).toMatchObject({ intent: 'discussion', clear: true, reason: 'attached-image-analysis' })
+    expect(classifyIntentByRule([
+      { role: 'user', content: 'Tu vois quoi sur cette image ?', images: [image] },
+      { role: 'assistant', content: 'Je peux vous aider.' },
+      { role: 'user', content: "Tu voit quoi sur l'image que j'ai envoyée ?" }
+    ])).toMatchObject({ intent: 'discussion', clear: true, reason: 'attached-image-analysis' })
+    expect(classifyIntentByRule([
+      { role: 'user', content: 'cette iomage', images: [image] }
+    ])).toMatchObject({ intent: 'discussion', clear: true, reason: 'attached-image-analysis' })
+  })
+
+  it('keeps an image-backed software modification in code mode', () => {
+    expect(classifyIntentByRule([{
+      role: 'user',
+      content: 'Corrige le site selon cette capture.',
+      images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }]
+    }])).toMatchObject({ intent: 'code', clear: true, reason: 'explicit-software-artifact' })
+  })
+
   it('lets the isolated model classify implicit feedback on previous software work', async () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) => {
       if (String(url).endsWith('/api/ps')) return new Response(JSON.stringify({ models: [] }), { status: 200 })
