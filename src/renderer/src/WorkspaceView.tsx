@@ -38,9 +38,11 @@ import type {
   ChatEvent,
   ChatImage,
   DictationProgress,
+  InferenceSettings,
   OllamaStatus,
   ProjectSelection,
   ProjectResourceSettings,
+  ReasoningMode,
   StoredToolActivity,
   StoredThread
 } from '../../shared/contracts'
@@ -59,6 +61,9 @@ type WorkspaceViewProps = {
   status: OllamaStatus | null | 'loading'
   catalogModels: CatalogModel[]
   preferredModel: string
+  inferenceSettings: InferenceSettings | null
+  inferenceSettingsBusy: boolean
+  onReasoningModeChange: (mode: ReasoningMode) => Promise<void>
   shortcut: { type: 'new-thread' | 'open-project' } | null
   onShortcutHandled: () => void
   onOpenSetup: () => void
@@ -205,6 +210,11 @@ function toolActivityLabel(activity: ToolActivity): React.JSX.Element {
   const output = parsedToolValue(activity.output)
   const path = typeof input?.path === 'string' ? input.path : ''
   const running = activity.status === 'running'
+  if (activity.tool === 'model_inference') {
+    const model = typeof input?.model === 'string' ? input.model : 'modèle local'
+    const step = typeof input?.step === 'number' ? input.step : null
+    return <>{running ? 'Le modèle prépare la prochaine action' : 'Action préparée'} · <code>{model}</code>{step ? ` · passage ${step}` : ''}{running ? '…' : ''}</>
+  }
   if (activity.tool === 'list_files') {
     const count = Array.isArray(output) ? output.length : null
     return <>{running ? 'Exploration des fichiers…' : count === null ? 'Exploré les fichiers' : `Exploré ${count} fichier${count > 1 ? 's' : ''}`}</>
@@ -358,6 +368,9 @@ export function WorkspaceView({
   status,
   catalogModels,
   preferredModel,
+  inferenceSettings,
+  inferenceSettingsBusy,
+  onReasoningModeChange,
   shortcut,
   onShortcutHandled,
   onOpenSetup
@@ -1171,13 +1184,14 @@ export function WorkspaceView({
     const linesAdded = fileEdits.reduce((total, edit) => total + edit.added, 0)
     const linesRemoved = fileEdits.reduce((total, edit) => total + edit.removed, 0)
     const activityIds = new Set(activities.map((activity) => activity.id))
+    const firstFileEditIndex = activities.findIndex((activity) => fileEditActivity(activity) !== null)
 
     return (
       <div className="tool-activities" aria-label="Activité des outils">
         {activities.filter((activity) => !fileEditActivity(activity)).map((activity) => {
           const advisor = activity.tool === 'consult_advisor' ? advisorActivityData(activity) : null
           return (
-            <article className={`tool-activity ${activity.status} ${activity.expanded ? 'expanded' : ''}`} key={activity.id}>
+            <article className={`tool-activity ${activity.status} ${activity.expanded ? 'expanded' : ''}`} key={activity.id} style={{ order: activities.indexOf(activity) }}>
               <button
                 type="button"
                 aria-expanded={activity.expanded}
@@ -1212,7 +1226,7 @@ export function WorkspaceView({
           )
         })}
         {fileEdits.length > 0 && (
-          <article className={`tool-activity tool-edit-summary ${activeFileEdits ? 'running' : 'done'} ${fileEditsExpanded ? 'expanded' : ''}`}>
+          <article className={`tool-activity tool-edit-summary ${activeFileEdits ? 'running' : 'done'} ${fileEditsExpanded ? 'expanded' : ''}`} style={{ order: firstFileEditIndex }}>
             <button
               type="button"
               aria-expanded={fileEditsExpanded}
@@ -1401,7 +1415,7 @@ export function WorkspaceView({
           <div className="runtime-summary">
             <div>
               <span className={`status-dot ${hasOllama ? 'online' : 'offline'}`} />
-              <span>{hasOllama ? 'Ollama connecté' : 'Ollama indisponible'}</span>
+              <span>{hasOllama ? 'Moteur local connecté' : 'Moteur local indisponible'}</span>
             </div>
             {activeThread?.projectPath && (
               <small>{activeThread.workspaceMode === 'worktree' ? 'Projet privé · ressources isolées' : 'Dossier direct confirmé'}</small>
@@ -1530,6 +1544,21 @@ export function WorkspaceView({
             <h2>{activeThread?.title ?? 'Nouveau thread'}</h2>
           </div>
           <div className="chat-header-actions">
+            <button
+              className="chat-reasoning-mode"
+              type="button"
+              aria-pressed={Boolean(inferenceSettings && inferenceSettings.reasoningMode !== 'fast')}
+              title="Active ou désactive le raisonnement avancé de llama.cpp"
+              disabled={!inferenceSettings || inferenceSettingsBusy || Boolean(activeRequest)}
+              onClick={() => void onReasoningModeChange(
+                inferenceSettings?.reasoningMode === 'fast' ? 'advanced' : 'fast'
+              )}
+            >
+              <Circle aria-hidden="true" />
+              {inferenceSettings
+                ? `Thinking ${inferenceSettings.reasoningMode === 'fast' ? 'désactivé' : 'activé'}`
+                : 'Thinking…'}
+            </button>
             <div className="thread-menu">
               <button
                 ref={threadMenuButtonRef}

@@ -123,6 +123,11 @@ export function classifyIntentByRule(
     && /\b(?:supprime|supprimer|delete|suppression)\b/.test(previousAssistant)) {
     return { intent: 'code', clear: true, source: 'rule', reason: 'confirmed-destructive-action' }
   }
+  const criticizesSoftwareResult = /\b(?:moche|laid|nul|merde|foutage|horrible|inutilisable|incomplet|bacle|rate|pas (?:bon|fini)|ne (?:marche|fonctionne) pas|rien (?:fait|modifie)|aucune modification)\b/.test(request)
+  const previousAssistantReportedSoftwareWork = /\b(?:site|page|projet|code|fichiers?|html|css|javascript|js|modifie|cree|termine|implemente)\b/.test(previousAssistant)
+  if (criticizesSoftwareResult && previousAssistantReportedSoftwareWork) {
+    return { intent: 'code', clear: true, source: 'rule', reason: 'negative-software-feedback' }
+  }
   if (/\b(?:pas (?:de |du )?code|sans code|dans (?:le )?chat|juste (?:discuter|parler))\b/.test(request)
     || /^(?:bonjour|salut|bonsoir|merci|hello|hi)\b/.test(request)) {
     return { intent: 'discussion', clear: true, source: 'rule', reason: 'explicit-conversation' }

@@ -220,21 +220,14 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .model-card > p { min-height: 40px; margin: 18px 0 13px; color: #a1a4ad; font-size: 13px; line-height: 1.5; }
 .model-meta { display: grid; gap: 5px; margin-bottom: 9px; color: #858a93; font-size: 10px; }
 .model-meta strong { color: #b5bab7; font-weight: 650; }
+.model-card > .model-memory-note { min-height: 0; margin: 0 0 9px; color: #9b927b; font-size: 9px; line-height: 1.4; }
 .model-card > .model-execution { min-height: 0; margin: 0 0 9px; color: #94aa98; font-size: 10px; line-height: 1.4; }
 .model-card small { min-height: 30px; color: #727681; line-height: 1.4; }
 .model-card > button { width: 100%; margin-top: auto; }
-.runtime-benchmark { display: grid; gap: 8px; margin-top: 8px; }
-.runtime-benchmark > button {
-  width: 100%; border-color: #3e4a43; color: #aebbb3; background: #19201c;
+.model-card > .delete-model-button {
+  margin-top: 7px; border-color: #543434; color: #cf9292; background: #211717;
 }
-.runtime-benchmark > button:hover:not(:disabled) { border-color: #617367; background: #202a24; }
-.benchmark-note { color: #69736d; font-size: 8px; line-height: 1.4; }
-.benchmark-progress { display: grid; gap: 6px; color: #8f9c94; font-size: 9px; line-height: 1.4; }
-.benchmark-progress progress { width: 100%; height: 5px; accent-color: #6faa7e; }
-.benchmark-result { margin: 0; color: #a6b2aa; font-size: 9px; line-height: 1.45; }
-.benchmark-result.llama-cpp { color: #7be2bd; }
-.benchmark-result.ollama { color: #8eb8ff; }
-.benchmark-result.error { color: #e69a9a; }
+.model-card > .delete-model-button:hover:not(:disabled) { border-color: #815050; color: #efb0b0; background: #2b1b1b; }
 .progress-block { margin: 14px 0; }
 .progress-block div { display: flex; justify-content: space-between; margin-bottom: 6px; color: #9c9fa8; font-size: 10px; }
 .progress-block progress { width: 100%; height: 5px; accent-color: #8877ed; }
@@ -616,6 +609,13 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .thread-identity > span { color: #59635d; font-size: 10px; }
 .thread-identity h2, .thread-identity h3 { margin: 0; overflow: hidden; color: #cfd6d1; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .chat-header-actions { align-items: center; }
+.chat-reasoning-mode {
+  display: flex; align-items: center; gap: 6px; height: 29px; padding: 0 9px;
+  border: 1px solid #29312c; border-radius: 6px; color: #98a39c; background: #151a17; font-size: 9px;
+}
+.chat-reasoning-mode svg { width: 7px; height: 7px; fill: currentColor; }
+.chat-reasoning-mode[aria-pressed='true'] { border-color: #455b4d; color: #a8c7b1; background: #172019; }
+.chat-reasoning-mode:hover:not(:disabled) { border-color: #55665a; color: #d4dbd6; }
 .ghost-button { border: 1px solid #29312c; color: #8d9790; background: #151a17; }
 .portal-trigger.active { border-color: #355e49; color: #8dddb2; background: #14241b; }
 .thread-menu { position: relative; }

@@ -557,7 +557,15 @@ const STATIC_WEBSITE_PATHS = {
   javascript: 'assets/js/game.js'
 } as const
 
-type StaticWebsiteContract = typeof STATIC_WEBSITE_PATHS
+type StaticWebsiteContract = typeof STATIC_WEBSITE_PATHS & {
+  requireSubstantiveDesign?: boolean
+}
+
+function requestsSubstantiveWebsite(messages: readonly ChatMessage[]): boolean {
+  const request = [...messages].reverse().find((message) => message.role === 'user')?.content
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase() ?? ''
+  return /\b(?:boutique|vitrine|portfolio|e-?commerce|vendre|vente|produits?|animations?)\b/.test(request)
+}
 
 function requestsNewStaticWebsite(
   messages: readonly ChatMessage[],
@@ -593,7 +601,7 @@ async function validateStaticWebsite(
 ): Promise<string[]> {
   const contents = new Map<string, string>()
   const issues: string[] = []
-  for (const pathname of Object.values(contract)) {
+  for (const pathname of [contract.html, contract.css, contract.javascript]) {
     try {
       contents.set(pathname, await project.readFile(pathname))
     } catch {
@@ -601,12 +609,25 @@ async function validateStaticWebsite(
     }
   }
   const html = contents.get(contract.html)
+  const css = contents.get(contract.css)
   const javascript = contents.get(contract.javascript)
   if (!html) return issues
   const cssReferences = [...html.matchAll(/<link\b[^>]*\bhref\s*=\s*["']([^"']+)["']/gi)].map((match) => match[1])
   const scriptReferences = [...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)].map((match) => match[1])
   if (!cssReferences.includes(contract.css)) issues.push(`index.html ne référence pas ${contract.css}`)
   if (!scriptReferences.includes(contract.javascript)) issues.push(`index.html ne référence pas ${contract.javascript}`)
+  if (contract.requireSubstantiveDesign) {
+    const contentRegions = new Set([...html.matchAll(/<(header|nav|main|section|article|footer|form)\b/gi)]
+      .map((match) => match[1]!.toLowerCase()))
+    if (contentRegions.size < 3) {
+      issues.push('la page reste un placeholder : elle doit comporter plusieurs zones de contenu structurées')
+    }
+    const cssRuleCount = css ? [...css.matchAll(/[^@{}][^{}]*\{[^{}]*\}/g)].length : 0
+    const cssDeclarationCount = css ? [...css.matchAll(/(?:^|[;{])\s*(?:--)?[\w-]+\s*:/gm)].length : 0
+    if (cssRuleCount < 4 || cssDeclarationCount < 8) {
+      issues.push('la feuille de style reste trop sommaire pour constituer une interface complète')
+    }
+  }
   if (javascript) {
     const htmlIds = new Set([...html.matchAll(/\bid\s*=\s*["']([^"']+)["']/gi)].map((match) => match[1]))
     const requiredIds = new Set([
@@ -858,6 +879,7 @@ export type CodingAgentOptions = {
   onInferenceLog?: (message: string) => void
   onModelMetrics?: (metrics: InferencePerformanceMetrics) => void
   onToolEvent?: (event: AgentToolLifecycleEvent) => Promise<void>
+  onInferenceEvent?: (event: AgentToolLifecycleEvent) => Promise<void>
   authorize: (tool: string, summary: string) => Promise<boolean>
   spawnWorkers?: (tasks: WorkerTask[]) => Promise<WorkerResult[]>
   readTodos?: () => AgentTodo[]
@@ -873,6 +895,7 @@ export type CodingAgentOptions = {
   allowRunCommand?: boolean
   isGitRepository?: boolean
   modelIdleTimeoutMs?: number
+  maxConversationCharacters?: number
   runCommand?: (
     command: string,
     args: readonly string[],
@@ -935,7 +958,10 @@ function fitNewestGroup(group: InferenceMessage[], available: number): Inference
   return contextSize(fitted) <= available ? fitted : []
 }
 
-export function compactConversation(messages: InferenceMessage[]): InferenceMessage[] {
+export function compactConversation(
+  messages: InferenceMessage[],
+  maximumCharacters = MAX_CONVERSATION_CHARACTERS
+): InferenceMessage[] {
   let latestUserIndex = -1
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role === 'user') {
@@ -973,9 +999,9 @@ export function compactConversation(messages: InferenceMessage[]): InferenceMess
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const group = (groups[index] ?? []).map(compactToolArguments)
     const groupCharacters = contextSize(group)
-    if (characters + groupCharacters > MAX_CONVERSATION_CHARACTERS) {
+    if (characters + groupCharacters > maximumCharacters) {
       if (selected.length === 0) {
-        const fitted = fitNewestGroup(group, MAX_CONVERSATION_CHARACTERS - characters)
+        const fitted = fitNewestGroup(group, maximumCharacters - characters)
         if (fitted.length > 0) selected.unshift(fitted)
       }
       break
@@ -1280,7 +1306,7 @@ export function buildCodingAgentSystemPrompt(options: Pick<CodingAgentOptions,
     ? `\n\nACTIVITÉS FIABLES\n- Pour une demande dont les règles ou l’état doivent être exacts, utilise un moteur fiable disponible au lieu de simuler son état toi-même. Le moteur hangman gère le pendu.\n- Utilise activity_start pour démarrer, puis activity_action pour chaque tour. Pour le pendu, utilise guess pour une lettre, solve pour un mot complet, hint pour un indice, give_up pour abandonner et unsupported pour toute demande liée à la partie qui ne correspond à aucune de ces actions.\n- Tant qu’une activité est active, ne réponds jamais librement à une demande qui la concerne : appelle son moteur. Considère son résultat comme la seule source de vérité. Ne révèle, ne corrige et ne complète jamais un état ou un indice par supposition.\n- Après chaque coup, affiche le mot masqué, les lettres essayées et les erreurs restantes à partir de publicView. Si le moteur retourne ok=false, reprends uniquement son message public, sans ajout. Le résultat d’un outil du tour actuel remplace toujours l’état initial plus ancien.${options.activityContext ? `\n- Une activité est actuellement active. Utilise son identifiant et son état public autoritatif : ${options.activityContext}` : ''}`
     : ''
   const websiteRules = options.staticWebsiteContract
-    ? `\n\nCONTRAT DU NOUVEAU SITE STATIQUE\n- Le projet est vide et l’utilisateur demande un nouveau site statique. Utilise exactement cette structure, sans inventer d’autre chemin HTML/CSS/JavaScript :\n  - ${options.staticWebsiteContract.html}\n  - ${options.staticWebsiteContract.css}\n  - ${options.staticWebsiteContract.javascript}\n- ${options.staticWebsiteContract.html} doit référencer exactement ${options.staticWebsiteContract.css} et ${options.staticWebsiteContract.javascript}. Les identifiants utilisés par getElementById ou querySelector dans le JavaScript doivent exister dans le HTML.\n- Crée les trois fichiers avant d’annoncer que le site est terminé. Stellan contrôlera leur présence et leur cohérence.`
+    ? `\n\nCONTRAT DU NOUVEAU SITE STATIQUE\n- Le projet est vide et l’utilisateur demande un nouveau site statique. Utilise exactement cette structure, sans inventer d’autre chemin HTML/CSS/JavaScript :\n  - ${options.staticWebsiteContract.html}\n  - ${options.staticWebsiteContract.css}\n  - ${options.staticWebsiteContract.javascript}\n- ${options.staticWebsiteContract.html} doit référencer exactement ${options.staticWebsiteContract.css} et ${options.staticWebsiteContract.javascript}. Les identifiants utilisés par getElementById ou querySelector dans le JavaScript doivent exister dans le HTML.\n- Crée les trois fichiers avant d’annoncer que le site est terminé. Stellan contrôlera leur présence et leur cohérence.${options.staticWebsiteContract.requireSubstantiveDesign ? '\n- La demande exige un vrai rendu visuel : construis plusieurs zones de contenu utiles et une feuille CSS responsive substantielle. Un titre, un paragraphe et quelques styles de base ne constituent pas un site terminé.' : ''}`
     : ''
 
   return `Tu es Stellan, un assistant local${options.project ? ' qui peut travailler dans le projet ouvert avec l’utilisateur' : ''}.
@@ -1375,7 +1401,10 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   if (softwareArtifactRequested && options.project && !options.writeScope) {
     const projectFiles = await options.project.listFiles('.')
     if (requestsNewStaticWebsite(options.messages, projectFiles)) {
-      options.staticWebsiteContract = STATIC_WEBSITE_PATHS
+      options.staticWebsiteContract = {
+        ...STATIC_WEBSITE_PATHS,
+        requireSubstantiveDesign: requestsSubstantiveWebsite(options.messages)
+      }
     }
   }
   const requestedActivityEngine = intentClassification.activityEngine
@@ -1514,7 +1543,10 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
           && (tool.function.name !== 'activity_action' || (options.applyActivity && !activityExitRequested && reliableActivityRequested))
           && (options.project || !PROJECT_TOOL_NAMES.has(tool.function.name))
         )
-    const compactedConversation = compactConversation(conversation)
+    const compactedConversation = compactConversation(
+      conversation,
+      options.maxConversationCharacters ?? MAX_CONVERSATION_CHARACTERS
+    )
     const toolsForStep = discussionMode
       ? undefined
       : missingWriteRecoveryAttempted || fallbackFileFormatRequired
@@ -1535,6 +1567,21 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     options.onInferenceLog?.(
       `message=${inferenceTraceId} step=${step + 1}/12 contextChars=${messageCharacters} toolChars=${toolCharacters} totalChars=${messageCharacters + toolCharacters} messages=${compactedConversation.length} activity=${reliableActivityMode}`
     )
+    const inferenceCallId = `inference:${step}`
+    await options.onInferenceEvent?.({
+      type: 'started',
+      callId: inferenceCallId,
+      step,
+      callIndex: -1,
+      tool: 'model_inference',
+      arguments: {
+        model: options.model,
+        step: step + 1,
+        contextMessages: compactedConversation.length,
+        availableTools: toolsForStep?.length ?? 0
+      },
+      assistantContent: ''
+    })
     try {
       result = await (options.inferenceProvider ?? ollamaInferenceProvider).streamChat(
         options.model,
@@ -1546,12 +1593,28 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         completedWrites.size > 0
           ? Math.min(options.modelIdleTimeoutMs ?? 120_000, 30_000)
           : options.modelIdleTimeoutMs,
-        reliableActivityMode ? 256 : undefined,
+        reliableActivityMode ? 256 : projectChangeRequested ? 4_096 : undefined,
         undefined,
         options.onInferenceLog,
         options.onModelMetrics
       )
+      await options.onInferenceEvent?.({
+        type: 'finished',
+        callId: inferenceCallId,
+        tool: 'model_inference',
+        status: 'done',
+        result: result.toolCalls.length > 0
+          ? `${result.toolCalls.length} action${result.toolCalls.length > 1 ? 's' : ''} choisie${result.toolCalls.length > 1 ? 's' : ''}.`
+          : 'Réponse produite.'
+      })
     } catch (error) {
+      await options.onInferenceEvent?.({
+        type: 'finished',
+        callId: inferenceCallId,
+        tool: 'model_inference',
+        status: 'error',
+        result: error instanceof Error ? error.message : 'La génération locale a échoué.'
+      })
       if (projectChangeRequested
         && !missingWriteRecoveryAttempted
         && error instanceof Error

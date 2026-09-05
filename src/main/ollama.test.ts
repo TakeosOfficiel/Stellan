@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { configureOllamaModelOptions, getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
+import { configureOllamaModelOptions, deleteOllamaModel, getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
 
 beforeEach(() => configureOllamaModelOptions({ numCtx: 8_192, numPredict: 1_024 }))
 
@@ -90,6 +90,19 @@ describe('pullOllamaModel', () => {
       completed: 50,
       total: 100,
       percent: 50
+    })
+  })
+})
+
+describe('deleteOllamaModel', () => {
+  it('deletes only the explicitly selected local model', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }))
+
+    await expect(deleteOllamaModel('qwen3.5:4b', fetcher)).resolves.toEqual({ success: true })
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:11435/api/delete', {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3.5:4b' })
     })
   })
 })
@@ -278,7 +291,7 @@ describe('streamOllamaChat', () => {
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue(new TextEncoder().encode(
-            '{"message":{"content":"OK"},"done":true,"total_duration":2500000000,"load_duration":100000000,"prompt_eval_count":500,"prompt_eval_duration":1000000000,"eval_count":20,"eval_duration":1000000000}\n'
+            '{"message":{"content":"OK"},"done":true,"done_reason":"length","total_duration":2500000000,"load_duration":100000000,"prompt_eval_count":500,"prompt_eval_duration":1000000000,"eval_count":20,"eval_duration":1000000000}\n'
           ))
           controller.close()
         }
@@ -306,6 +319,7 @@ describe('streamOllamaChat', () => {
     expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('ollama.metrics model=qwen3.5:2b'))
     expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('loadMs=100.0 promptEvalMs=1000.0'))
     expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('generationMs=1000.0 generatedTokens=20 tokensPerSecond=20.0'))
+    expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('stopReason=length'))
     expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('ollama.ps.after models=qwen3.5:2b'))
     expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('vramBytes=1900000000'))
     expect(metrics).toHaveBeenCalledWith(expect.objectContaining({

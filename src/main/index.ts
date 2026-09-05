@@ -1,11 +1,11 @@
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { cp, lstat, mkdir, rm, statfs } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
-import type { ChatMessage, InferenceBenchmarkResult, ModelPullProgress, OllamaStatus, RuntimeProgress } from '../shared/contracts'
+import type { ChatMessage, InferenceSettings, ModelPullProgress, OllamaStatus, ReasoningMode, RuntimeProgress } from '../shared/contracts'
 import { compactConversation, normalizeWorkerPath, runCodingAgent, type AgentToolLifecycleEvent, type WorkerTask } from './agent'
 import { runAdvisor } from './advisor'
 import {
@@ -18,7 +18,7 @@ import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
 import { getBasicHardwareInfo, getHardwareInfo, inferenceModelOptions, inferenceParallelism } from './hardware'
 import { classifyIntent, requiresVision } from './intent-classifier'
-import { compareInferenceMetrics, qualifyInferenceProvider } from './inference-benchmark'
+import type { InferenceProvider } from './inference'
 import {
   configureInferenceWslRuntime,
   ensureNvidiaInferenceRuntime,
@@ -35,9 +35,9 @@ import {
 } from './linux-runtime'
 import { getLlamaCppArtifact, getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledInteractiveModel, selectInstalledSpecialistModel } from './model-catalog'
 import { hardwarePerformanceKey, ModelPerformanceStore } from './model-performance'
-import { configureOllamaModelOptions, configureOllamaUrl, getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
+import { configureOllamaModelOptions, configureOllamaUrl, deleteOllamaModel, getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
 import { detectOllamaGpuBackend, OLLAMA_CONTAINER_NAME, OLLAMA_HOST_PORT, startOllamaServer, type OllamaGpuBackend } from './ollama-process'
-import { LLAMA_HOST_PORT, startLlamaServer, stopLlamaServer, waitForLlamaServer, type LlamaBackend } from './llama-process'
+import { deleteLlamaModelCache, LLAMA_HOST_PORT, startLlamaServer, stopLlamaServer, waitForLlamaServer, type LlamaBackend } from './llama-process'
 import { createLocalOpenAICompatibleProvider } from './openai-compatible'
 import { assertPortalAccess, PortalManager } from './portal'
 import { ProjectTools } from './project-tools'
@@ -69,9 +69,10 @@ const OLLAMA_DOWNLOAD_CHANNEL = 'ollama:open-download'
 const RUNTIME_PROGRESS_CHANNEL = 'runtime:progress'
 const MODEL_PULL_CHANNEL = 'ollama:pull-model'
 const MODEL_PULL_PROGRESS_CHANNEL = 'ollama:pull-progress'
+const MODEL_DELETE_CHANNEL = 'ollama:delete-model'
 const MODEL_WARM_CHANNEL = 'ollama:warm-model'
-const INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL = 'inference:benchmark-llama-cpp'
-const INFERENCE_BENCHMARK_PROGRESS_CHANNEL = 'inference:benchmark-progress'
+const INFERENCE_GET_SETTINGS_CHANNEL = 'inference:get-settings'
+const INFERENCE_SET_SETTINGS_CHANNEL = 'inference:set-settings'
 const INFERENCE_OPEN_LOG_CHANNEL = 'inference:open-log'
 const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
@@ -231,9 +232,17 @@ let threadStore: ThreadStore | null = null
 let modelPerformanceStore: ModelPerformanceStore | null = null
 let mainWindow: BrowserWindow | null = null
 let ollamaStartPromise: Promise<OllamaStatus> | null = null
-let llamaBenchmarkPromise: Promise<InferenceBenchmarkResult> | null = null
 let ollamaGpuBackend: OllamaGpuBackend = 'cpu'
 let ollamaGpuBackendResolved = false
+let activeLlamaInference: {
+  model: string
+  backend: LlamaBackend
+  reasoningMode: ReasoningMode
+  provider: InferenceProvider
+  runner: CommandRunner
+} | null = null
+let cachedOllamaStatus: Extract<OllamaStatus, { available: true }> | null = null
+let inferenceRuntimeTail = Promise.resolve()
 let shutdownReady = false
 let shutdownCleanup: Promise<void> | null = null
 const pendingWindowCleanups = new Set<Promise<void>>()
@@ -243,12 +252,60 @@ const terminalManager = new TerminalManager((ownerId, terminalEvent) => {
     contents.send(TERMINAL_EVENT_CHANNEL, terminalEvent)
   }
 })
+
+async function acquireInferenceRuntime(): Promise<() => void> {
+  const previous = inferenceRuntimeTail
+  let release = (): void => {}
+  inferenceRuntimeTail = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous
+  return release
+}
 const portalManager = new PortalManager()
 const reliableEngineRegistry = createReliableEngineRegistry()
 
 function sendRuntimeProgress(progress: RuntimeProgress): void {
   const contents = mainWindow?.webContents
   if (contents && !contents.isDestroyed()) contents.send(RUNTIME_PROGRESS_CHANNEL, progress)
+}
+
+const inferenceSettingsSchema = z.object({
+  reasoningMode: z.enum(['fast', 'auto', 'advanced'])
+})
+
+function inferenceSettingsPath(): string {
+  return join(app.getPath('userData'), 'inference-settings.json')
+}
+
+function getInferenceSettings(): InferenceSettings {
+  try {
+    return inferenceSettingsSchema.parse(JSON.parse(readFileSync(inferenceSettingsPath(), 'utf8')))
+  } catch {
+    return { reasoningMode: 'auto' }
+  }
+}
+
+function saveInferenceSettings(input: unknown): InferenceSettings {
+  const settings = inferenceSettingsSchema.parse(input)
+  writeFileSync(inferenceSettingsPath(), `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
+  return settings
+}
+
+async function stopActiveLlamaInference(): Promise<void> {
+  if (!activeLlamaInference) return
+  const active = activeLlamaInference
+  activeLlamaInference = null
+  await stopLlamaServer(active.runner)
+}
+
+function activeInferenceStatus(): OllamaStatus | null {
+  if (!activeLlamaInference) return null
+  return {
+    available: true,
+    version: `llama.cpp · ${activeLlamaInference.backend} · raisonnement ${activeLlamaInference.reasoningMode}`,
+    models: cachedOllamaStatus?.models ?? [{ name: activeLlamaInference.model, size: 0, modifiedAt: new Date().toISOString() }]
+  }
 }
 
 async function downloadModel(
@@ -258,6 +315,11 @@ async function downloadModel(
   if (activeDownloadPromise) {
     if (activeDownload === model) return activeDownloadPromise
     return { success: false as const, reason: `Le téléchargement de ${activeDownload} est déjà en cours.` }
+  }
+  if (activeLlamaInference) {
+    await stopActiveLlamaInference()
+    const restored = await ensureOllamaRunning()
+    if (!restored.available) return { success: false as const, reason: restored.reason }
   }
   activeDownload = model
   activeDownloadPromise = pullOllamaModel(model, onProgress)
@@ -269,13 +331,20 @@ async function downloadModel(
   }
 }
 
-function ensureOllamaRunning(): Promise<OllamaStatus> {
+async function ensureOllamaRunning(): Promise<OllamaStatus> {
+  await stopActiveLlamaInference()
   if (ollamaStartPromise) return ollamaStartPromise
 
   ollamaStartPromise = (async () => {
     sendRuntimeProgress({ step: 'Détection du matériel', detail: 'Vérification du GPU pour choisir le meilleur mode…', percent: 3 })
     const hardware = await getHardwareInfo()
     configureOllamaModelOptions(inferenceModelOptions(hardware))
+    const existingStatus = await getOllamaStatus()
+    if (existingStatus.available) {
+      cachedOllamaStatus = existingStatus
+      sendRuntimeProgress({ step: 'Runtime prêt', detail: 'Le moteur local existant répond déjà.', percent: 100 })
+      return existingStatus
+    }
     const gpuBackend = ollamaGpuBackendResolved
       ? ollamaGpuBackend
       : await detectOllamaGpuBackend(hardware, runManagedWslCommand)
@@ -376,133 +445,57 @@ function llamaBackendFromOllama(backend: OllamaGpuBackend): LlamaBackend {
   return backend
 }
 
-async function benchmarkLlamaCpp(
-  model: string,
-  onProgress: (detail: string, percent: number) => void
-): Promise<InferenceBenchmarkResult> {
-  const traceId = randomUUID().slice(0, 8)
-  const log = (message: string): void => writeInferenceLog(`benchmark=${traceId} ${message}`)
-  const failure = (reason: string): InferenceBenchmarkResult => {
-    log(`result=failure reason=${JSON.stringify(reason.slice(0, 1_000))}`)
-    return { success: false, reason }
-  }
-  log(`phase=start model=${model}`)
+async function ensureLlamaInference(model: string, reasoningMode: ReasoningMode): Promise<typeof activeLlamaInference> {
+  if (activeLlamaInference?.model === model && activeLlamaInference.reasoningMode === reasoningMode) return activeLlamaInference
   const artifact = getLlamaCppArtifact(model)
-  if (!artifact) return failure('Ce modèle ne possède pas encore de version llama.cpp vérifiée par Stellan.')
-  if (activeChats.size > 0 || activeDownloadPromise || getThreadStore().listActiveAgentRuns().length > 0) {
-    return failure('Terminez les générations et téléchargements en cours avant de lancer le comparatif.')
-  }
+  if (!artifact) return null
+  await stopActiveLlamaInference()
 
-  let status: Awaited<ReturnType<typeof ensureOllamaRunning>>
-  try {
-    status = await ensureOllamaRunning()
-  } catch (error) {
-    return failure(`Ollama n’a pas pu démarrer : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
-  }
-  if (!status.available || !status.models.some((entry) => entry.name === model || entry.name === `${model}:latest`)) {
-    return failure('Installez d’abord ce modèle dans Stellan pour effectuer une comparaison équitable.')
-  }
-
-  let hardware: Awaited<ReturnType<typeof getHardwareInfo>>
-  try {
-    hardware = await getHardwareInfo()
-  } catch (error) {
-    return failure(`La détection du matériel a échoué : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
-  }
+  const hardware = await getHardwareInfo()
   const modelOptions = inferenceModelOptions(hardware)
-  const requestedBackend = llamaBackendFromOllama(ollamaGpuBackend)
+  const detectedBackend = ollamaGpuBackendResolved
+    ? ollamaGpuBackend
+    : await detectOllamaGpuBackend(hardware, runManagedWslCommand)
+  const requestedBackend = llamaBackendFromOllama(detectedBackend)
   let runner: CommandRunner = runCommand
   let baseUrl = managedWslServiceUrl(LLAMA_HOST_PORT) ?? `http://127.0.0.1:${LLAMA_HOST_PORT}`
   let trustedRuntimeNetwork = false
   if (process.platform === 'win32' && requestedBackend === 'cuda') {
-    try {
-      await ensureNvidiaInferenceRuntime()
-    } catch (error) {
-      return failure(`Le runtime NVIDIA n’a pas pu démarrer : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
-    }
+    await ensureNvidiaInferenceRuntime()
     runner = runInferenceDockerCommand
     baseUrl = inferenceWslServiceUrl(LLAMA_HOST_PORT) ?? baseUrl
     trustedRuntimeNetwork = true
   }
-  log(`phase=prepared platform=${hardware.platform} cpuCores=${hardware.cpuCores} memoryBytes=${hardware.totalMemoryBytes} gpuCount=${hardware.gpus.length} requestedBackend=${requestedBackend} context=${modelOptions.numCtx}`)
 
-  onProgress(`Mesure d’Ollama avec ${model}…`, 8)
-  log('phase=ollama-qualification-start')
-  let ollama
+  const ollamaStatus = await getOllamaStatus()
+  if (ollamaStatus.available) cachedOllamaStatus = ollamaStatus
+  await runner('docker', ['stop', OLLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
   try {
-    ollama = (await qualifyInferenceProvider(
-      { id: 'ollama', streamChat: streamOllamaChat },
-      model,
-      undefined,
-      (message) => log(message)
-    )).metrics
-    log(`phase=ollama-qualification-complete wallMs=${ollama.wallMs} firstResponseMs=${ollama.firstResponseMs} tokensPerSecond=${ollama.tokensPerSecond ?? 'unknown'}`)
-  } catch (error) {
-    return failure(`Le test de référence Ollama a échoué : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
-  }
-
-  let llamaStarted = false
-  try {
-    onProgress('Libération de la mémoire utilisée par Ollama…', 35)
-    log('phase=ollama-stop-start')
-    const stoppedOllama = await runner('docker', ['stop', OLLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
-    if (stoppedOllama.exitCode !== 0 || stoppedOllama.timedOut) {
-      throw new Error('Ollama n’a pas pu libérer la mémoire avant le comparatif.')
-    }
-    log('phase=ollama-stop-complete')
-    onProgress('Téléchargement puis chargement de llama.cpp et du modèle GGUF vérifié…', 45)
-    log(`phase=llama-start requestedBackend=${requestedBackend}`)
     const started = await startLlamaServer({
       backend: requestedBackend,
       modelArtifact: artifact,
       modelAlias: model,
       contextSize: modelOptions.numCtx,
-      predictTokens: Math.min(modelOptions.numPredict, 1_024),
-      parallel: 1
+      predictTokens: 4_096,
+      parallel: 1,
+      reasoningMode
     }, runner)
-    if (!started.success) return failure(started.reason)
-    llamaStarted = true
-    log(`phase=llama-container-ready actualBackend=${started.backend}${started.fallbackReason ? ` fallbackReason=${JSON.stringify(started.fallbackReason.slice(0, 1_000))}` : ''}`)
+    if (!started.success) throw new Error(started.reason)
     await waitForLlamaServer(baseUrl)
-    log('phase=llama-health-ready')
-    onProgress(`Validation du texte et des outils avec llama.cpp (${started.backend})…`, 72)
-    const llamaCpp = (await qualifyInferenceProvider(
-      createLocalOpenAICompatibleProvider({ id: 'llama.cpp', baseUrl, trustedRuntimeNetwork }),
-      model,
-      undefined,
-      (message) => log(message)
-    )).metrics
-    const recommendation = compareInferenceMetrics(llamaCpp, ollama)
-    log(`phase=llama-qualification-complete wallMs=${llamaCpp.wallMs} firstResponseMs=${llamaCpp.firstResponseMs} tokensPerSecond=${llamaCpp.tokensPerSecond ?? 'unknown'}`)
-    log(`result=success actualBackend=${started.backend} recommendation=${recommendation}`)
-    return {
-      success: true,
-      model,
-      backend: started.backend,
-      llamaCpp,
-      ollama,
-      recommendation,
-      ...(started.fallbackReason ? { fallbackReason: started.fallbackReason } : {})
-    }
+    const provider = createLocalOpenAICompatibleProvider({
+      id: 'llama.cpp',
+      baseUrl,
+      trustedRuntimeNetwork
+    })
+    activeLlamaInference = { model, backend: started.backend, reasoningMode, provider, runner }
+    writeInferenceLog(
+      `llama.runtime model=${model} requestedBackend=${requestedBackend} actualBackend=${started.backend}${started.fallbackReason ? ` fallbackReason=${JSON.stringify(started.fallbackReason.slice(0, 1_000))}` : ''}`
+    )
+    return activeLlamaInference
   } catch (error) {
-    return failure(error instanceof Error ? error.message : 'Le comparatif llama.cpp a échoué.')
-  } finally {
-    onProgress('Restauration d’Ollama et libération de llama.cpp…', 94)
-    if (llamaStarted) {
-      try {
-        await stopLlamaServer(runner)
-        log('cleanup=llama-stopped')
-      } catch (error) {
-        log(`cleanup=llama-stop-failed reason=${JSON.stringify(error instanceof Error ? error.message.slice(0, 1_000) : 'erreur inconnue')}`)
-      }
-    }
-    try {
-      const restored = await ensureOllamaRunning()
-      log(`cleanup=ollama-restore available=${restored.available}${restored.available ? '' : ` reason=${JSON.stringify(restored.reason.slice(0, 1_000))}`}`)
-    } catch (error) {
-      log(`cleanup=ollama-restore-failed reason=${JSON.stringify(error instanceof Error ? error.message.slice(0, 1_000) : 'erreur inconnue')}`)
-    }
-    onProgress('Le moteur habituel de Stellan est de nouveau prêt.', 100)
+    await stopLlamaServer(runner).catch(() => undefined)
+    await ensureOllamaRunning().catch(() => undefined)
+    throw error
   }
 }
 
@@ -764,7 +757,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
       sendChatEvent(run, { type: 'error', reason: 'Génération annulée dans la file d’attente.' })
     },
     run: async () => {
-      await llamaBenchmarkPromise
+      const releaseInferenceRuntime = await acquireInferenceRuntime()
       activeChats.set(run.requestId, controller)
       activeThreadChats.set(thread.id, run.requestId)
       let assistantContent = ''
@@ -784,6 +777,35 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           images: userImages
         })
         const executionPath = thread.workspacePath ?? thread.projectPath
+        const hardware = await getHardwareInfo()
+        const reasoningMode = getInferenceSettings().reasoningMode
+        const useLlama = userImages.length === 0 && getLlamaCppArtifact(run.model) !== null
+        if (!useLlama && activeLlamaInference) {
+          sendChatEvent(run, { type: 'progress', detail: 'Changement de moteur local vers Ollama…', percent: null })
+          await stopActiveLlamaInference()
+          const restored = await ensureOllamaRunning()
+          if (!restored.available) throw new Error(restored.reason)
+        }
+        let inferenceProvider: InferenceProvider | undefined
+        if (useLlama) {
+          sendChatEvent(run, { type: 'progress', detail: `Démarrage de llama.cpp avec ${run.model}…`, percent: null })
+          try {
+            const llama = await ensureLlamaInference(run.model, reasoningMode)
+            if (llama) {
+              inferenceProvider = llama.provider
+              sendChatEvent(run, { type: 'progress', detail: `llama.cpp prêt · backend ${llama.backend}`, percent: null })
+            }
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : 'erreur inconnue'
+            writeInferenceLog(`llama.runtime.fallback model=${run.model} reason=${JSON.stringify(reason.slice(0, 1_000))}`)
+            sendChatEvent(run, { type: 'progress', detail: 'llama.cpp indisponible · reprise automatique avec le moteur de secours…', percent: null })
+            const restored = await ensureOllamaRunning()
+            if (!restored.available) throw new Error(restored.reason)
+          }
+        }
+        const maxConversationCharacters = inferenceProvider
+          ? Math.max(18_000, inferenceModelOptions(hardware).numCtx * 2)
+          : 18_000
         const visionModel = await resolveVisionModel(run, promptMessages)
         const activityService = new ReliableActivityService(store, reliableEngineRegistry)
         const activityContext = activityService.context(thread.id)
@@ -792,6 +814,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           messages: promptMessages,
           signal: controller.signal,
           activityContext,
+          inferenceProvider,
           onInferenceLog: writeInferenceLog
         })
         const startActivity = (engineId: string, input: Record<string, unknown>) =>
@@ -800,10 +823,12 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           activityService.apply(thread.id, activityId, action)
         let specialistContext: Promise<{ hardware: Awaited<ReturnType<typeof getHardwareInfo>>; installed: string[] }> | null = null
         const selectSpecialist = async (category: 'general' | 'code', primaryModel = run.model): Promise<string> => {
-          specialistContext ??= Promise.all([getOllamaStatus(), getHardwareInfo()]).then(([status, hardware]) => ({
-            hardware,
-            installed: status.available ? status.models.map((model) => model.name) : []
-          }))
+          specialistContext ??= inferenceProvider
+            ? getHardwareInfo().then((hardware) => ({ hardware, installed: [run.model] }))
+            : Promise.all([getOllamaStatus(), getHardwareInfo()]).then(([status, hardware]) => ({
+                hardware,
+                installed: status.available ? status.models.map((model) => model.name) : []
+              }))
           const { hardware, installed } = await specialistContext
           return selectInstalledSpecialistModel(getModelCatalog(hardware), installed, category, primaryModel)
         }
@@ -811,10 +836,12 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
         let oversizedCodeModel = false
         let performanceHardwareKey: string | null = null
         if (executionPath && intentClassification.intent === 'code') {
-          specialistContext ??= Promise.all([getOllamaStatus(), getHardwareInfo()]).then(([status, hardware]) => ({
-            hardware,
-            installed: status.available ? status.models.map((model) => model.name) : []
-          }))
+          specialistContext ??= inferenceProvider
+            ? getHardwareInfo().then((hardware) => ({ hardware, installed: [run.model] }))
+            : Promise.all([getOllamaStatus(), getHardwareInfo()]).then(([status, hardware]) => ({
+                hardware,
+                installed: status.available ? status.models.map((model) => model.name) : []
+              }))
           const { hardware, installed } = await specialistContext
           const catalog = getModelCatalog(hardware)
           performanceHardwareKey = hardwarePerformanceKey(hardware)
@@ -878,7 +905,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           }
         }
         if (executionPath) {
-          if (!await modelSupportsTools(executionModel)) {
+          if (!inferenceProvider && !await modelSupportsTools(executionModel)) {
             throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
           }
           const directProject = await openThreadProject(thread.id)
@@ -886,16 +913,19 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           const project = createAgentProjectTools(profile, thread.id, executionPath, directProject, git)
           await runCodingAgent({
             model: executionModel,
+            inferenceProvider,
             messages: promptMessages,
             project,
             signal: controller.signal,
             onContent,
             onTool: () => undefined,
             onInferenceLog: writeInferenceLog,
+            maxConversationCharacters,
             onModelMetrics: performanceHardwareKey
               ? (metrics) => modelPerformanceStore?.record(performanceHardwareKey, metrics)
               : undefined,
             onToolEvent,
+            onInferenceEvent: onToolEvent,
             consumeSteering,
             runCommand: createWorkerCommandExecutor(profile, thread.id, executionPath, git),
             isGitRepository: git !== null,
@@ -906,7 +936,9 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             applyActivity,
             consultAdvisor: async (question) => {
               const specialist = await selectSpecialist('general')
-              const model = await modelSupportsTools(specialist) ? specialist : executionModel
+              const model = inferenceProvider
+                ? executionModel
+                : await modelSupportsTools(specialist) ? specialist : executionModel
               sendChatEvent(run, {
                 type: 'progress',
                 detail: `Conseiller · démarrage de l’enquête avec ${model}`,
@@ -914,6 +946,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
               })
               return runAdvisor({
                 model,
+                inferenceProvider: model === executionModel ? inferenceProvider : undefined,
                 question,
                 project,
                 signal: controller.signal,
@@ -976,6 +1009,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                   try {
                     await runCodingAgent({
                       model: workerModel,
+                      inferenceProvider: workerModel === executionModel ? inferenceProvider : undefined,
                       messages: [{ role: 'user', content: directive }],
                       project,
                       signal: workerSignal,
@@ -985,6 +1019,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                       },
                       onTool: () => {},
                       onInferenceLog: writeInferenceLog,
+                      maxConversationCharacters,
                       onModelMetrics: performanceHardwareKey
                         ? (metrics) => modelPerformanceStore?.record(performanceHardwareKey, metrics)
                         : undefined,
@@ -1008,6 +1043,34 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                             status: workerToolEvent.status,
                             input: null,
                             output: toolDetail(workerToolEvent.result)
+                          })
+                        }
+                      },
+                      onInferenceEvent: async (workerInferenceEvent) => {
+                        if (workerInferenceEvent.type === 'started') {
+                          getThreadStore().recordToolStarted(childRun.id, workerInferenceEvent)
+                          sendChatEvent(childRun, {
+                            type: 'tool',
+                            callId: workerInferenceEvent.callId,
+                            tool: workerInferenceEvent.tool,
+                            status: 'running',
+                            input: toolDetail(workerInferenceEvent.arguments),
+                            output: null
+                          })
+                        } else {
+                          getThreadStore().recordToolFinished(
+                            childRun.id,
+                            workerInferenceEvent.callId,
+                            workerInferenceEvent.status,
+                            workerInferenceEvent.result
+                          )
+                          sendChatEvent(childRun, {
+                            type: 'tool',
+                            callId: workerInferenceEvent.callId,
+                            tool: 'model_inference',
+                            status: workerInferenceEvent.status,
+                            input: null,
+                            output: toolDetail(workerInferenceEvent.result)
                           })
                         }
                       },
@@ -1061,17 +1124,20 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             authorize: async () => !controller.signal.aborted
           })
         } else {
-          if (!await modelSupportsTools(executionModel)) {
+          if (!inferenceProvider && !await modelSupportsTools(executionModel)) {
             throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux activités fiables.')
           }
           await runCodingAgent({
             model: executionModel,
+            inferenceProvider,
             messages: promptMessages,
             onContent,
             signal: controller.signal,
             onTool: () => undefined,
             onInferenceLog: writeInferenceLog,
+            maxConversationCharacters,
             onToolEvent,
+            onInferenceEvent: onToolEvent,
             consumeSteering,
             authorize: async () => !controller.signal.aborted,
             isGitRepository: false,
@@ -1104,6 +1170,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
         )
         sendChatEvent(run, { type: 'error', reason })
       } finally {
+        releaseInferenceRuntime()
         activeChats.delete(run.requestId)
         pendingSteering.delete(run.requestId)
         if (activeThreadChats.get(thread.id) === run.requestId) activeThreadChats.delete(thread.id)
@@ -1254,8 +1321,21 @@ app.whenReady().then(() => {
     mainWindow.center()
   })
   handle(UPDATE_GET_STATE_CHANNEL, () => getUpdateState())
-  handle(OLLAMA_STATUS_CHANNEL, () => getOllamaStatus())
-  handle(OLLAMA_START_CHANNEL, () => ensureOllamaRunning())
+  handle(OLLAMA_STATUS_CHANNEL, () => activeInferenceStatus() ?? getOllamaStatus())
+  handle(OLLAMA_START_CHANNEL, async () => {
+    await stopActiveLlamaInference()
+    return ensureOllamaRunning()
+  })
+  handle(INFERENCE_GET_SETTINGS_CHANNEL, () => getInferenceSettings())
+  handle(INFERENCE_SET_SETTINGS_CHANNEL, async (_event, input: unknown) => {
+    if (activeChats.size > 0) throw new Error('Attendez la fin des générations avant de changer le raisonnement.')
+    const previous = getInferenceSettings()
+    const settings = saveInferenceSettings(input)
+    if (activeLlamaInference && previous.reasoningMode !== settings.reasoningMode) {
+      await stopActiveLlamaInference()
+    }
+    return settings
+  })
   handle(HARDWARE_BASIC_CHANNEL, () => getBasicHardwareInfo())
   handle(SETUP_INFO_CHANNEL, async () => {
     const [hardware, runtime] = await Promise.all([getHardwareInfo(), getRuntimeInfo()])
@@ -1319,29 +1399,48 @@ app.whenReady().then(() => {
     }
     return result
   })
+  handle(MODEL_DELETE_CHANNEL, async (_event, input: unknown) => {
+    const model = modelIdSchema.parse(input)
+    if (activeChats.size > 0) {
+      return { success: false, reason: 'Attendez la fin des générations avant de supprimer un modèle.' }
+    }
+
+    const artifact = getLlamaCppArtifact(model)
+    if (activeLlamaInference?.model === model) await stopActiveLlamaInference()
+    const restored = await ensureOllamaRunning()
+    if (!restored.available) return { success: false, reason: restored.reason }
+    const removed = await deleteOllamaModel(model)
+    if (!removed.success) return removed
+    cachedOllamaStatus = null
+
+    if (artifact) {
+      const runner = process.platform === 'win32' && ollamaGpuBackend === 'nvidia'
+        ? runInferenceDockerCommand
+        : runCommand
+      try {
+        await deleteLlamaModelCache(artifact, runner)
+      } catch (error) {
+        return {
+          success: false,
+          reason: `Le modèle Ollama est supprimé, mais son cache GGUF n’a pas pu être nettoyé : ${error instanceof Error ? error.message : 'erreur inconnue'}`
+        }
+      }
+    }
+    return { success: true }
+  })
   handle(MODEL_WARM_CHANNEL, async (_event, input: unknown) => {
     const model = installedModelNameSchema.parse(input)
+    if (activeLlamaInference?.model === model) return true
+    if (activeLlamaInference) {
+      await stopActiveLlamaInference()
+      const restored = await ensureOllamaRunning()
+      if (!restored.available) return false
+    }
     return warmOllamaModel(model)
   })
   handle(INFERENCE_OPEN_LOG_CHANNEL, () => {
     writeInferenceLog('diagnostic.log opened-by-user')
     shell.showItemInFolder(inferenceLogPath())
-  })
-  handle(INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL, async (event, input: unknown) => {
-    const model = modelIdSchema.parse(input)
-    if (llamaBenchmarkPromise) {
-      return { success: false, reason: 'Un comparatif de moteur local est déjà en cours.' }
-    }
-    llamaBenchmarkPromise = benchmarkLlamaCpp(model, (detail, percent) => {
-      if (!event.sender.isDestroyed()) {
-        event.sender.send(INFERENCE_BENCHMARK_PROGRESS_CHANNEL, { model, detail, percent })
-      }
-    })
-    try {
-      return await llamaBenchmarkPromise
-    } finally {
-      llamaBenchmarkPromise = null
-    }
   })
   handle(DICTATION_TRANSCRIBE_CHANNEL, async (event, input: unknown) => {
     const audio = dictationAudioSchema.parse(input)
@@ -1487,7 +1586,12 @@ app.whenReady().then(() => {
   handle(THREADS_SET_MODEL_CHANNEL, async (event, input: unknown) => {
     const request = setThreadModelSchema.parse(input)
     requireActiveProjectThread(event.sender.id, request.threadId)
-    const status = await getOllamaStatus()
+    if (activeLlamaInference && activeLlamaInference.model !== request.model) {
+      await stopActiveLlamaInference()
+      const restored = await ensureOllamaRunning()
+      if (!restored.available) throw new Error(restored.reason)
+    }
+    const status = activeInferenceStatus() ?? await getOllamaStatus()
     if (!status.available || !status.models.some((model) => model.name === request.model)) {
       throw new Error('Ce modèle local n’est plus installé ou disponible.')
     }
@@ -2015,6 +2119,7 @@ app.on('before-quit', (event) => {
   for (const controller of activeChats.values()) controller.abort()
   const stopRuntimes = async (): Promise<void> => {
     await ollamaStartPromise?.catch(() => undefined)
+    await stopActiveLlamaInference().catch(() => undefined)
     await stopInferenceWslRuntime()
     await stopManagedLinuxRuntime()
     await stopManagedWslRuntime()
@@ -2047,8 +2152,10 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(SETUP_INFO_CHANNEL)
   ipcMain.removeHandler(OLLAMA_DOWNLOAD_CHANNEL)
   ipcMain.removeHandler(MODEL_PULL_CHANNEL)
+  ipcMain.removeHandler(MODEL_DELETE_CHANNEL)
   ipcMain.removeHandler(MODEL_WARM_CHANNEL)
-  ipcMain.removeHandler(INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL)
+  ipcMain.removeHandler(INFERENCE_GET_SETTINGS_CHANNEL)
+  ipcMain.removeHandler(INFERENCE_SET_SETTINGS_CHANNEL)
   ipcMain.removeHandler(INFERENCE_OPEN_LOG_CHANNEL)
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)

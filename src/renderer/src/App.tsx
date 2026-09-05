@@ -13,11 +13,11 @@ import {
 } from 'lucide-react'
 import type {
   CatalogModel,
-  InferenceBenchmarkProgress,
-  InferenceBenchmarkResult,
+  InferenceSettings,
   ModelCategory,
   ModelPullProgress,
   OllamaStatus,
+  ReasoningMode,
   RuntimeProgress,
   SetupInfo,
   UpdateState
@@ -127,9 +127,10 @@ export function App(): React.JSX.Element {
   const [pullProgress, setPullProgress] = useState<ModelPullProgress | null>(null)
   const [pullError, setPullError] = useState<string | null>(null)
   const [downloadingModel, setDownloadingModel] = useState<string | null>(null)
-  const [benchmarkingModel, setBenchmarkingModel] = useState<string | null>(null)
-  const [benchmarkProgress, setBenchmarkProgress] = useState<InferenceBenchmarkProgress | null>(null)
-  const [benchmarkResults, setBenchmarkResults] = useState<Record<string, InferenceBenchmarkResult>>({})
+  const [deletingModel, setDeletingModel] = useState<string | null>(null)
+  const [inferenceSettings, setInferenceSettings] = useState<InferenceSettings | null>(null)
+  const [savingInferenceSettings, setSavingInferenceSettings] = useState(false)
+  const [inferenceSettingsError, setInferenceSettingsError] = useState<string | null>(null)
   const [checkingOllama, setCheckingOllama] = useState(false)
   const [startingOllama, setStartingOllama] = useState(false)
   const [activatingRuntime, setActivatingRuntime] = useState(false)
@@ -202,6 +203,12 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    void window.localAgent.getInferenceSettings()
+      .then(setInferenceSettings)
+      .catch(() => setInferenceSettingsError('Les préférences de raisonnement n’ont pas pu être chargées.'))
+  }, [])
+
+  useEffect(() => {
     if ((updateState.status !== 'current' && updateState.status !== 'error') || localStartupStarted.current) return
     localStartupStarted.current = true
     void startOllama()
@@ -229,8 +236,6 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     return window.localAgent.onModelPullProgress(setPullProgress)
   }, [])
-
-  useEffect(() => window.localAgent.onInferenceBenchmarkProgress(setBenchmarkProgress), [])
 
   useEffect(() => {
     localStorage.setItem(CATEGORY_KEY, category)
@@ -340,23 +345,43 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function compareLlamaCpp(model: CatalogModel): Promise<void> {
-    setBenchmarkingModel(model.id)
-    setBenchmarkProgress({ model: model.id, detail: 'Préparation du comparatif local…', percent: 1 })
+  async function removeModel(model: CatalogModel): Promise<void> {
+    const confirmed = window.confirm(
+      `Supprimer ${model.name} de cet ordinateur ?\n\nLe modèle Ollama et son éventuel cache GGUF llama.cpp seront supprimés pour libérer de l’espace.`
+    )
+    if (!confirmed) return
+    setDeletingModel(model.id)
+    setPullError(null)
     try {
-      const result = await window.localAgent.benchmarkLlamaCpp(model.id)
-      setBenchmarkResults((current) => ({ ...current, [model.id]: result }))
+      const result = await window.localAgent.deleteModel(model.id)
+      if (!result.success) {
+        setPullError(result.reason)
+        return
+      }
+      const nextStatus = await window.localAgent.getOllamaStatus()
+      setStatus(nextStatus)
+      if (normalizeModelName(preferredModel) === normalizeModelName(model.id)) {
+        const nextModel = nextStatus.available ? nextStatus.models[0]?.name ?? '' : ''
+        localStorage.setItem('local-agent:model', nextModel)
+        setPreferredModel(nextModel)
+      }
     } catch (error) {
-      setBenchmarkResults((current) => ({
-        ...current,
-        [model.id]: {
-          success: false,
-          reason: error instanceof Error ? error.message : 'Le comparatif local a échoué.'
-        }
-      }))
+      setPullError(error instanceof Error ? error.message : 'Le modèle n’a pas pu être supprimé.')
     } finally {
-      setBenchmarkingModel(null)
-      setBenchmarkProgress(null)
+      setDeletingModel(null)
+    }
+  }
+
+  async function updateReasoningMode(reasoningMode: ReasoningMode): Promise<void> {
+    if (reasoningMode === inferenceSettings?.reasoningMode) return
+    setSavingInferenceSettings(true)
+    setInferenceSettingsError(null)
+    try {
+      setInferenceSettings(await window.localAgent.setInferenceSettings({ reasoningMode }))
+    } catch {
+      setInferenceSettingsError('Le mode de raisonnement n’a pas pu être enregistré.')
+    } finally {
+      setSavingInferenceSettings(false)
     }
   }
 
@@ -407,6 +432,9 @@ export function App(): React.JSX.Element {
         status={status}
         catalogModels={setup?.models ?? []}
         preferredModel={preferredModel}
+        inferenceSettings={inferenceSettings}
+        inferenceSettingsBusy={savingInferenceSettings}
+        onReasoningModeChange={updateReasoningMode}
         shortcut={workspaceShortcut}
         onShortcutHandled={() => setWorkspaceShortcut(null)}
         onOpenSetup={() => setView('setup')}
@@ -473,10 +501,9 @@ export function App(): React.JSX.Element {
           {visibleModels.map((model) => {
             const installed = installedModels.has(normalizeModelName(model.id))
             const downloading = downloadingModel === model.id
-            const benchmarking = benchmarkingModel === model.id
-            const benchmarkResult = benchmarkResults[model.id]
+            const deleting = deletingModel === model.id
             const disabled =
-              installed || Boolean(downloadingModel) || ['demanding', 'unsupported'].includes(model.compatibility) ||
+              installed || Boolean(downloadingModel) || Boolean(deletingModel) || ['demanding', 'unsupported'].includes(model.compatibility) ||
               !canDownload
 
             return (
@@ -491,12 +518,23 @@ export function App(): React.JSX.Element {
                 <code>{model.id}</code>
                 <p>{model.description}</p>
                 <div className="model-meta">
+                  {model.totalParametersBillions !== undefined && (
+                    <span>
+                      <strong>{model.architecture === 'moe' ? 'Architecture MoE' : 'Architecture dense'}</strong>
+                      {' '}{model.totalParametersBillions}B paramètres au total
+                      {model.activeParametersBillions !== undefined ? ` · ${model.activeParametersBillions}B actifs par token` : ''}
+                      {model.quantization ? ` · ${model.quantization}` : ''}
+                    </span>
+                  )}
                   <span><strong>Téléchargement</strong> ≈ {formatSize(model.downloadSizeBytes)} sur le disque</span>
                   <span><strong>Mémoire minimale</strong> {formatSize(model.minimumMemoryBytes)} de RAM</span>
                   {model.measuredTokensPerSecond !== undefined && (
                     <span><strong>Vitesse mesurée</strong> {model.measuredTokensPerSecond} tokens/s · première réponse ≈ {Math.max(0.1, (model.measuredFirstResponseMs ?? 0) / 1_000).toFixed(1)} s</span>
                   )}
                 </div>
+                {model.architecture === 'moe' && (
+                  <p className="model-memory-note">Les poids complets doivent rester en VRAM ou en RAM ; les paramètres actifs réduisent surtout le calcul.</p>
+                )}
                 <p className="model-execution">{executionEstimate(model, setup?.hardware)}</p>
                 <small>{model.compatibilityReason}</small>
 
@@ -522,38 +560,13 @@ export function App(): React.JSX.Element {
                         : 'Télécharger ce modèle'}
                 </button>
 
-                {installed && model.llamaCppAvailable && (
-                  <div className="runtime-benchmark">
-                    <button
-                      type="button"
-                      disabled={Boolean(benchmarkingModel) || Boolean(downloadingModel)}
-                      onClick={() => void compareLlamaCpp(model)}
-                    >{benchmarking ? 'Comparaison en cours…' : 'Comparer avec llama.cpp'}</button>
-                    {!benchmarkResult && !benchmarking && (
-                      <span className="benchmark-note">Le premier test télécharge séparément le modèle GGUF, puis restaure Ollama.</span>
-                    )}
-                    {benchmarking && benchmarkProgress?.model === model.id && (
-                      <div className="benchmark-progress" aria-live="polite">
-                        <span>{benchmarkProgress.detail}</span>
-                        <progress max="100" value={benchmarkProgress.percent} />
-                      </div>
-                    )}
-                    {benchmarkResult?.success && (
-                      <p className={`benchmark-result ${benchmarkResult.recommendation.replace('.', '-')}`}>
-                        {benchmarkResult.recommendation === 'llama.cpp'
-                          ? 'llama.cpp est sensiblement plus rapide sur cette machine.'
-                          : benchmarkResult.recommendation === 'ollama'
-                            ? 'Ollama reste sensiblement plus rapide sur cette machine.'
-                            : 'Les deux moteurs ont des performances proches.'}
-                        {' '}llama.cpp : {(benchmarkResult.llamaCpp.wallMs / 1_000).toFixed(1)} s
-                        {' · '}Ollama : {benchmarkResult.ollama ? `${(benchmarkResult.ollama.wallMs / 1_000).toFixed(1)} s` : 'non mesuré'}
-                        {' · '}backend {benchmarkResult.backend}
-                      </p>
-                    )}
-                    {benchmarkResult && !benchmarkResult.success && (
-                      <p className="benchmark-result error" role="alert">{benchmarkResult.reason}</p>
-                    )}
-                  </div>
+                {installed && (
+                  <button
+                    className="delete-model-button"
+                    type="button"
+                    disabled={Boolean(downloadingModel) || Boolean(deletingModel)}
+                    onClick={() => void removeModel(model)}
+                  >{deleting ? 'Suppression…' : 'Supprimer et libérer l’espace'}</button>
                 )}
               </article>
             )

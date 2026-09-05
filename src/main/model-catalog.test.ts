@@ -21,15 +21,15 @@ describe('getModelCatalog', () => {
       .toBe('recommended')
     expect(models.find((model) => model.id === 'qwen3.5:4b')?.compatibility)
       .toBe('recommended')
-    expect(models.find((model) => model.id === 'qwen3-coder:30b')?.compatibility)
+    expect(models.find((model) => model.id === 'qwen3.6:35b-a3b')?.compatibility)
       .toBe('demanding')
   })
 
-  it('does not recommend a large model that cannot fit in detected VRAM', () => {
+  it('does not recommend a large dense model that cannot fit in detected VRAM', () => {
     const model = getModelCatalog(hardware({
       totalMemoryBytes: 64_000_000_000,
       gpus: [{ model: 'GPU 16 GB', vramBytes: 16_000_000_000 }]
-    })).find((entry) => entry.id === 'qwen3.8:27b')
+    })).find((entry) => entry.id === 'devstral-small-2:24b')
 
     expect(model?.compatibility).toBe('demanding')
     expect(model?.compatibilityReason).toContain('trop lent')
@@ -47,8 +47,10 @@ describe('getModelCatalog', () => {
     expect(isCatalogModel('qwen3.5:0.8b')).toBe(true)
     expect(isCatalogModel('qwen3.5:4b')).toBe(true)
     expect(isCatalogModel('devstral-small-2:24b')).toBe(true)
-    expect(isCatalogModel('qwen2.5-coder:7b')).toBe(true)
-    expect(isCatalogModel('qwen2.5-coder:14b')).toBe(true)
+    expect(isCatalogModel('qwen3.6:35b-a3b')).toBe(true)
+    expect(isCatalogModel('qwen2.5-coder:7b')).toBe(false)
+    expect(isCatalogModel('qwen2.5-coder:14b')).toBe(false)
+    expect(isCatalogModel('qwen3-coder:30b')).toBe(false)
     expect(isCatalogModel('unknown/model')).toBe(false)
   })
 
@@ -57,34 +59,38 @@ describe('getModelCatalog', () => {
 
     expect(modelIds).toEqual(expect.arrayContaining([
       'devstral-small-2:24b',
-      'granite4.2:3b',
       'gpt-oss:20b',
-      'gemma4:e2b-it-qat',
-      'qwen2.5-coder:14b'
+      'ministral-3:3b',
+      'qwen3.6:35b-a3b'
+    ]))
+    expect(modelIds).not.toEqual(expect.arrayContaining([
+      'granite4.2:3b', 'gemma4:e2b-it-qat', 'qwen2.5-coder:14b'
     ]))
   })
 
   it('only exposes curated, verified llama.cpp alternatives', () => {
     expect(getLlamaCppArtifact('qwen3.5:4b')).toBe('unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL')
     expect(getLlamaCppArtifact('qwen3.5:9b')).toBe('unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL')
+    expect(getLlamaCppArtifact('qwen3.6:35b-a3b')).toBe('ggml-org/Qwen3.6-35B-A3B-GGUF:Q4_K_M')
+    expect(getLlamaCppArtifact('gpt-oss:20b')).toBe('ggml-org/gpt-oss-20b-GGUF:MXFP4')
+    expect(getLlamaCppArtifact('devstral-small-2:24b')).toBe('unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF:Q4_K_M')
     expect(getLlamaCppArtifact('qwen3.5:2b')).toBeNull()
-    expect(getModelCatalog(hardware()).find((model) => model.id === 'qwen3.5:4b')?.llamaCppAvailable).toBe(true)
   })
 
-  it('recommends the 14B coding specialist when it fits in detected VRAM', () => {
+  it('offers the newer MoE coding specialist for a 12 GB GPU with enough system RAM', () => {
     const catalog = getModelCatalog(hardware({
       totalMemoryBytes: 32_000_000_000,
       gpus: [{ model: 'GPU 12 GB', vramBytes: 12_000_000_000 }]
     }))
 
-    expect(catalog.find((model) => model.id === 'qwen2.5-coder:14b')?.compatibility)
-      .toBe('recommended')
+    expect(catalog.find((model) => model.id === 'qwen3.6:35b-a3b')?.compatibility)
+      .toBe('compatible')
     expect(selectInstalledSpecialistModel(
       catalog,
-      ['qwen3.5:9b', 'qwen2.5-coder:14b'],
+      ['qwen3.5:9b', 'qwen3.6:35b-a3b'],
       'code',
       'qwen3.5:9b'
-    )).toBe('qwen2.5-coder:14b')
+    )).toBe('qwen3.6:35b-a3b')
   })
 
   it('routes code work to an installed specialist and otherwise keeps the primary model', () => {
@@ -92,12 +98,12 @@ describe('getModelCatalog', () => {
 
     expect(selectInstalledSpecialistModel(
       catalog,
-      ['granite4.2:8b', 'qwen3.5:9b'],
+      ['ministral-3:8b', 'qwen3.5:9b'],
       'code',
-      'granite4.2:8b'
+      'ministral-3:8b'
     )).toBe('qwen3.5:9b')
-    expect(selectInstalledSpecialistModel(catalog, ['granite4.2:8b'], 'code', 'granite4.2:8b'))
-      .toBe('granite4.2:8b')
+    expect(selectInstalledSpecialistModel(catalog, ['ministral-3:8b'], 'code', 'ministral-3:8b'))
+      .toBe('ministral-3:8b')
     expect(selectInstalledSpecialistModel(
       getModelCatalog(hardware({ totalMemoryBytes: 16_000_000_000 })),
       ['qwen3.5:4b', 'devstral-small-2:24b'],
@@ -114,13 +120,12 @@ describe('getModelCatalog', () => {
 
   it('selects an installed interactive model instead of an oversized CPU-offloaded model', () => {
     const catalog = getModelCatalog(hardware({
-      totalMemoryBytes: 64_000_000_000,
-      gpus: [{ model: 'GPU 16 GB', vramBytes: 16_000_000_000 }]
+      totalMemoryBytes: 64_000_000_000
     }))
 
-    expect(selectInstalledInteractiveModel(catalog, ['qwen3.8:27b', 'qwen3.5:9b'], 'code'))
+    expect(selectInstalledInteractiveModel(catalog, ['qwen3.6:35b-a3b', 'qwen3.5:9b'], 'code'))
       .toBe('qwen3.5:9b')
-    expect(selectInstalledInteractiveModel(catalog, ['qwen3.8:27b'], 'code')).toBeNull()
+    expect(selectInstalledInteractiveModel(catalog, ['qwen3.6:35b-a3b'], 'code')).toBeNull()
   })
 
   it('avoids an installed model measured as too slow for interactive work', () => {
@@ -150,8 +155,15 @@ describe('getModelCatalog', () => {
       .toBe('qwen3.5:9b')
   })
 
-  it('keeps the workstation model unavailable on ordinary hardware', () => {
-    expect(getModelCatalog(hardware()).find((model) => model.id === 'devstral-2:123b')?.compatibility)
-      .toBe('demanding')
+  it('describes MoE storage and active parameters without implying it fits in active-parameter memory', () => {
+    const model = getModelCatalog(hardware()).find((entry) => entry.id === 'qwen3.6:35b-a3b')
+
+    expect(model).toMatchObject({
+      architecture: 'moe',
+      totalParametersBillions: 35,
+      activeParametersBillions: 3,
+      quantization: 'Q4_K_M',
+      compatibility: 'demanding'
+    })
   })
 })

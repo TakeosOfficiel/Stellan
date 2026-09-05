@@ -86,28 +86,23 @@ describe('intent classifier', () => {
     }])).toMatchObject({ intent: 'code', clear: true, reason: 'explicit-software-artifact' })
   })
 
-  it('lets the isolated model classify implicit feedback on previous software work', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) => {
-      if (String(url).endsWith('/api/ps')) return new Response(JSON.stringify({ models: [] }), { status: 200 })
-      return streamResponse([{ message: { content: 'CODE' }, done: true }])
-    })
-    vi.stubGlobal('fetch', fetcher)
-
+  it('routes explicit negative feedback on previous software work without relying on the model', async () => {
+    const inferenceProvider = { streamChat: vi.fn() } as unknown as InferenceProvider
     await expect(classifyIntent({
       model: 'test-model',
       messages: [
         { role: 'assistant', content: 'J’ai créé index.html, styles.css et app.js pour le site.' },
-        { role: 'user', content: 'Le site est moche !' }
+        { role: 'user', content: "C'est quoi ton site de merde là ?" }
       ],
-      signal: new AbortController().signal
+      signal: new AbortController().signal,
+      inferenceProvider
     })).resolves.toEqual({
       intent: 'code',
-      clear: false,
-      source: 'model',
-      reason: 'model-classification'
+      clear: true,
+      source: 'rule',
+      reason: 'negative-software-feedback'
     })
-    const request = JSON.parse(String(fetcher.mock.calls.find((call) => String(call[0]).endsWith('/api/chat'))?.[1]?.body))
-    expect(request.messages[0].content).toContain('demander implicitement de reprendre le résultat logiciel précédent')
+    expect(inferenceProvider.streamChat).not.toHaveBeenCalled()
   })
 
   it('routes normal answers to an active neither-yes-nor-no engine', () => {

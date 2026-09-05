@@ -17,6 +17,8 @@ import { OllamaIdleTimeoutError } from './ollama'
 import { ProjectTools } from './project-tools'
 
 const temporaryDirectories: string[] = []
+const substantiveWebsiteHtml = '<link rel="stylesheet" href="assets/css/style.css"><header><nav>Boutique</nav></header><main><section><h1>Collection</h1></section><section><article>Produit</article></section></main><footer>Contact</footer><script src="assets/js/game.js"></script>'
+const substantiveWebsiteCss = 'body { margin: 0; color: #fff; background: #111; font-family: sans-serif; } header { padding: 2rem; } main { display: grid; gap: 1rem; } section { padding: 2rem; } footer { padding: 1rem; }'
 
 describe('normalizeWorkerPath', () => {
   it('collapses Windows case and trailing-dot aliases without changing Linux case', () => {
@@ -1017,6 +1019,46 @@ describe('runCodingAgent', () => {
     expect(onContent).toHaveBeenCalledWith('Le fichier contient du contenu local.')
   })
 
+  it('reports each real inference boundary separately from tool execution', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'write_file', arguments: { path: 'app.js', content: 'console.log("ready")\n' } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le fichier est prêt.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const onInferenceEvent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [{ role: 'user', content: 'Crée app.js.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      onToolEvent: vi.fn(),
+      onInferenceEvent,
+      intentClassification: { intent: 'code', clear: true, source: 'rule', reason: 'test-file-change' },
+      authorize: vi.fn().mockResolvedValue(true)
+    })
+
+    expect(onInferenceEvent).toHaveBeenCalledTimes(4)
+    expect(onInferenceEvent).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      type: 'started', tool: 'model_inference', callId: 'inference:0'
+    }))
+    expect(onInferenceEvent).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      type: 'finished', result: '1 action choisie.'
+    }))
+    expect(onInferenceEvent).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      type: 'started', tool: 'model_inference', callId: 'inference:1'
+    }))
+    const firstRequest = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))
+    expect(firstRequest.options.num_predict).toBe(4_096)
+  })
+
   it('keeps tool-turn commentary hidden until tools finish and publishes only the final answer', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
@@ -1815,6 +1857,20 @@ describe('runCodingAgent', () => {
     expect(compacted[1]?.content).not.toContain('ancien')
   })
 
+  it('retains more history when the runtime exposes a larger context', () => {
+    const expandedLimit = 36_000
+    const compacted = compactConversation([
+      { role: 'system', content: 'instruction système' },
+      { role: 'user', content: `historique ${'a'.repeat(22_000)}` },
+      { role: 'assistant', content: 'réponse conservée' },
+      { role: 'user', content: 'nouvelle demande' }
+    ], expandedLimit)
+
+    expect(JSON.stringify(compacted).length).toBeGreaterThan(MAX_CONVERSATION_CHARACTERS)
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(expandedLimit)
+    expect(compacted.some((message) => message.content.includes('historique'))).toBe(true)
+  })
+
   it('keeps a large attached image without treating its base64 bytes as text context', () => {
     const imageData = 'a'.repeat(MAX_CONVERSATION_CHARACTERS * 2)
     const compacted = compactConversation([
@@ -2297,7 +2353,7 @@ describe('runCodingAgent', () => {
       }] }, done: true }]))
       .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le site est prêt.' }, done: true }]))
       .mockResolvedValueOnce(streamResponse([{
-        message: { content: '<stellan_file path="assets/css/style.css">\nbody { color: white; }\n</stellan_file>\n<stellan_file path="assets/js/game.js">\nconsole.log("animations ready")\n</stellan_file>' },
+        message: { content: `<stellan_file path="index.html">\n${substantiveWebsiteHtml}\n</stellan_file>\n<stellan_file path="assets/css/style.css">\n${substantiveWebsiteCss}\n</stellan_file>\n<stellan_file path="assets/js/game.js">\nconsole.log("animations ready")\n</stellan_file>` },
         done: true
       }]))
       .mockResolvedValueOnce(streamResponse([{ message: { content: 'Les trois fichiers sont maintenant présents.' }, done: true }]))
@@ -2317,7 +2373,8 @@ describe('runCodingAgent', () => {
     const repairRequest = JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))
     expect(repairRequest.tools).toBeUndefined()
     expect(repairRequest.messages.at(-1)?.content).toContain('<stellan_file path=')
-    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('color: white')
+    expect(repairRequest.messages.at(-1)?.content).toContain('page reste un placeholder')
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('display: grid')
     await expect(readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).resolves.toContain('animations ready')
     expect(onContent).toHaveBeenCalledWith('Les trois fichiers sont maintenant présents.')
   })
@@ -2332,7 +2389,7 @@ describe('runCodingAgent', () => {
       }] }, done: true }]))
       .mockRejectedValueOnce(new OllamaIdleTimeoutError())
       .mockResolvedValueOnce(streamResponse([{
-        message: { content: '<stellan_file path="assets/css/style.css">\nbody { color: white; }\n</stellan_file>\n<stellan_file path="assets/js/game.js">\nconsole.log("ready")\n</stellan_file>' },
+        message: { content: `<stellan_file path="index.html">\n${substantiveWebsiteHtml}\n</stellan_file>\n<stellan_file path="assets/css/style.css">\n${substantiveWebsiteCss}\n</stellan_file>\n<stellan_file path="assets/js/game.js">\nconsole.log("ready")\n</stellan_file>` },
         done: true
       }]))
       .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le site complet est prêt.' }, done: true }]))
@@ -2352,7 +2409,8 @@ describe('runCodingAgent', () => {
     const repairRequest = JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))
     expect(repairRequest.tools).toBeUndefined()
     expect(repairRequest.messages.at(-1)?.content).toContain('assets/css/style.css')
-    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('color: white')
+    expect(repairRequest.messages.at(-1)?.content).toContain('feuille de style reste trop sommaire')
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).resolves.toContain('display: grid')
     await expect(readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).resolves.toContain('ready')
     expect(onContent).not.toHaveBeenCalledWith(expect.stringMatching(/^Terminé\. 1 fichier/))
     expect(onContent).toHaveBeenCalledWith('Le site complet est prêt.')

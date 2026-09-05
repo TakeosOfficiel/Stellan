@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   LLAMA_CONTAINER_NAME,
+  LLAMA_CACHE_PATH,
   LLAMA_HOST_PORT,
   LLAMA_IMAGES,
   LLAMA_MODELS_VOLUME,
+  deleteLlamaModelCache,
   startLlamaServer,
   stopLlamaServer,
   waitForLlamaServer,
@@ -16,7 +18,7 @@ function result(exitCode: number, stdout = '', stderr = ''): CommandResult {
 }
 
 const options: LlamaContainerOptions = {
-  backend: 'cuda', modelArtifact: 'owner/model-GGUF:Q4_K_M', modelAlias: 'model:4b', contextSize: 8192, predictTokens: 1024, parallel: 2
+  backend: 'cuda', modelArtifact: 'owner/model-GGUF:Q4_K_M', modelAlias: 'model:4b', contextSize: 8192, predictTokens: 1024, parallel: 2, reasoningMode: 'fast'
 }
 
 describe('startLlamaServer', () => {
@@ -33,7 +35,7 @@ describe('startLlamaServer', () => {
       '--label', 'com.local-agent.service=llama.cpp',
       '--restart', 'unless-stopped', '--pull', 'missing',
       '--publish', `127.0.0.1:${LLAMA_HOST_PORT}:8080`,
-      '--volume', `${LLAMA_MODELS_VOLUME}:/root/.cache/llama.cpp`,
+      '--volume', `${LLAMA_MODELS_VOLUME}:${LLAMA_CACHE_PATH}`,
       '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--pids-limit', '1024',
       '--gpus', 'all', LLAMA_IMAGES.cuda,
       '--hf-repo', options.modelArtifact, '--alias', options.modelAlias,
@@ -42,8 +44,25 @@ describe('startLlamaServer', () => {
       '--reasoning', 'off', '--reasoning-budget', '0',
       '--n-gpu-layers', '-1'
     ]))
-    expect(args.find((arg) => arg.startsWith('com.local-agent.llama-config=v2-cuda-'))).toBeTruthy()
+    expect(args.find((arg) => arg.startsWith('com.local-agent.llama-config=v4-cuda-'))).toBeTruthy()
     expect(runner.mock.calls[2]?.[0]).toBe('docker')
+  })
+
+  it.each([
+    ['auto', 'auto', '768'],
+    ['advanced', 'on', '2048']
+  ] as const)('enables preserved %s reasoning with a bounded budget', async (reasoningMode, flag, budget) => {
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result(0)).mockResolvedValueOnce(result(1)).mockResolvedValueOnce(result(0))
+
+    await startLlamaServer({ ...options, reasoningMode }, runner)
+
+    const args = runner.mock.calls[2]?.[1] ?? []
+    expect(args).toEqual(expect.arrayContaining([
+      '--reasoning', flag,
+      '--reasoning-budget', budget,
+      '--reasoning-preserve'
+    ]))
   })
 
   it.each([
@@ -87,7 +106,7 @@ describe('startLlamaServer', () => {
     await expect(startLlamaServer(options, runner)).resolves.toMatchObject({ success: true })
     expect(runner).toHaveBeenNthCalledWith(3, 'docker', ['rm', '--force', LLAMA_CONTAINER_NAME], { timeoutMs: 30_000 })
     expect(runner.mock.calls.flatMap((call) => call[1])).not.toContain(LLAMA_MODELS_VOLUME)
-    expect(runner.mock.calls[3]?.[1]).toContain(`${LLAMA_MODELS_VOLUME}:/root/.cache/llama.cpp`)
+    expect(runner.mock.calls[3]?.[1]).toContain(`${LLAMA_MODELS_VOLUME}:${LLAMA_CACHE_PATH}`)
   })
 
   it('falls directly and deterministically from GPU to CPU without deleting the model volume', async () => {
@@ -100,7 +119,7 @@ describe('startLlamaServer', () => {
     })
     const fallback = runner.mock.calls[4]?.[1] ?? []
     expect(fallback).toContain(LLAMA_IMAGES.cpu)
-    expect(fallback).toContain(`${LLAMA_MODELS_VOLUME}:/root/.cache/llama.cpp`)
+    expect(fallback).toContain(`${LLAMA_MODELS_VOLUME}:${LLAMA_CACHE_PATH}`)
     expect(fallback).not.toContain('--gpus')
     expect(fallback).not.toContain('--n-gpu-layers')
     expect(runner.mock.calls.filter((call) => call[1][0] === 'rm')).toHaveLength(1)
@@ -120,5 +139,24 @@ describe('llama.cpp lifecycle', () => {
     const runner = vi.fn<CommandRunner>().mockResolvedValue(result(0))
     await stopLlamaServer(runner)
     expect(runner).toHaveBeenCalledWith('docker', ['stop', LLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
+  })
+})
+
+describe('deleteLlamaModelCache', () => {
+  it('removes only the selected Hugging Face repository from the shared cache', async () => {
+    const runner = vi.fn<CommandRunner>()
+      .mockResolvedValueOnce(result(0))
+      .mockResolvedValueOnce(result(1))
+      .mockResolvedValueOnce(result(0))
+      .mockResolvedValueOnce(result(0))
+
+    await deleteLlamaModelCache('ggml-org/Qwen3.6-35B-A3B-GGUF:Q4_K_M', runner)
+
+    expect(runner.mock.calls[3]?.[1]).toEqual([
+      'run', '--rm', '--entrypoint', '/bin/sh',
+      '--volume', `${LLAMA_MODELS_VOLUME}:${LLAMA_CACHE_PATH}`,
+      LLAMA_IMAGES.cuda, '-c',
+      `rm -rf -- '${LLAMA_CACHE_PATH}/hub/models--ggml-org--Qwen3.6-35B-A3B-GGUF'`
+    ])
   })
 })

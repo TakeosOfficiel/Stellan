@@ -29,8 +29,28 @@
       <div class="release-list">
         <article class="release-card latest">
           <header class="release-header">
-            <div class="release-title"><h2>Stellan 0.1.15</h2><span class="release-badge">Actuelle</span></div>
+            <div class="release-title"><h2>Stellan 0.1.16</h2><span class="release-badge">Actuelle</span></div>
             <time datetime="2026-09-05">5 septembre 2026</time>
+          </header>
+          <ul>
+            <li>llama.cpp devient le moteur principal pour les modèles GGUF vérifiés, avec sélection automatique de CUDA, ROCm, Vulkan ou CPU et repli transparent vers Ollama.</li>
+            <li>Boucle agent complète : chaque résultat d’outil est renvoyé au modèle jusqu’à la fin réelle de la tâche.</li>
+            <li>Activité en direct inspirée d’Amp : inférences, recherches, commandes, modifications et résultats apparaissent chronologiquement.</li>
+            <li>Mode Thinking activable directement dans le chat, avec un budget de raisonnement adapté au mode choisi.</li>
+            <li>Catalogue local nettoyé, modèles MoE récents ajoutés et compatibilité calculée selon le GPU, la RAM et le CPU.</li>
+            <li>Suppression complète d’un modèle et de son cache GGUF pour libérer l’espace disque.</li>
+            <li>Génération de projets renforcée : jusqu’à 4 096 tokens et rejet des pages manifestement incomplètes.</li>
+          </ul>
+          <div class="release-downloads">
+            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.16-win-x64.exe">Windows</a>
+            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.16-linux-x86_64.AppImage">Linux AppImage</a>
+          </div>
+        </article>
+
+        <article class="release-card">
+          <header class="release-header">
+            <div class="release-title"><h2>Stellan 0.1.15</h2></div>
+            <span class="release-meta">Version précédente</span>
           </header>
           <ul>
             <li>Comparatif llama.cpp corrigé pour valider le retour d’outil avec une conversation Qwen complète et valide.</li>

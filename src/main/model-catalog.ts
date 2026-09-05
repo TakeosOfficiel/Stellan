@@ -14,6 +14,11 @@ type ModelDefinition = {
   category: ModelCategory
   additionalCategories?: ModelCategory[]
   description: string
+  architecture?: 'dense' | 'moe'
+  totalParametersBillions?: number
+  activeParametersBillions?: number
+  quantization?: string
+  hybridEfficient?: boolean
   downloadSizeBytes: number
   minimumMemoryBytes: number
   supportedPlatforms?: HardwareInfo['platform'][]
@@ -28,6 +33,8 @@ const MODEL_CATALOG: ModelDefinition[] = [
     category: 'fast',
     additionalCategories: ['general'],
     description: 'Assistant minimal pour les machines sans accélération GPU ; moins précis mais nettement plus rapide en CPU.',
+    architecture: 'dense',
+    totalParametersBillions: 0.8,
     downloadSizeBytes: 1 * GB,
     minimumMemoryBytes: 4 * GB
   },
@@ -37,15 +44,9 @@ const MODEL_CATALOG: ModelDefinition[] = [
     category: 'fast',
     additionalCategories: ['general', 'code', 'vision'],
     description: 'Assistant récent ultraléger avec outils, programmation et vision.',
+    architecture: 'dense',
+    totalParametersBillions: 2,
     downloadSizeBytes: 2.7 * GB,
-    minimumMemoryBytes: 8 * GB
-  },
-  {
-    id: 'granite4.2:3b',
-    name: 'Granite 4.2 3B',
-    category: 'fast',
-    description: 'Petit modèle IBM multilingue, adapté aux outils et aux réponses structurées.',
-    downloadSizeBytes: 2.2 * GB,
     minimumMemoryBytes: 8 * GB
   },
   {
@@ -54,6 +55,9 @@ const MODEL_CATALOG: ModelDefinition[] = [
     category: 'code',
     additionalCategories: ['fast', 'general', 'vision'],
     description: 'Modèle polyvalent léger pour programmer, utiliser les outils et analyser des images.',
+    architecture: 'dense',
+    totalParametersBillions: 4,
+    quantization: 'Q4',
     downloadSizeBytes: 3.4 * GB,
     minimumMemoryBytes: 10 * GB,
     llamaCppArtifact: 'unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL'
@@ -64,74 +68,54 @@ const MODEL_CATALOG: ModelDefinition[] = [
     category: 'general',
     additionalCategories: ['code', 'vision'],
     description: 'Assistant polyvalent équilibré pour raisonner, programmer et comprendre des images.',
+    architecture: 'dense',
+    totalParametersBillions: 9,
+    quantization: 'Q4',
     downloadSizeBytes: 6.6 * GB,
     minimumMemoryBytes: 16 * GB,
     llamaCppArtifact: 'unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL'
   },
   {
-    id: 'qwen2.5-coder:7b',
-    name: 'Qwen 2.5 Coder 7B',
-    category: 'code',
-    description: 'Modèle de programmation compact pour générer, comprendre et corriger du code sur une petite configuration.',
-    downloadSizeBytes: 4.7 * GB,
-    minimumMemoryBytes: 10 * GB
-  },
-  {
-    id: 'qwen2.5-coder:14b',
-    name: 'Qwen 2.5 Coder 14B',
-    category: 'code',
-    description: 'Meilleur équilibre local pour le développement avancé sur une carte graphique de 12 à 16 Go.',
-    downloadSizeBytes: 9 * GB,
-    minimumMemoryBytes: 12 * GB
-  },
-  {
-    id: 'granite4.2:8b',
-    name: 'Granite 4.2 8B',
-    category: 'general',
-    description: 'Modèle IBM multilingue pour raisonner, rechercher et produire du JSON.',
-    downloadSizeBytes: 5.3 * GB,
-    minimumMemoryBytes: 16 * GB
-  },
-  {
     id: 'gpt-oss:20b',
     name: 'GPT-OSS 20B',
     category: 'general',
+    additionalCategories: ['code'],
     description: 'Raisonnement et outils avancés pour les machines avec beaucoup de mémoire.',
+    architecture: 'moe',
+    totalParametersBillions: 21,
+    activeParametersBillions: 3.6,
+    quantization: 'MXFP4',
+    hybridEfficient: true,
     downloadSizeBytes: 14 * GB,
-    minimumMemoryBytes: 28 * GB
+    minimumMemoryBytes: 24 * GB,
+    llamaCppArtifact: 'ggml-org/gpt-oss-20b-GGUF:MXFP4'
   },
   {
-    id: 'qwen3.8:27b',
-    name: 'Qwen 3.8 27B',
-    category: 'general',
-    additionalCategories: ['code', 'vision'],
-    description: 'Assistant multimodal puissant pour les tâches complexes, le code et la vision.',
-    downloadSizeBytes: 18 * GB,
-    minimumMemoryBytes: 32 * GB
-  },
-  {
-    id: 'qwen3-coder:30b',
-    name: 'Qwen 3 Coder 30B',
+    id: 'qwen3.6:35b-a3b',
+    name: 'Qwen 3.6 35B-A3B',
     category: 'code',
-    description: 'Modèle agentique puissant pour les dépôts et tâches complexes.',
-    downloadSizeBytes: 19 * GB,
-    minimumMemoryBytes: 32 * GB
+    additionalCategories: ['general', 'vision'],
+    description: 'MoE récent conçu pour le code agentique, les outils et les interfaces : 35B stockés, mais seulement 3B calculés par token.',
+    architecture: 'moe',
+    totalParametersBillions: 35,
+    activeParametersBillions: 3,
+    quantization: 'Q4_K_M',
+    hybridEfficient: true,
+    downloadSizeBytes: 23 * GB,
+    minimumMemoryBytes: 32 * GB,
+    llamaCppArtifact: 'ggml-org/Qwen3.6-35B-A3B-GGUF:Q4_K_M'
   },
   {
     id: 'devstral-small-2:24b',
     name: 'Devstral Small 2 24B',
     category: 'code',
     description: 'Modèle Mistral récent spécialisé dans les agents de programmation et les outils.',
+    architecture: 'dense',
+    totalParametersBillions: 24,
+    quantization: 'Q4_K_M',
     downloadSizeBytes: 15 * GB,
-    minimumMemoryBytes: 32 * GB
-  },
-  {
-    id: 'devstral-2:123b',
-    name: 'Devstral 2 123B',
-    category: 'code',
-    description: 'Modèle agentique très haut de gamme (72,2 % SWE-bench Verified) pour stations de travail.',
-    downloadSizeBytes: 75 * GB,
-    minimumMemoryBytes: 80 * GB
+    minimumMemoryBytes: 32 * GB,
+    llamaCppArtifact: 'unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF:Q4_K_M'
   },
   {
     id: 'ministral-3:3b',
@@ -148,22 +132,6 @@ const MODEL_CATALOG: ModelDefinition[] = [
     description: 'Analyse visuelle polyvalente avec appels d’outils.',
     downloadSizeBytes: 6 * GB,
     minimumMemoryBytes: 18 * GB
-  },
-  {
-    id: 'gemma4:e2b-it-qat',
-    name: 'Gemma 4 E2B',
-    category: 'vision',
-    description: 'Modèle visuel Google compact, multilingue et compatible avec les outils.',
-    downloadSizeBytes: 4.3 * GB,
-    minimumMemoryBytes: 14 * GB
-  },
-  {
-    id: 'gemma4:12b',
-    name: 'Gemma 4 12B',
-    category: 'vision',
-    description: 'Analyse visuelle Google plus précise pour les configurations puissantes.',
-    downloadSizeBytes: 7.6 * GB,
-    minimumMemoryBytes: 22 * GB
   },
   {
     id: 'x/flux2-klein:4b',
@@ -208,11 +176,21 @@ function getCompatibility(
   let compatibility: ModelCompatibility
   let compatibilityReason: string
 
-  if (!fitsGpu && !lightweight) {
+  if (knownVram === 0 && !lightweight) {
+    compatibility = 'demanding'
+    compatibilityReason = availableMemory >= model.minimumMemoryBytes
+      ? 'Exécutable en CPU, mais probablement trop lent pour un agent interactif.'
+      : 'Peut être lent ou manquer de mémoire sur cette machine.'
+  } else if (!fitsGpu && !lightweight && !model.hybridEfficient) {
     compatibility = 'demanding'
     compatibilityReason = availableMemory >= model.minimumMemoryBytes
       ? 'Le modèle utilisera fortement le processeur et risque d’être trop lent pour un usage interactif.'
       : 'Peut être lent ou manquer de mémoire sur cette machine.'
+  } else if (model.hybridEfficient && knownVram > 0 && hardware.totalMemoryBytes >= model.minimumMemoryBytes) {
+    compatibility = 'compatible'
+    compatibilityReason = fitsGpu
+      ? 'Le modèle MoE devrait tenir dans le GPU.'
+      : 'Exécution hybride GPU + RAM possible ; la vitesse dépendra du matériel.'
   } else if (availableMemory >= model.minimumMemoryBytes * 1.25) {
     compatibility = 'recommended'
     compatibilityReason = 'Recommandé pour la mémoire détectée.'
@@ -229,11 +207,10 @@ function getCompatibility(
 
 export function getModelCatalog(hardware: HardwareInfo): CatalogModel[] {
   return MODEL_CATALOG.map((model) => {
-    const { additionalCategories = [], llamaCppArtifact, ...definition } = model
+    const { additionalCategories = [], llamaCppArtifact, hybridEfficient: _hybridEfficient, ...definition } = model
     return {
       ...definition,
       categories: [model.category, ...additionalCategories],
-      llamaCppAvailable: Boolean(llamaCppArtifact),
       ...getCompatibility(model, hardware)
     }
   })

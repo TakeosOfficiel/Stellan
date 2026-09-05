@@ -47,6 +47,7 @@ const chatChunkSchema = z.object({
     })).optional()
   }).optional(),
   done: z.boolean().optional(),
+  done_reason: z.string().optional(),
   total_duration: z.number().nonnegative().optional(),
   load_duration: z.number().nonnegative().optional(),
   prompt_eval_count: z.number().nonnegative().optional(),
@@ -335,6 +336,24 @@ export async function pullOllamaModel(
   }
 }
 
+export async function deleteOllamaModel(
+  model: string,
+  fetcher: typeof fetch = fetch
+): Promise<ModelPullResult> {
+  try {
+    const response = await fetcher(`${activeOllamaUrl}/api/delete`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model })
+    })
+    return response.ok
+      ? { success: true }
+      : { success: false, reason: `Le modèle n’a pas pu être supprimé (statut ${response.status}).` }
+  } catch {
+    return { success: false, reason: 'Le moteur local n’est pas joignable pour supprimer ce modèle.' }
+  }
+}
+
 export async function warmOllamaModel(
   model: string,
   fetcher: typeof fetch = fetch
@@ -375,6 +394,7 @@ export async function streamOllamaChat(
   const toolCalls: OllamaToolCall[] = []
   let requestMessages = messages
   let timings: OllamaTimings = {}
+  let doneReason: string | undefined
   const idleController = new AbortController()
   let idleTimeout: ReturnType<typeof setTimeout> | null = null
   const touch = (): void => {
@@ -408,7 +428,7 @@ export async function streamOllamaChat(
           ...modelContextOptions(model, numCtx),
           ...(numPredict === undefined
             ? {}
-            : { num_predict: Math.max(1, Math.min(modelOptions.num_predict, Math.floor(numPredict))) })
+            : { num_predict: Math.max(1, Math.min(8_192, Math.floor(numPredict))) })
         },
         ...(tools ? { tools } : {})
       }),
@@ -451,6 +471,7 @@ export async function streamOllamaChat(
         }
         if (chunk.done === true) {
           completed = true
+          doneReason = chunk.done_reason
           timings = {
             totalDuration: chunk.total_duration,
             loadDuration: chunk.load_duration,
@@ -481,7 +502,7 @@ export async function streamOllamaChat(
           })
         }
         onDiagnostics?.(
-          `ollama.metrics model=${model} wallMs=${wallMs.toFixed(1)} firstResponseMs=${((firstResponseAt ?? performance.now()) - chatStartedAt).toFixed(1)} loadMs=${durationMs(timings.loadDuration)} promptEvalMs=${durationMs(timings.promptEvalDuration)} promptTokens=${timings.promptEvalCount ?? 'unknown'} generationMs=${durationMs(timings.evalDuration)} generatedTokens=${timings.evalCount ?? 'unknown'} tokensPerSecond=${tokensPerSecond} totalMs=${durationMs(timings.totalDuration)}`
+          `ollama.metrics model=${model} wallMs=${wallMs.toFixed(1)} firstResponseMs=${((firstResponseAt ?? performance.now()) - chatStartedAt).toFixed(1)} loadMs=${durationMs(timings.loadDuration)} promptEvalMs=${durationMs(timings.promptEvalDuration)} promptTokens=${timings.promptEvalCount ?? 'unknown'} generationMs=${durationMs(timings.evalDuration)} generatedTokens=${timings.evalCount ?? 'unknown'} tokensPerSecond=${tokensPerSecond} totalMs=${durationMs(timings.totalDuration)} stopReason=${doneReason ?? 'unknown'}`
         )
         return { content, toolCalls }
       }

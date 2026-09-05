@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { ReasoningMode } from '../shared/contracts'
 import { runCommand, type CommandResult, type CommandRunner } from './runtime'
 
 export type LlamaBackend = 'cpu' | 'cuda' | 'rocm' | 'vulkan'
@@ -16,15 +17,17 @@ export type LlamaContainerOptions = {
   contextSize: number
   predictTokens: number
   parallel: number
+  reasoningMode: ReasoningMode
 }
 
 export const LLAMA_CONTAINER_NAME = 'local-agent-llama-server'
 export const LLAMA_MODELS_VOLUME = 'local-agent-llama-models'
+export const LLAMA_CACHE_PATH = '/root/.cache/huggingface'
 export const LLAMA_HOST_PORT = 11436
 export const LLAMA_CONTAINER_PORT = 8080
 export const LLAMA_MANAGED_LABEL = 'com.local-agent.service=llama.cpp'
 export const LLAMA_CONFIG_LABEL = 'com.local-agent.llama-config'
-export const LLAMA_CONFIG_VERSION = 'v2'
+export const LLAMA_CONFIG_VERSION = 'v4'
 export const LLAMA_IMAGES: Readonly<Record<LlamaBackend, string>> = {
   cpu: 'ghcr.io/ggml-org/llama.cpp:server',
   cuda: 'ghcr.io/ggml-org/llama.cpp:server-cuda',
@@ -45,7 +48,7 @@ function configFor(options: LlamaContainerOptions, backend: LlamaBackend): strin
     .update(`${options.modelArtifact}\0${options.modelAlias}`)
     .digest('hex')
     .slice(0, 16)
-  return `${LLAMA_CONFIG_VERSION}-${backend}-m${artifactHash}-c${options.contextSize}-n${options.predictTokens}-p${options.parallel}`
+  return `${LLAMA_CONFIG_VERSION}-${backend}-m${artifactHash}-c${options.contextSize}-n${options.predictTokens}-p${options.parallel}-r${options.reasoningMode}`
 }
 
 async function removeContainer(runner: CommandRunner): Promise<CommandResult> {
@@ -64,6 +67,9 @@ export async function startLlamaServer(
   }
   if (![options.contextSize, options.predictTokens, options.parallel].every(validPositiveInteger)) {
     return { success: false, reason: 'Le contexte, la prédiction et le parallélisme doivent être des entiers positifs.' }
+  }
+  if (!['fast', 'auto', 'advanced'].includes(options.reasoningMode)) {
+    return { success: false, reason: 'Le mode de raisonnement local est invalide.' }
   }
 
   let docker: CommandResult
@@ -108,7 +114,7 @@ export async function startLlamaServer(
     '--restart', 'unless-stopped',
     '--pull', 'missing',
     '--publish', `127.0.0.1:${LLAMA_HOST_PORT}:${LLAMA_CONTAINER_PORT}`,
-    '--volume', `${LLAMA_MODELS_VOLUME}:/root/.cache/llama.cpp`,
+    '--volume', `${LLAMA_MODELS_VOLUME}:${LLAMA_CACHE_PATH}`,
     '--security-opt', 'no-new-privileges',
     '--cap-drop', 'ALL',
     '--pids-limit', '1024',
@@ -124,8 +130,9 @@ export async function startLlamaServer(
     '--n-predict', String(options.predictTokens),
     '--parallel', String(options.parallel),
     '--jinja',
-    '--reasoning', 'off',
-    '--reasoning-budget', '0',
+    '--reasoning', options.reasoningMode === 'fast' ? 'off' : options.reasoningMode === 'advanced' ? 'on' : 'auto',
+    '--reasoning-budget', options.reasoningMode === 'fast' ? '0' : options.reasoningMode === 'advanced' ? '2048' : '768',
+    ...(options.reasoningMode === 'fast' ? [] : ['--reasoning-preserve']),
     ...(backend === 'cpu' ? [] : ['--n-gpu-layers', '-1'])
   ], { timeoutMs: 600_000, maxOutputBytes: 50_000 })
 
@@ -175,5 +182,37 @@ export async function stopLlamaServer(runner: CommandRunner = runCommand): Promi
   const stopped = await runner('docker', ['stop', LLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
   if (stopped.exitCode !== 0 && !/no such (?:object|container)/i.test(`${stopped.stderr}\n${stopped.stdout}`)) {
     throw new Error(`Le conteneur llama.cpp n’a pas pu s’arrêter. ${detail(stopped)}`.trim())
+  }
+}
+
+export async function deleteLlamaModelCache(
+  modelArtifact: string,
+  runner: CommandRunner = runCommand
+): Promise<void> {
+  const repository = modelArtifact.split(':', 1)[0] ?? ''
+  const match = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(repository)
+  if (!match) throw new Error('L’artefact GGUF à supprimer est invalide.')
+
+  const volume = await runner('docker', ['volume', 'inspect', LLAMA_MODELS_VOLUME], { timeoutMs: 15_000 })
+  if (volume.exitCode !== 0) return
+
+  let image: string | null = null
+  for (const candidate of Object.values(LLAMA_IMAGES)) {
+    const inspected = await runner('docker', ['image', 'inspect', candidate], { timeoutMs: 15_000 })
+    if (inspected.exitCode === 0) {
+      image = candidate
+      break
+    }
+  }
+  if (!image) throw new Error('Le cache GGUF existe, mais aucune image llama.cpp locale ne permet de le nettoyer.')
+
+  const cacheDirectory = `${LLAMA_CACHE_PATH}/hub/models--${match[1]}--${match[2]}`
+  const removed = await runner('docker', [
+    'run', '--rm', '--entrypoint', '/bin/sh',
+    '--volume', `${LLAMA_MODELS_VOLUME}:${LLAMA_CACHE_PATH}`,
+    image, '-c', `rm -rf -- '${cacheDirectory}'`
+  ], { timeoutMs: 120_000 })
+  if (removed.exitCode !== 0 || removed.timedOut) {
+    throw new Error(`Le cache GGUF n’a pas pu être supprimé. ${detail(removed)}`.trim())
   }
 }

@@ -21,19 +21,25 @@ await import('./index')
 const api = mocks.exposeInMainWorld.mock.calls[0]?.[1] as LocalAgentApi
 
 describe('portal preload IPC', () => {
-  it('exposes the local llama.cpp benchmark and its progress stream', async () => {
-    const listener = vi.fn()
-    const unsubscribe = api.onInferenceBenchmarkProgress(listener)
-    await api.benchmarkLlamaCpp('qwen3.5:4b')
+  it('opens the local inference diagnostic log', async () => {
     await api.openInferenceLog()
-    unsubscribe()
+
+    expect(mocks.invoke).toHaveBeenLastCalledWith('inference:open-log')
+  })
+
+  it('reads and writes the local reasoning mode', async () => {
+    await api.getInferenceSettings()
+    await api.setInferenceSettings({ reasoningMode: 'advanced' })
 
     expect(mocks.invoke.mock.calls.slice(-2)).toEqual([
-      ['inference:benchmark-llama-cpp', 'qwen3.5:4b'],
-      ['inference:open-log']
+      ['inference:get-settings'],
+      ['inference:set-settings', { reasoningMode: 'advanced' }]
     ])
-    expect(mocks.on).toHaveBeenCalledWith('inference:benchmark-progress', expect.any(Function))
-    expect(mocks.removeListener).toHaveBeenCalledWith('inference:benchmark-progress', expect.any(Function))
+  })
+
+  it('forwards an explicit local model deletion', async () => {
+    await api.deleteModel('qwen3.5:4b')
+    expect(mocks.invoke).toHaveBeenLastCalledWith('ollama:delete-model', 'qwen3.5:4b')
   })
 
   it('exposes project and numeric-port modes, never an upstream host or URL', async () => {
