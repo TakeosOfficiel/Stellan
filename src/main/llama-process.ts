@@ -24,7 +24,7 @@ export const LLAMA_HOST_PORT = 11436
 export const LLAMA_CONTAINER_PORT = 8080
 export const LLAMA_MANAGED_LABEL = 'com.local-agent.service=llama.cpp'
 export const LLAMA_CONFIG_LABEL = 'com.local-agent.llama-config'
-export const LLAMA_CONFIG_VERSION = 'v1'
+export const LLAMA_CONFIG_VERSION = 'v2'
 export const LLAMA_IMAGES: Readonly<Record<LlamaBackend, string>> = {
   cpu: 'ghcr.io/ggml-org/llama.cpp:server',
   cuda: 'ghcr.io/ggml-org/llama.cpp:server-cuda',
@@ -124,6 +124,8 @@ export async function startLlamaServer(
     '--n-predict', String(options.predictTokens),
     '--parallel', String(options.parallel),
     '--jinja',
+    '--reasoning', 'off',
+    '--reasoning-budget', '0',
     ...(backend === 'cpu' ? [] : ['--n-gpu-layers', '-1'])
   ], { timeoutMs: 600_000, maxOutputBytes: 50_000 })
 

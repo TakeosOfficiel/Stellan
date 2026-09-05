@@ -30,13 +30,15 @@ describe('qualifyInferenceProvider', () => {
   })
 
   it('rejects a provider that only narrates an intended tool call', async () => {
+    const diagnostics = vi.fn()
     const provider: InferenceProvider = {
       id: 'test',
       streamChat: vi.fn()
         .mockResolvedValueOnce({ content: 'STELLAN_OK', toolCalls: [] })
         .mockResolvedValueOnce({ content: 'Je vais appeler stellan_probe.', toolCalls: [] })
     }
-    await expect(qualifyInferenceProvider(provider, 'model')).rejects.toThrow('appel d’outil structuré')
+    await expect(qualifyInferenceProvider(provider, 'model', undefined, diagnostics)).rejects.toThrow('appel d’outil structuré')
+    expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('calls=none'))
   })
 })
 

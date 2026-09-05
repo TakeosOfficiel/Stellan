@@ -19,6 +19,10 @@ export type ProviderQualification = {
   metrics: InferenceBenchmarkMetrics
 }
 
+function probeOutput(content: string): string {
+  return JSON.stringify(content.replace(/\s+/g, ' ').trim().slice(0, 160))
+}
+
 function aggregateMetrics(metrics: InferencePerformanceMetrics[]): InferenceBenchmarkMetrics {
   const tokens = metrics.map((entry) => entry.tokensPerSecond).filter((value): value is number => value !== null)
   return {
@@ -58,6 +62,7 @@ export async function qualifyInferenceProvider(
     common.onMetrics
   )
   if (!text.content.toUpperCase().includes('STELLAN_OK')) {
+    onDiagnostics?.(`qualification.text-control rejected output=${probeOutput(text.content)}`)
     throw new Error('Le moteur n’a pas respecté la réponse texte de contrôle.')
   }
 
@@ -79,6 +84,7 @@ export async function qualifyInferenceProvider(
   )
   const call = tool.toolCalls.find((candidate) => candidate.function.name === 'stellan_probe')
   if (!call || call.function.arguments.value !== 'ok') {
+    onDiagnostics?.(`qualification.tool-control rejected calls=${tool.toolCalls.map((candidate) => candidate.function.name).join(',') || 'none'} output=${probeOutput(tool.content)}`)
     throw new Error('Le moteur n’a pas produit l’appel d’outil structuré attendu.')
   }
 
@@ -101,6 +107,7 @@ export async function qualifyInferenceProvider(
     common.onMetrics
   )
   if (!roundTrip.content.toUpperCase().includes('TOOL_RESULT_OK')) {
+    onDiagnostics?.(`qualification.tool-result-control rejected output=${probeOutput(roundTrip.content)}`)
     throw new Error('Le moteur n’a pas correctement relié le résultat à son appel d’outil.')
   }
   if (metrics.length !== 3) throw new Error('Le moteur n’a pas fourni toutes les mesures attendues.')

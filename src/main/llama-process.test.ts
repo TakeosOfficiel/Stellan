@@ -38,9 +38,11 @@ describe('startLlamaServer', () => {
       '--gpus', 'all', LLAMA_IMAGES.cuda,
       '--hf-repo', options.modelArtifact, '--alias', options.modelAlias,
       '--ctx-size', '8192', '--n-predict', '1024',
-      '--parallel', '2', '--jinja', '--n-gpu-layers', '-1'
+      '--parallel', '2', '--jinja',
+      '--reasoning', 'off', '--reasoning-budget', '0',
+      '--n-gpu-layers', '-1'
     ]))
-    expect(args.find((arg) => arg.startsWith('com.local-agent.llama-config=v1-cuda-'))).toBeTruthy()
+    expect(args.find((arg) => arg.startsWith('com.local-agent.llama-config=v2-cuda-'))).toBeTruthy()
     expect(runner.mock.calls[2]?.[0]).toBe('docker')
   })
 
