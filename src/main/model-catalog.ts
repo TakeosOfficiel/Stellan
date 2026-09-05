@@ -4,6 +4,7 @@ import type {
   ModelCompatibility,
   ModelCategory
 } from '../shared/contracts'
+import type { ModelPerformance } from './model-performance'
 
 const GB = 1_000_000_000
 
@@ -17,6 +18,7 @@ type ModelDefinition = {
   minimumMemoryBytes: number
   supportedPlatforms?: HardwareInfo['platform'][]
   experimental?: boolean
+  llamaCppArtifact?: string
 }
 
 const MODEL_CATALOG: ModelDefinition[] = [
@@ -53,7 +55,8 @@ const MODEL_CATALOG: ModelDefinition[] = [
     additionalCategories: ['fast', 'general', 'vision'],
     description: 'Modèle polyvalent léger pour programmer, utiliser les outils et analyser des images.',
     downloadSizeBytes: 3.4 * GB,
-    minimumMemoryBytes: 10 * GB
+    minimumMemoryBytes: 10 * GB,
+    llamaCppArtifact: 'unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL'
   },
   {
     id: 'qwen3.5:9b',
@@ -62,7 +65,24 @@ const MODEL_CATALOG: ModelDefinition[] = [
     additionalCategories: ['code', 'vision'],
     description: 'Assistant polyvalent équilibré pour raisonner, programmer et comprendre des images.',
     downloadSizeBytes: 6.6 * GB,
-    minimumMemoryBytes: 16 * GB
+    minimumMemoryBytes: 16 * GB,
+    llamaCppArtifact: 'unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL'
+  },
+  {
+    id: 'qwen2.5-coder:7b',
+    name: 'Qwen 2.5 Coder 7B',
+    category: 'code',
+    description: 'Modèle de programmation compact pour générer, comprendre et corriger du code sur une petite configuration.',
+    downloadSizeBytes: 4.7 * GB,
+    minimumMemoryBytes: 10 * GB
+  },
+  {
+    id: 'qwen2.5-coder:14b',
+    name: 'Qwen 2.5 Coder 14B',
+    category: 'code',
+    description: 'Meilleur équilibre local pour le développement avancé sur une carte graphique de 12 à 16 Go.',
+    downloadSizeBytes: 9 * GB,
+    minimumMemoryBytes: 12 * GB
   },
   {
     id: 'granite4.2:8b',
@@ -209,13 +229,18 @@ function getCompatibility(
 
 export function getModelCatalog(hardware: HardwareInfo): CatalogModel[] {
   return MODEL_CATALOG.map((model) => {
-    const { additionalCategories = [], ...definition } = model
+    const { additionalCategories = [], llamaCppArtifact, ...definition } = model
     return {
       ...definition,
       categories: [model.category, ...additionalCategories],
+      llamaCppAvailable: Boolean(llamaCppArtifact),
       ...getCompatibility(model, hardware)
     }
   })
+}
+
+export function getLlamaCppArtifact(modelId: string): string | null {
+  return MODEL_CATALOG.find((model) => model.id === modelId)?.llamaCppArtifact ?? null
 }
 
 export function isCatalogModel(model: string): boolean {
@@ -256,13 +281,19 @@ export function selectInstalledSpecialistModel(
 export function selectInstalledInteractiveModel(
   catalog: readonly CatalogModel[],
   installedModels: readonly string[],
-  category: ModelCategory
+  category: ModelCategory,
+  performance: ReadonlyMap<string, ModelPerformance> = new Map()
 ): string | null {
   const installedById = new Map(installedModels.map((model) => [normalizedModelId(model), model]))
   const candidate = [...catalog]
     .filter((model) => model.categories.includes(category))
     .filter((model) => model.compatibility === 'recommended' || model.compatibility === 'compatible')
     .filter((model) => installedById.has(normalizedModelId(model.id)))
+    .filter((model) => {
+      const measured = performance.get(normalizedModelId(model.id))
+      return !measured || (measured.firstResponseMs <= 45_000
+        && (measured.tokensPerSecond === null || measured.tokensPerSecond >= 3))
+    })
     .sort((left, right) => right.downloadSizeBytes - left.downloadSizeBytes)[0]
   return candidate ? installedById.get(normalizedModelId(candidate.id)) ?? candidate.id : null
 }

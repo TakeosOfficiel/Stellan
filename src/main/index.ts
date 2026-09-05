@@ -5,7 +5,7 @@ import { cp, lstat, mkdir, rm, statfs } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { z } from 'zod'
-import type { ChatMessage, ModelPullProgress, OllamaStatus, RuntimeProgress } from '../shared/contracts'
+import type { ChatMessage, InferenceBenchmarkResult, ModelPullProgress, OllamaStatus, RuntimeProgress } from '../shared/contracts'
 import { compactConversation, normalizeWorkerPath, runCodingAgent, type AgentToolLifecycleEvent, type WorkerTask } from './agent'
 import { runAdvisor } from './advisor'
 import {
@@ -18,6 +18,7 @@ import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
 import { getBasicHardwareInfo, getHardwareInfo, inferenceModelOptions, inferenceParallelism } from './hardware'
 import { classifyIntent } from './intent-classifier'
+import { compareInferenceMetrics, qualifyInferenceProvider } from './inference-benchmark'
 import {
   configureInferenceWslRuntime,
   ensureNvidiaInferenceRuntime,
@@ -32,13 +33,16 @@ import {
   ensureManagedLinuxRuntime,
   stopManagedLinuxRuntime
 } from './linux-runtime'
-import { getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledInteractiveModel, selectInstalledSpecialistModel } from './model-catalog'
+import { getLlamaCppArtifact, getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledInteractiveModel, selectInstalledSpecialistModel } from './model-catalog'
+import { hardwarePerformanceKey, ModelPerformanceStore } from './model-performance'
 import { configureOllamaModelOptions, configureOllamaUrl, getOllamaStatus, getOllamaStatusAt, modelSupportsTools, modelSupportsVision, pullOllamaModel, streamOllamaChat, warmOllamaModel } from './ollama'
 import { detectOllamaGpuBackend, OLLAMA_CONTAINER_NAME, OLLAMA_HOST_PORT, startOllamaServer, type OllamaGpuBackend } from './ollama-process'
+import { LLAMA_HOST_PORT, startLlamaServer, stopLlamaServer, waitForLlamaServer, type LlamaBackend } from './llama-process'
+import { createLocalOpenAICompatibleProvider } from './openai-compatible'
 import { assertPortalAccess, PortalManager } from './portal'
 import { ProjectTools } from './project-tools'
 import { createReliableEngineRegistry, ReliableActivityService } from './reliable-activities'
-import { createThreadWorktree, ensureWorkerContainer, exposeWorkerPort, getRuntimeInfo, removeThreadWorktree, removeWorkerContainer } from './runtime'
+import { createThreadWorktree, ensureWorkerContainer, exposeWorkerPort, getRuntimeInfo, removeThreadWorktree, removeWorkerContainer, runCommand, type CommandRunner } from './runtime'
 import { ThreadStore, type AgentRun, type AgentRunSummary as StoredAgentRunSummary } from './storage'
 import { TerminalManager } from './terminal'
 import { createWorkerCommandExecutor } from './worker-runtime'
@@ -66,6 +70,8 @@ const RUNTIME_PROGRESS_CHANNEL = 'runtime:progress'
 const MODEL_PULL_CHANNEL = 'ollama:pull-model'
 const MODEL_PULL_PROGRESS_CHANNEL = 'ollama:pull-progress'
 const MODEL_WARM_CHANNEL = 'ollama:warm-model'
+const INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL = 'inference:benchmark-llama-cpp'
+const INFERENCE_BENCHMARK_PROGRESS_CHANNEL = 'inference:benchmark-progress'
 const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
@@ -217,8 +223,10 @@ const activeThreadOwners = new Map<number, string>()
 const approvedProjectPaths = new Map<string, 'git' | 'folder'>()
 let recoveredQueueScheduled = false
 let threadStore: ThreadStore | null = null
+let modelPerformanceStore: ModelPerformanceStore | null = null
 let mainWindow: BrowserWindow | null = null
 let ollamaStartPromise: Promise<OllamaStatus> | null = null
+let llamaBenchmarkPromise: Promise<InferenceBenchmarkResult> | null = null
 let ollamaGpuBackend: OllamaGpuBackend = 'cpu'
 let ollamaGpuBackendResolved = false
 let shutdownReady = false
@@ -355,6 +363,94 @@ function ensureOllamaRunning(): Promise<OllamaStatus> {
   })
 
   return ollamaStartPromise
+}
+
+function llamaBackendFromOllama(backend: OllamaGpuBackend): LlamaBackend {
+  if (backend === 'nvidia') return 'cuda'
+  if (backend === 'amd-rocm') return 'rocm'
+  return backend
+}
+
+async function benchmarkLlamaCpp(
+  model: string,
+  onProgress: (detail: string, percent: number) => void
+): Promise<InferenceBenchmarkResult> {
+  const artifact = getLlamaCppArtifact(model)
+  if (!artifact) return { success: false, reason: 'Ce modèle ne possède pas encore de version llama.cpp vérifiée par Stellan.' }
+  if (activeChats.size > 0 || activeDownloadPromise || getThreadStore().listActiveAgentRuns().length > 0) {
+    return { success: false, reason: 'Terminez les générations et téléchargements en cours avant de lancer le comparatif.' }
+  }
+
+  const status = await ensureOllamaRunning()
+  if (!status.available || !status.models.some((entry) => entry.name === model || entry.name === `${model}:latest`)) {
+    return { success: false, reason: 'Installez d’abord ce modèle dans Stellan pour effectuer une comparaison équitable.' }
+  }
+
+  const hardware = await getHardwareInfo()
+  const modelOptions = inferenceModelOptions(hardware)
+  const requestedBackend = llamaBackendFromOllama(ollamaGpuBackend)
+  let runner: CommandRunner = runCommand
+  let baseUrl = managedWslServiceUrl(LLAMA_HOST_PORT) ?? `http://127.0.0.1:${LLAMA_HOST_PORT}`
+  let trustedRuntimeNetwork = false
+  if (process.platform === 'win32' && requestedBackend === 'cuda') {
+    await ensureNvidiaInferenceRuntime()
+    runner = runInferenceDockerCommand
+    baseUrl = inferenceWslServiceUrl(LLAMA_HOST_PORT) ?? baseUrl
+    trustedRuntimeNetwork = true
+  }
+
+  onProgress(`Mesure d’Ollama avec ${model}…`, 8)
+  let ollama
+  try {
+    ollama = (await qualifyInferenceProvider(
+      { id: 'ollama', streamChat: streamOllamaChat },
+      model
+    )).metrics
+  } catch (error) {
+    return { success: false, reason: `Le test de référence Ollama a échoué : ${error instanceof Error ? error.message : 'erreur inconnue'}` }
+  }
+
+  let llamaStarted = false
+  try {
+    onProgress('Libération de la mémoire utilisée par Ollama…', 35)
+    const stoppedOllama = await runner('docker', ['stop', OLLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
+    if (stoppedOllama.exitCode !== 0 || stoppedOllama.timedOut) {
+      throw new Error('Ollama n’a pas pu libérer la mémoire avant le comparatif.')
+    }
+    onProgress('Téléchargement puis chargement de llama.cpp et du modèle GGUF vérifié…', 45)
+    const started = await startLlamaServer({
+      backend: requestedBackend,
+      modelArtifact: artifact,
+      modelAlias: model,
+      contextSize: modelOptions.numCtx,
+      predictTokens: Math.min(modelOptions.numPredict, 1_024),
+      parallel: 1
+    }, runner)
+    if (!started.success) return started
+    llamaStarted = true
+    await waitForLlamaServer(baseUrl)
+    onProgress(`Validation du texte et des outils avec llama.cpp (${started.backend})…`, 72)
+    const llamaCpp = (await qualifyInferenceProvider(
+      createLocalOpenAICompatibleProvider({ id: 'llama.cpp', baseUrl, trustedRuntimeNetwork }),
+      model
+    )).metrics
+    return {
+      success: true,
+      model,
+      backend: started.backend,
+      llamaCpp,
+      ollama,
+      recommendation: compareInferenceMetrics(llamaCpp, ollama),
+      ...(started.fallbackReason ? { fallbackReason: started.fallbackReason } : {})
+    }
+  } catch (error) {
+    return { success: false, reason: error instanceof Error ? error.message : 'Le comparatif llama.cpp a échoué.' }
+  } finally {
+    onProgress('Restauration d’Ollama et libération de llama.cpp…', 94)
+    if (llamaStarted) await stopLlamaServer(runner).catch(() => undefined)
+    await ensureOllamaRunning().catch(() => undefined)
+    onProgress('Le moteur habituel de Stellan est de nouveau prêt.', 100)
+  }
 }
 
 function getThreadStore(): ThreadStore {
@@ -615,6 +711,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
       sendChatEvent(run, { type: 'error', reason: 'Génération annulée dans la file d’attente.' })
     },
     run: async () => {
+      await llamaBenchmarkPromise
       activeChats.set(run.requestId, controller)
       activeThreadChats.set(thread.id, run.requestId)
       let assistantContent = ''
@@ -659,6 +756,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
         }
         let executionModel = visionModel
         let oversizedCodeModel = false
+        let performanceHardwareKey: string | null = null
         if (executionPath && intentClassification.intent === 'code') {
           specialistContext ??= Promise.all([getOllamaStatus(), getHardwareInfo()]).then(([status, hardware]) => ({
             hardware,
@@ -666,10 +764,16 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           }))
           const { hardware, installed } = await specialistContext
           const catalog = getModelCatalog(hardware)
+          performanceHardwareKey = hardwarePerformanceKey(hardware)
           oversizedCodeModel = catalog.some((model) => model.id === visionModel && model.compatibility === 'demanding')
-          const interactiveModel = selectInstalledInteractiveModel(catalog, installed, 'code')
+          const interactiveModel = selectInstalledInteractiveModel(
+            catalog,
+            installed,
+            'code',
+            modelPerformanceStore?.list(performanceHardwareKey)
+          )
           if (!interactiveModel) {
-            throw new Error(`${visionModel} est trop lourd pour une réponse interactive sur ce GPU. Installez ou sélectionnez un modèle de code plus léger, comme Qwen 3.5 9B ou 4B.`)
+            throw new Error(`${visionModel} n’est pas adapté à une réponse de code interactive sur cette machine. Installez ou sélectionnez un modèle plus léger, comme Qwen 3.5 9B ou 4B.`)
           }
           executionModel = interactiveModel
         }
@@ -735,6 +839,9 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             onContent,
             onTool: () => undefined,
             onInferenceLog: writeInferenceLog,
+            onModelMetrics: performanceHardwareKey
+              ? (metrics) => modelPerformanceStore?.record(performanceHardwareKey, metrics)
+              : undefined,
             onToolEvent,
             consumeSteering,
             runCommand: createWorkerCommandExecutor(profile, thread.id, executionPath, git),
@@ -825,6 +932,9 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                       },
                       onTool: () => {},
                       onInferenceLog: writeInferenceLog,
+                      onModelMetrics: performanceHardwareKey
+                        ? (metrics) => modelPerformanceStore?.record(performanceHardwareKey, metrics)
+                        : undefined,
                       onToolEvent: async (workerToolEvent) => {
                         if (workerToolEvent.type === 'started') {
                           getThreadStore().recordToolStarted(childRun.id, workerToolEvent)
@@ -1066,6 +1176,7 @@ app.whenReady().then(() => {
     if (contents && !contents.isDestroyed()) contents.send(UPDATE_STATE_CHANNEL, updateState)
   })
   threadStore = new ThreadStore(join(app.getPath('userData'), 'local-agent.sqlite'))
+  modelPerformanceStore = new ModelPerformanceStore(join(app.getPath('userData'), 'model-performance.json'))
   threadStore.recoverInterruptedEnvironments()
   threadStore.recoverInterruptedAgentRuns()
   handle(WINDOW_MINIMIZE_CHANNEL, () => mainWindow?.minimize())
@@ -1095,7 +1206,20 @@ app.whenReady().then(() => {
   handle(HARDWARE_BASIC_CHANNEL, () => getBasicHardwareInfo())
   handle(SETUP_INFO_CHANNEL, async () => {
     const [hardware, runtime] = await Promise.all([getHardwareInfo(), getRuntimeInfo()])
-    return { hardware, runtime, models: getModelCatalog(hardware) }
+    const measured = modelPerformanceStore?.list(hardwarePerformanceKey(hardware))
+    const models = getModelCatalog(hardware).map((model) => {
+      const performance = measured?.get(model.id)
+      return {
+        ...model,
+        ...(performance ? {
+          measuredFirstResponseMs: Math.round(performance.firstResponseMs),
+          ...(performance.tokensPerSecond === null
+            ? {}
+            : { measuredTokensPerSecond: Math.round(performance.tokensPerSecond * 10) / 10 })
+        } : {})
+      }
+    })
+    return { hardware, runtime, models }
   })
   handle(OLLAMA_DOWNLOAD_CHANNEL, async () => {
     if (process.platform === 'win32') {
@@ -1145,6 +1269,22 @@ app.whenReady().then(() => {
   handle(MODEL_WARM_CHANNEL, async (_event, input: unknown) => {
     const model = installedModelNameSchema.parse(input)
     return warmOllamaModel(model)
+  })
+  handle(INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL, async (event, input: unknown) => {
+    const model = modelIdSchema.parse(input)
+    if (llamaBenchmarkPromise) {
+      return { success: false, reason: 'Un comparatif de moteur local est déjà en cours.' }
+    }
+    llamaBenchmarkPromise = benchmarkLlamaCpp(model, (detail, percent) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send(INFERENCE_BENCHMARK_PROGRESS_CHANNEL, { model, detail, percent })
+      }
+    })
+    try {
+      return await llamaBenchmarkPromise
+    } finally {
+      llamaBenchmarkPromise = null
+    }
   })
   handle(DICTATION_TRANSCRIBE_CHANNEL, async (event, input: unknown) => {
     const audio = dictationAudioSchema.parse(input)
@@ -1851,6 +1991,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(OLLAMA_DOWNLOAD_CHANNEL)
   ipcMain.removeHandler(MODEL_PULL_CHANNEL)
   ipcMain.removeHandler(MODEL_WARM_CHANNEL)
+  ipcMain.removeHandler(INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL)
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
   ipcMain.removeHandler(PROJECT_CREATE_CHANNEL)

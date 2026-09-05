@@ -92,20 +92,47 @@ type ContentEvent = Extract<ChatEvent, { type: 'content' }>
 
 const CHAT_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
 const MAX_CHAT_IMAGE_BYTES = 8_000_000
+const MAX_MODEL_IMAGE_DIMENSION = 1_920
+const IMAGE_COMPRESSION_THRESHOLD = 1_500_000
 
-function readChatImage(file: File): Promise<ChatImage> {
-  if (!CHAT_IMAGE_TYPES.has(file.type)) return Promise.reject(new Error('Utilisez une image PNG, JPEG ou WebP.'))
-  if (file.size > MAX_CHAT_IMAGE_BYTES) return Promise.reject(new Error('Chaque image doit faire moins de 8 Mo.'))
+function encodeChatImage(file: Blob, mimeType: ChatImage['mimeType']): Promise<ChatImage> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onerror = () => reject(new Error('Cette image n’a pas pu être lue.'))
     reader.onload = () => {
       const encoded = typeof reader.result === 'string' ? reader.result.split(',', 2)[1] : null
       if (!encoded) reject(new Error('Cette image est invalide.'))
-      else resolve({ mimeType: file.type as ChatImage['mimeType'], data: encoded })
+      else resolve({ mimeType, data: encoded })
     }
     reader.readAsDataURL(file)
   })
+}
+
+async function readChatImage(file: File): Promise<ChatImage> {
+  if (!CHAT_IMAGE_TYPES.has(file.type)) return Promise.reject(new Error('Utilisez une image PNG, JPEG ou WebP.'))
+  if (file.size > MAX_CHAT_IMAGE_BYTES) return Promise.reject(new Error('Chaque image doit faire moins de 8 Mo.'))
+  const bitmap = await createImageBitmap(file)
+  const scale = Math.min(1, MAX_MODEL_IMAGE_DIMENSION / Math.max(bitmap.width, bitmap.height))
+  if (scale === 1 && file.size <= IMAGE_COMPRESSION_THRESHOLD) {
+    bitmap.close()
+    return encodeChatImage(file, file.type as ChatImage['mimeType'])
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+  const context = canvas.getContext('2d')
+  if (!context) {
+    bitmap.close()
+    throw new Error('Cette image n’a pas pu être préparée.')
+  }
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+  bitmap.close()
+  const compressed = await new Promise<Blob>((resolve, reject) => canvas.toBlob(
+    (blob) => blob ? resolve(blob) : reject(new Error('Cette image n’a pas pu être compressée.')),
+    'image/webp',
+    0.84
+  ))
+  return encodeChatImage(compressed, 'image/webp')
 }
 
 const TOOL_LABELS: Record<string, string> = {

@@ -1,5 +1,6 @@
 import type { ChatMessage } from '../shared/contracts'
-import { streamOllamaChat } from './ollama'
+import type { InferenceProvider } from './inference'
+import { ollamaInferenceProvider } from './ollama'
 
 export type IntentKind = 'activity' | 'code' | 'discussion' | 'unknown'
 export type ReliableActivityEngineId = 'hangman' | 'neither-yes-nor-no'
@@ -14,6 +15,7 @@ export type IntentClassification = {
 
 type ClassifyIntentOptions = {
   model: string
+  inferenceProvider?: InferenceProvider
   messages: readonly ChatMessage[]
   signal: AbortSignal
   activityContext?: string | null
@@ -140,7 +142,7 @@ export async function classifyIntent(options: ClassifyIntentOptions): Promise<In
   if (ruled) return ruled
 
   try {
-    const result = await streamOllamaChat(
+    const result = await (options.inferenceProvider ?? ollamaInferenceProvider).streamChat(
       options.model,
       [
         {

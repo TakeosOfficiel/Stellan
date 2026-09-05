@@ -21,6 +21,20 @@ await import('./index')
 const api = mocks.exposeInMainWorld.mock.calls[0]?.[1] as LocalAgentApi
 
 describe('portal preload IPC', () => {
+  it('exposes the local llama.cpp benchmark and its progress stream', async () => {
+    const listener = vi.fn()
+    const unsubscribe = api.onInferenceBenchmarkProgress(listener)
+    await api.benchmarkLlamaCpp('qwen3.5:4b')
+    unsubscribe()
+
+    expect(mocks.invoke.mock.calls.at(-1)).toEqual([
+      'inference:benchmark-llama-cpp',
+      'qwen3.5:4b'
+    ])
+    expect(mocks.on).toHaveBeenCalledWith('inference:benchmark-progress', expect.any(Function))
+    expect(mocks.removeListener).toHaveBeenCalledWith('inference:benchmark-progress', expect.any(Function))
+  })
+
   it('exposes project and numeric-port modes, never an upstream host or URL', async () => {
     await api.startPortal({ threadId: 'thread', source: 'project', durationMinutes: null })
     await api.startPortal({ threadId: 'thread', source: 'port', port: 3000, durationMinutes: 60 })

@@ -12,6 +12,8 @@ import {
 } from 'lucide-react'
 import type {
   CatalogModel,
+  InferenceBenchmarkProgress,
+  InferenceBenchmarkResult,
   ModelCategory,
   ModelPullProgress,
   OllamaStatus,
@@ -124,6 +126,9 @@ export function App(): React.JSX.Element {
   const [pullProgress, setPullProgress] = useState<ModelPullProgress | null>(null)
   const [pullError, setPullError] = useState<string | null>(null)
   const [downloadingModel, setDownloadingModel] = useState<string | null>(null)
+  const [benchmarkingModel, setBenchmarkingModel] = useState<string | null>(null)
+  const [benchmarkProgress, setBenchmarkProgress] = useState<InferenceBenchmarkProgress | null>(null)
+  const [benchmarkResults, setBenchmarkResults] = useState<Record<string, InferenceBenchmarkResult>>({})
   const [checkingOllama, setCheckingOllama] = useState(false)
   const [startingOllama, setStartingOllama] = useState(false)
   const [activatingRuntime, setActivatingRuntime] = useState(false)
@@ -196,7 +201,7 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (updateState.status !== 'current' || localStartupStarted.current) return
+    if ((updateState.status !== 'current' && updateState.status !== 'error') || localStartupStarted.current) return
     localStartupStarted.current = true
     void startOllama()
     void analyzeComputer()
@@ -223,6 +228,8 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     return window.localAgent.onModelPullProgress(setPullProgress)
   }, [])
+
+  useEffect(() => window.localAgent.onInferenceBenchmarkProgress(setBenchmarkProgress), [])
 
   useEffect(() => {
     localStorage.setItem(CATEGORY_KEY, category)
@@ -270,7 +277,7 @@ export function App(): React.JSX.Element {
     setView('agent')
   }, [firstRun, isModelReady])
 
-  const updatePending = updateState.status !== 'current'
+  const updatePending = updateState.status !== 'current' && updateState.status !== 'error'
   const startupVisible = updatePending || runtimeProgress !== null || runtimeBusy || isLoading || !resolvedStatus?.available
   const startupPercent = updateState.status === 'downloading'
     ? Math.round(updateState.percent)
@@ -282,14 +289,12 @@ export function App(): React.JSX.Element {
   const startupStep = updateState.status === 'checking' ? 'Recherche des mises à jour'
     : updateState.status === 'downloading' ? `Mise à jour ${updateState.version}`
       : updateState.status === 'restarting' ? 'Installation de la mise à jour'
-        : updateState.status === 'error' ? 'Mise à jour impossible'
-          : updateState.updatedFrom ? `Finalisation de Stellan ${updateState.version}`
+        : updateState.status === 'current' && updateState.updatedFrom ? `Finalisation de Stellan ${updateState.version}`
           : runtimeProgress?.step ?? (firstRun ? 'Première mise en place' : 'Démarrage de Stellan')
   const startupDetail = updateState.status === 'checking' ? 'Vérification sécurisée de la version disponible…'
     : updateState.status === 'downloading' ? `Téléchargement optimisé en cours — ${Math.round(updateState.bytesPerSecond / 1_000_000 * 10) / 10} Mo/s`
       : updateState.status === 'restarting' ? 'Téléchargement terminé. Stellan va se fermer quelques secondes, installer la mise à jour, puis se rouvrir automatiquement.'
-        : updateState.status === 'error' ? updateState.message
-          : updateState.updatedFrom
+        : updateState.status === 'current' && updateState.updatedFrom
             ? `Mise à jour depuis la version ${updateState.updatedFrom} réussie.${runtimeProgress ? ` ${runtimeProgress.detail}` : ' Finalisation du démarrage…'}`
           : runtimeProgress?.detail ?? actionError ?? (resolvedStatus?.available
             ? 'Environnement local prêt.'
@@ -334,6 +339,26 @@ export function App(): React.JSX.Element {
     }
   }
 
+  async function compareLlamaCpp(model: CatalogModel): Promise<void> {
+    setBenchmarkingModel(model.id)
+    setBenchmarkProgress({ model: model.id, detail: 'Préparation du comparatif local…', percent: 1 })
+    try {
+      const result = await window.localAgent.benchmarkLlamaCpp(model.id)
+      setBenchmarkResults((current) => ({ ...current, [model.id]: result }))
+    } catch (error) {
+      setBenchmarkResults((current) => ({
+        ...current,
+        [model.id]: {
+          success: false,
+          reason: error instanceof Error ? error.message : 'Le comparatif local a échoué.'
+        }
+      }))
+    } finally {
+      setBenchmarkingModel(null)
+      setBenchmarkProgress(null)
+    }
+  }
+
   if (startupVisible) {
     return (
       <main className="startup-shell">
@@ -360,7 +385,7 @@ export function App(): React.JSX.Element {
             <progress max="100" value={startupPercent ?? undefined} />
             <p>{startupPhrase}</p>
             <small className="startup-detail" title={startupDetail}>{startupDetail}</small>
-            {updateState.status === 'current' && !runtimeBusy && !resolvedStatus?.available && (
+            {(updateState.status === 'current' || updateState.status === 'error') && !runtimeBusy && !resolvedStatus?.available && (
               <div className="startup-card-actions">
                 {ollamaSetup.canOpenDownload && <button type="button" disabled={activatingRuntime} onClick={() => void activateRuntime()}>{IS_WINDOWS ? 'Activer WSL 2' : 'Préparer le moteur privé'}</button>}
                 <button type="button" disabled={checkingOllama || startingOllama} onClick={() => void refreshStatus()}>Réessayer</button>
@@ -444,6 +469,8 @@ export function App(): React.JSX.Element {
           {visibleModels.map((model) => {
             const installed = installedModels.has(normalizeModelName(model.id))
             const downloading = downloadingModel === model.id
+            const benchmarking = benchmarkingModel === model.id
+            const benchmarkResult = benchmarkResults[model.id]
             const disabled =
               installed || Boolean(downloadingModel) || ['demanding', 'unsupported'].includes(model.compatibility) ||
               !canDownload
@@ -462,6 +489,9 @@ export function App(): React.JSX.Element {
                 <div className="model-meta">
                   <span><strong>Téléchargement</strong> ≈ {formatSize(model.downloadSizeBytes)} sur le disque</span>
                   <span><strong>Mémoire minimale</strong> {formatSize(model.minimumMemoryBytes)} de RAM</span>
+                  {model.measuredTokensPerSecond !== undefined && (
+                    <span><strong>Vitesse mesurée</strong> {model.measuredTokensPerSecond} tokens/s · première réponse ≈ {Math.max(0.1, (model.measuredFirstResponseMs ?? 0) / 1_000).toFixed(1)} s</span>
+                  )}
                 </div>
                 <p className="model-execution">{executionEstimate(model, setup?.hardware)}</p>
                 <small>{model.compatibilityReason}</small>
@@ -487,6 +517,40 @@ export function App(): React.JSX.Element {
                         ? 'Configuration insuffisante'
                         : 'Télécharger ce modèle'}
                 </button>
+
+                {installed && model.llamaCppAvailable && (
+                  <div className="runtime-benchmark">
+                    <button
+                      type="button"
+                      disabled={Boolean(benchmarkingModel) || Boolean(downloadingModel)}
+                      onClick={() => void compareLlamaCpp(model)}
+                    >{benchmarking ? 'Comparaison en cours…' : 'Comparer avec llama.cpp'}</button>
+                    {!benchmarkResult && !benchmarking && (
+                      <span className="benchmark-note">Le premier test télécharge séparément le modèle GGUF, puis restaure Ollama.</span>
+                    )}
+                    {benchmarking && benchmarkProgress?.model === model.id && (
+                      <div className="benchmark-progress" aria-live="polite">
+                        <span>{benchmarkProgress.detail}</span>
+                        <progress max="100" value={benchmarkProgress.percent} />
+                      </div>
+                    )}
+                    {benchmarkResult?.success && (
+                      <p className={`benchmark-result ${benchmarkResult.recommendation.replace('.', '-')}`}>
+                        {benchmarkResult.recommendation === 'llama.cpp'
+                          ? 'llama.cpp est sensiblement plus rapide sur cette machine.'
+                          : benchmarkResult.recommendation === 'ollama'
+                            ? 'Ollama reste sensiblement plus rapide sur cette machine.'
+                            : 'Les deux moteurs ont des performances proches.'}
+                        {' '}llama.cpp : {(benchmarkResult.llamaCpp.wallMs / 1_000).toFixed(1)} s
+                        {' · '}Ollama : {benchmarkResult.ollama ? `${(benchmarkResult.ollama.wallMs / 1_000).toFixed(1)} s` : 'non mesuré'}
+                        {' · '}backend {benchmarkResult.backend}
+                      </p>
+                    )}
+                    {benchmarkResult && !benchmarkResult.success && (
+                      <p className="benchmark-result error" role="alert">{benchmarkResult.reason}</p>
+                    )}
+                  </div>
+                )}
               </article>
             )
           })}

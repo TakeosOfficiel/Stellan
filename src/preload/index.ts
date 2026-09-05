@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   ChatEvent,
   DictationProgress,
+  InferenceBenchmarkProgress,
   LocalAgentApi,
   ModelPullProgress,
   RuntimeProgress,
@@ -34,6 +35,12 @@ const api: LocalAgentApi = {
   },
   pullModel: (model) => ipcRenderer.invoke('ollama:pull-model', model),
   warmModel: (model) => ipcRenderer.invoke('ollama:warm-model', model),
+  benchmarkLlamaCpp: (model) => ipcRenderer.invoke('inference:benchmark-llama-cpp', model),
+  onInferenceBenchmarkProgress: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: InferenceBenchmarkProgress): void => listener(progress)
+    ipcRenderer.on('inference:benchmark-progress', handler)
+    return () => ipcRenderer.removeListener('inference:benchmark-progress', handler)
+  },
   onModelPullProgress: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: ModelPullProgress): void => {
       listener(progress)

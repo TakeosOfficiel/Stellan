@@ -1593,6 +1593,33 @@ describe('runCodingAgent', () => {
     await expect(readFile(join(projectPath, 'hello.txt'), 'utf8')).resolves.toBe('original')
   })
 
+  it('does not report success when a file tool returns without changing the file', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    vi.spyOn(project, 'writeFile').mockResolvedValue({ path: 'fake.txt', added: 1, removed: 0 })
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'write_file', arguments: { path: 'fake.txt', content: 'réel' } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le fichier est prêt.' }, done: true }])))
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Crée le fichier fake.txt.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true)
+    })
+
+    expect(onContent).toHaveBeenCalledWith(expect.stringContaining('Aucun fichier n’a été modifié'))
+    expect(onContent).not.toHaveBeenCalledWith('Le fichier est prêt.')
+  })
+
   it('always reports completion when a model ends silently after writing', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
@@ -1760,6 +1787,19 @@ describe('runCodingAgent', () => {
     expect(compacted).toHaveLength(2)
     expect(compacted[1]?.content).toBe('Que vois-tu sur cette image ?')
     expect(compacted[1]?.images?.[0]?.data).toBe(imageData)
+  })
+
+  it('shrinks old tool output while preserving the latest user request', () => {
+    const compacted = compactConversation([
+      { role: 'system', content: 'instruction système' },
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'read_file', arguments: { path: 'large.ts' } } }] },
+      { role: 'tool', tool_name: 'read_file', content: `début utile ${'x'.repeat(8_000)} fin utile` },
+      { role: 'user', content: 'Corrige maintenant la fonction.' }
+    ])
+
+    expect(compacted.at(-1)?.content).toBe('Corrige maintenant la fonction.')
+    expect(compacted.find((message) => message.role === 'tool')?.content).toContain('ancien résultat d’outil tronqué')
+    expect(JSON.stringify(compacted).length).toBeLessThan(4_000)
   })
 
   it('routes authorized commands through the configured worker executor', async () => {

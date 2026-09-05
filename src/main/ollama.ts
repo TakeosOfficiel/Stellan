@@ -1,10 +1,17 @@
 import { z } from 'zod'
 import type {
-  ChatMessage,
   ModelPullProgress,
   ModelPullResult,
   OllamaStatus
 } from '../shared/contracts'
+import type {
+  InferenceChatResult,
+  InferenceMessage,
+  InferencePerformanceMetrics,
+  InferenceProvider,
+  InferenceToolCall
+} from './inference'
+import { InferenceIdleTimeoutError } from './inference'
 
 const tagsResponseSchema = z.object({
   models: z.array(
@@ -32,6 +39,7 @@ const chatChunkSchema = z.object({
     content: z.string().optional(),
     thinking: z.string().optional(),
     tool_calls: z.array(z.object({
+      id: z.string().optional(),
       function: z.object({
         name: z.string(),
         arguments: z.record(z.string(), z.unknown())
@@ -67,6 +75,7 @@ let modelOptions = { num_ctx: 8192, num_predict: 1024 }
 let activeOllamaUrl: string = OLLAMA_URLS[0]
 const toolSupportByModel = new Map<string, boolean>()
 const visionSupportByModel = new Map<string, boolean>()
+const MODEL_KEEP_ALIVE = '30m'
 
 function modelContextOptions(model: string, numCtx?: number): typeof modelOptions {
   const parameterCount = model.match(/(?:^|[:_-])(\d+(?:\.\d+)?)b(?:$|[_-])/i)?.[1]
@@ -87,22 +96,10 @@ export function configureOllamaModelOptions(options: { numCtx: number; numPredic
   modelOptions = { num_ctx: options.numCtx, num_predict: options.numPredict }
 }
 
-export type OllamaToolCall = {
-  function: {
-    name: string
-    arguments: Record<string, unknown>
-  }
-}
-
-export type OllamaMessage = ChatMessage & {
-  tool_calls?: OllamaToolCall[]
-  tool_name?: string
-}
-
-export type OllamaChatResult = {
-  content: string
-  toolCalls: OllamaToolCall[]
-}
+export type OllamaToolCall = InferenceToolCall
+export type OllamaMessage = InferenceMessage
+export type OllamaChatResult = InferenceChatResult
+export type OllamaPerformanceMetrics = InferencePerformanceMetrics
 
 type OllamaTimings = {
   totalDuration?: number
@@ -113,12 +110,7 @@ type OllamaTimings = {
   evalDuration?: number
 }
 
-export class OllamaIdleTimeoutError extends Error {
-  constructor() {
-    super('Le modèle ne produit plus de réponse depuis deux minutes. Réessayez ou choisissez un modèle plus léger.')
-    this.name = 'OllamaIdleTimeoutError'
-  }
-}
+export { InferenceIdleTimeoutError as OllamaIdleTimeoutError } from './inference'
 
 function durationMs(nanoseconds: number | undefined): string {
   return nanoseconds === undefined ? 'unknown' : (nanoseconds / 1_000_000).toFixed(1)
@@ -355,7 +347,7 @@ export async function warmOllamaModel(
         model,
         prompt: '',
         stream: false,
-        keep_alive: -1,
+        keep_alive: MODEL_KEEP_ALIVE,
         options: modelContextOptions(model)
       }),
       signal: AbortSignal.timeout(300_000)
@@ -376,7 +368,8 @@ export async function streamOllamaChat(
   idleTimeoutMs = 120_000,
   numPredict?: number,
   numCtx?: number,
-  onDiagnostics?: (message: string) => void
+  onDiagnostics?: (message: string) => void,
+  onMetrics?: (metrics: OllamaPerformanceMetrics) => void
 ): Promise<OllamaChatResult> {
   let content = ''
   const toolCalls: OllamaToolCall[] = []
@@ -391,6 +384,7 @@ export async function streamOllamaChat(
   const requestSignal = signal ? AbortSignal.any([signal, idleController.signal]) : idleController.signal
   await reportRunningModels('before', onDiagnostics, fetcher, signal)
   const chatStartedAt = performance.now()
+  let firstResponseAt: number | null = null
 
   try {
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -400,13 +394,16 @@ export async function streamOllamaChat(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model,
-        messages: requestMessages.map(({ images, ...message }) => ({
+        messages: requestMessages.map(({ images, tool_call_id: _toolCallId, ...message }) => ({
           ...message,
+          ...(message.tool_calls
+            ? { tool_calls: message.tool_calls.map((call) => ({ function: call.function })) }
+            : {}),
           ...(images?.length ? { images: images.map((image) => image.data) } : {})
         })),
         stream: true,
         think: false,
-        keep_alive: -1,
+        keep_alive: MODEL_KEEP_ALIVE,
         options: {
           ...modelContextOptions(model, numCtx),
           ...(numPredict === undefined
@@ -439,11 +436,19 @@ export async function streamOllamaChat(
         if (!line.trim()) continue
         const chunk = chatChunkSchema.parse(JSON.parse(line))
         if (chunk.error) throw new Error(chunk.error)
+        if (firstResponseAt === null && (chunk.message?.content || chunk.message?.tool_calls?.length)) {
+          firstResponseAt = performance.now()
+        }
         if (chunk.message?.content) {
           content += chunk.message.content
           onContent(chunk.message.content)
         }
-        if (chunk.message?.tool_calls) toolCalls.push(...chunk.message.tool_calls)
+        if (chunk.message?.tool_calls) {
+          toolCalls.push(...chunk.message.tool_calls.map((call, index) => ({
+            ...call,
+            id: call.id ?? `ollama-${toolCalls.length + index}`
+          })))
+        }
         if (chunk.done === true) {
           completed = true
           timings = {
@@ -462,11 +467,21 @@ export async function streamOllamaChat(
 
       if (completed) {
         const generationSeconds = (timings.evalDuration ?? 0) / 1_000_000_000
-        const tokensPerSecond = generationSeconds > 0 && timings.evalCount !== undefined
-          ? (timings.evalCount / generationSeconds).toFixed(1)
-          : 'unknown'
+        const measuredTokensPerSecond = generationSeconds > 0 && timings.evalCount !== undefined
+          ? timings.evalCount / generationSeconds
+          : null
+        const tokensPerSecond = measuredTokensPerSecond?.toFixed(1) ?? 'unknown'
+        const wallMs = performance.now() - chatStartedAt
+        if (firstResponseAt !== null) {
+          onMetrics?.({
+            model,
+            firstResponseMs: firstResponseAt - chatStartedAt,
+            wallMs,
+            tokensPerSecond: measuredTokensPerSecond
+          })
+        }
         onDiagnostics?.(
-          `ollama.metrics model=${model} wallMs=${(performance.now() - chatStartedAt).toFixed(1)} loadMs=${durationMs(timings.loadDuration)} promptEvalMs=${durationMs(timings.promptEvalDuration)} promptTokens=${timings.promptEvalCount ?? 'unknown'} generationMs=${durationMs(timings.evalDuration)} generatedTokens=${timings.evalCount ?? 'unknown'} tokensPerSecond=${tokensPerSecond} totalMs=${durationMs(timings.totalDuration)}`
+          `ollama.metrics model=${model} wallMs=${wallMs.toFixed(1)} firstResponseMs=${((firstResponseAt ?? performance.now()) - chatStartedAt).toFixed(1)} loadMs=${durationMs(timings.loadDuration)} promptEvalMs=${durationMs(timings.promptEvalDuration)} promptTokens=${timings.promptEvalCount ?? 'unknown'} generationMs=${durationMs(timings.evalDuration)} generatedTokens=${timings.evalCount ?? 'unknown'} tokensPerSecond=${tokensPerSecond} totalMs=${durationMs(timings.totalDuration)}`
         )
         return { content, toolCalls }
       }
@@ -483,7 +498,7 @@ export async function streamOllamaChat(
       throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')
     }
   } catch (error) {
-    if (idleController.signal.aborted && !signal?.aborted) throw new OllamaIdleTimeoutError()
+    if (idleController.signal.aborted && !signal?.aborted) throw new InferenceIdleTimeoutError()
     if (error instanceof TypeError && /fetch failed/i.test(error.message)) {
       throw new Error("Le moteur local d’Ollama n’est plus joignable. Relancez Stellan pour rétablir la connexion.")
     }
@@ -494,4 +509,9 @@ export async function streamOllamaChat(
   }
 
   throw new Error('Le flux de réponse Ollama a été interrompu avant sa fin.')
+}
+
+export const ollamaInferenceProvider: InferenceProvider = {
+  id: 'ollama',
+  streamChat: streamOllamaChat
 }

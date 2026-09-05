@@ -18,8 +18,35 @@ export type CatalogModel = {
   minimumMemoryBytes: number
   compatibility: ModelCompatibility
   compatibilityReason: string
+  measuredFirstResponseMs?: number
+  measuredTokensPerSecond?: number
   experimental?: boolean
+  llamaCppAvailable?: boolean
 }
+
+export type InferenceBenchmarkMetrics = {
+  firstResponseMs: number
+  wallMs: number
+  tokensPerSecond: number | null
+}
+
+export type InferenceBenchmarkProgress = {
+  model: string
+  detail: string
+  percent: number
+}
+
+export type InferenceBenchmarkResult =
+  | {
+      success: true
+      model: string
+      backend: 'cpu' | 'cuda' | 'rocm' | 'vulkan'
+      llamaCpp: InferenceBenchmarkMetrics
+      ollama: InferenceBenchmarkMetrics | null
+      recommendation: 'llama.cpp' | 'ollama' | 'equivalent'
+      fallbackReason?: string
+    }
+  | { success: false; reason: string }
 
 export type GpuInfo = {
   model: string
@@ -347,6 +374,8 @@ export type LocalAgentApi = {
   onRuntimeProgress: (listener: (progress: RuntimeProgress) => void) => () => void
   pullModel: (model: string) => Promise<ModelPullResult>
   warmModel: (model: string) => Promise<boolean>
+  benchmarkLlamaCpp: (model: string) => Promise<InferenceBenchmarkResult>
+  onInferenceBenchmarkProgress: (listener: (progress: InferenceBenchmarkProgress) => void) => () => void
   onModelPullProgress: (listener: (progress: ModelPullProgress) => void) => () => void
   transcribeDictation: (audio: ArrayBuffer) => Promise<string>
   onDictationProgress: (listener: (progress: DictationProgress) => void) => () => void

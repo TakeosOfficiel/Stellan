@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { streamOllamaChat, type OllamaMessage, type OllamaToolCall } from './ollama'
+import type { InferenceMessage, InferenceProvider, InferenceToolCall } from './inference'
+import { ollamaInferenceProvider } from './ollama'
 import { compactConversation } from './agent'
 
 export type AdvisorProjectTools = {
@@ -26,6 +27,7 @@ export type AdvisorResult = {
 
 export type AdvisorOptions = {
   model: string
+  inferenceProvider?: InferenceProvider
   question: string
   project: AdvisorProjectTools
   signal: AbortSignal
@@ -141,7 +143,7 @@ function safeTraceInput(input: Record<string, unknown>): Record<string, unknown>
 }
 
 async function executeAdvisorTool(
-  call: OllamaToolCall,
+  call: InferenceToolCall,
   options: AdvisorOptions
 ): Promise<{ content: string; trace: AdvisorTraceEntry }> {
   const tool = call.function.name
@@ -237,7 +239,7 @@ async function executeAdvisorTool(
 
 export async function runAdvisor(options: AdvisorOptions): Promise<AdvisorResult> {
   const trace: AdvisorTraceEntry[] = []
-  const conversation: OllamaMessage[] = [
+  const conversation: InferenceMessage[] = [
     {
       role: 'system',
       content: [
@@ -255,7 +257,7 @@ export async function runAdvisor(options: AdvisorOptions): Promise<AdvisorResult
 
   let toolCallCount = 0
   for (let round = 0; round < MAX_INVESTIGATION_ROUNDS; round += 1) {
-    const result = await streamOllamaChat(
+    const result = await (options.inferenceProvider ?? ollamaInferenceProvider).streamChat(
       options.model,
       compactConversation(conversation),
       () => undefined,
@@ -276,12 +278,17 @@ export async function runAdvisor(options: AdvisorOptions): Promise<AdvisorResult
       }
     }
 
-    conversation.push({ role: 'assistant', content: result.content, tool_calls: result.toolCalls })
-    for (const call of result.toolCalls) {
+    const normalizedToolCalls = result.toolCalls.map((call, callIndex) => ({
+      ...call,
+      id: call.id ?? `advisor-${round}:${callIndex}`
+    }))
+    conversation.push({ role: 'assistant', content: result.content, tool_calls: normalizedToolCalls })
+    for (const call of normalizedToolCalls) {
       if (toolCallCount >= MAX_TOOL_CALLS) {
         conversation.push({
           role: 'tool',
           tool_name: call.function.name,
+          tool_call_id: call.id,
           content: 'Limite d’investigation atteinte. Produis maintenant ton avis final avec les preuves déjà recueillies.'
         })
         continue
@@ -289,7 +296,12 @@ export async function runAdvisor(options: AdvisorOptions): Promise<AdvisorResult
       toolCallCount += 1
       const executed = await executeAdvisorTool(call, options)
       trace.push(executed.trace)
-      conversation.push({ role: 'tool', tool_name: call.function.name, content: executed.content })
+      conversation.push({
+        role: 'tool',
+        tool_name: call.function.name,
+        tool_call_id: call.id,
+        content: executed.content
+      })
     }
   }
 
@@ -298,7 +310,7 @@ export async function runAdvisor(options: AdvisorOptions): Promise<AdvisorResult
     role: 'user',
     content: 'L’investigation est terminée. Produis maintenant l’avis final demandé avec les preuves recueillies. N’appelle plus aucun outil.'
   })
-  const finalResult = await streamOllamaChat(
+  const finalResult = await (options.inferenceProvider ?? ollamaInferenceProvider).streamChat(
     options.model,
     compactConversation(conversation),
     () => undefined,

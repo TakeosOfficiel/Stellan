@@ -140,7 +140,7 @@ describe('warmOllamaModel', () => {
           model: 'qwen3.5:4b',
           prompt: '',
           stream: false,
-          keep_alive: -1,
+          keep_alive: '30m',
           options: { num_ctx: 8192, num_predict: 1024 }
         })
       })
@@ -184,7 +184,7 @@ describe('streamOllamaChat', () => {
       model: 'qwen3.5:4b',
       stream: true,
       think: false,
-      keep_alive: -1,
+      keep_alive: '30m',
       options: { num_ctx: 8192, num_predict: 1024 }
     })
   })
@@ -286,6 +286,7 @@ describe('streamOllamaChat', () => {
       return Promise.resolve(new Response(stream, { status: 200 }))
     })
     const diagnostics = vi.fn()
+    const metrics = vi.fn()
 
     await streamOllamaChat(
       'qwen3.5:2b',
@@ -297,7 +298,8 @@ describe('streamOllamaChat', () => {
       120_000,
       256,
       2_048,
-      diagnostics
+      diagnostics,
+      metrics
     )
 
     expect(diagnostics).toHaveBeenCalledWith('ollama.ps.before models=none')
@@ -306,6 +308,10 @@ describe('streamOllamaChat', () => {
     expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('generationMs=1000.0 generatedTokens=20 tokensPerSecond=20.0'))
     expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('ollama.ps.after models=qwen3.5:2b'))
     expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('vramBytes=1900000000'))
+    expect(metrics).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'qwen3.5:2b',
+      tokensPerSecond: 20
+    }))
   })
 
   it('accepts thinking chunks without exposing the private reasoning as the answer', async () => {

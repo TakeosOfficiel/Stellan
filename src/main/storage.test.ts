@@ -187,15 +187,15 @@ describe('ThreadStore', () => {
         {
           role: 'assistant',
           content: 'Je vérifie.',
-          tool_calls: [{ function: { name: 'read_file', arguments: { path: 'a.txt' } } }]
+          tool_calls: [{ id: '0:0', function: { name: 'read_file', arguments: { path: 'a.txt' } } }]
         },
-        { role: 'tool', tool_name: 'read_file', content: 'contenu A' },
+        { role: 'tool', tool_name: 'read_file', tool_call_id: '0:0', content: 'contenu A' },
         {
           role: 'assistant',
           content: '',
-          tool_calls: [{ function: { name: 'git_status', arguments: {} } }]
+          tool_calls: [{ id: '1:0', function: { name: 'git_status', arguments: {} } }]
         },
-        { role: 'tool', tool_name: 'git_status', content: 'M a.txt' },
+        { role: 'tool', tool_name: 'git_status', tool_call_id: '1:0', content: 'M a.txt' },
         { role: 'assistant', content: 'Terminé.' }
       ])
     } finally {
@@ -231,6 +231,7 @@ describe('ThreadStore', () => {
       expect(store.listPromptMessages(thread.id).at(-1)).toEqual({
         role: 'tool',
         tool_name: 'run_command',
+        tool_call_id: '0:0',
         content: 'Appel d’outil interrompu.'
       })
     } finally {

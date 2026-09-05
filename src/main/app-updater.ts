@@ -8,7 +8,7 @@ import type { UpdateState } from '../shared/contracts'
 const { autoUpdater } = electronUpdater
 
 export const UPDATE_BASE_URL = 'https://update.stellan.takeos.fr'
-const CHECK_TIMEOUT_MS = 30_000
+const CHECK_TIMEOUT_MS = 8_000
 const INSTALL_NOTICE_MS = 900
 const UPDATE_RESTART_MARKER = 'pending-update-restart.json'
 
@@ -24,7 +24,7 @@ function publish(next: UpdateState): void {
 
 function failure(error: unknown): string {
   const detail = error instanceof Error ? error.message : 'erreur inconnue'
-  return `La mise à jour obligatoire de Stellan a échoué (${detail}). Vérifiez votre connexion puis contactez le support Stellan si le problème persiste.`
+  return `La recherche de mise à jour a échoué (${detail}). Stellan démarre normalement et réessaiera au prochain lancement.`
 }
 
 function restartMarkerPath(): string {
@@ -92,7 +92,7 @@ export function startMandatoryUpdate(): Promise<boolean> {
     }
     const timeout = setTimeout(() => {
       publish({ status: 'error', message: failure(new Error('délai de vérification dépassé')) })
-      finish(false)
+      finish(true)
     }, CHECK_TIMEOUT_MS)
 
     autoUpdater.autoDownload = true
@@ -127,12 +127,12 @@ export function startMandatoryUpdate(): Promise<boolean> {
     })
     autoUpdater.on('error', (error: Error) => {
       publish({ status: 'error', message: failure(error) })
-      finish(false)
+      finish(true)
     })
 
     void autoUpdater.checkForUpdates().catch((error: unknown) => {
       publish({ status: 'error', message: failure(error) })
-      finish(false)
+      finish(true)
     })
   })
   return started

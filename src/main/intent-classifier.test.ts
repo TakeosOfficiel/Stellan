@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { classifyIntent, classifyIntentByRule } from './intent-classifier'
+import type { InferenceProvider } from './inference'
 
 function streamResponse(lines: unknown[]): Response {
   return new Response(`${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, { status: 200 })
@@ -131,6 +132,23 @@ describe('intent classifier', () => {
     expect(request.messages[0]?.content).toContain('Réponds par exactement un mot')
     expect(request.options.num_predict).toBe(8)
     expect(request).not.toHaveProperty('tools')
+  })
+
+  it('can classify through an inference provider independent from Ollama', async () => {
+    const streamChat = vi.fn<InferenceProvider['streamChat']>().mockResolvedValue({
+      content: 'DISCUSSION',
+      toolCalls: []
+    })
+
+    const result = await classifyIntent({
+      model: 'remote-model',
+      inferenceProvider: { id: 'test-provider', streamChat },
+      messages: [{ role: 'user', content: 'Tu peux t’occuper de ça ?' }],
+      signal: new AbortController().signal
+    })
+
+    expect(result).toMatchObject({ intent: 'discussion', source: 'model' })
+    expect(streamChat).toHaveBeenCalledOnce()
   })
 
   it('treats an invalid classifier response as unknown without blocking normal handling', async () => {

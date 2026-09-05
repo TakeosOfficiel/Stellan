@@ -63,4 +63,18 @@ describe('mandatory application updater', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(mocks.updater.quitAndInstall).toHaveBeenCalledWith(true, true)
   })
+
+  it('does not block startup when the update check fails', async () => {
+    vi.resetModules()
+    const module = await import('./app-updater')
+    const ready = module.startMandatoryUpdate()
+
+    mocks.emit('error', new Error('serveur indisponible'))
+
+    await expect(ready).resolves.toBe(true)
+    expect(module.getUpdateState()).toEqual({
+      status: 'error',
+      message: expect.stringContaining('démarre normalement')
+    })
+  })
 })

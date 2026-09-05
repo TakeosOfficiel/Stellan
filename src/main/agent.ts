@@ -2,11 +2,15 @@ import path from 'node:path'
 import { z } from 'zod'
 import type { ChatMessage } from '../shared/contracts'
 import {
-  OllamaIdleTimeoutError,
-  streamOllamaChat,
-  type OllamaMessage,
-  type OllamaToolCall
+  ollamaInferenceProvider
 } from './ollama'
+import {
+  InferenceIdleTimeoutError,
+  type InferenceMessage,
+  type InferencePerformanceMetrics,
+  type InferenceProvider,
+  type InferenceToolCall
+} from './inference'
 import {
   classifyIntentByRule,
   type IntentClassification,
@@ -401,8 +405,8 @@ function normalizeActivityActionArguments(input: Record<string, unknown>): Recor
   }
 }
 
-function parseFallbackToolCalls(content: string): OllamaToolCall[] {
-  const textualCalls: OllamaToolCall[] = []
+function parseFallbackToolCalls(content: string): InferenceToolCall[] {
+  const textualCalls: InferenceToolCall[] = []
   const textualPattern = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g
   for (const match of content.matchAll(textualPattern)) {
     try {
@@ -436,7 +440,7 @@ function parseFallbackToolCalls(content: string): OllamaToolCall[] {
   return parsed.data.map((file) => ({ function: { name: 'write_file', arguments: file } }))
 }
 
-function parseSingleAssignedFileCall(content: string, writeScope?: ReadonlySet<string>): OllamaToolCall[] {
+function parseSingleAssignedFileCall(content: string, writeScope?: ReadonlySet<string>): InferenceToolCall[] {
   if (!writeScope || writeScope.size !== 1) return []
   const fences = [...content.matchAll(/```[^\r\n]*\r?\n([\s\S]*?)```/g)]
   if (fences.length !== 1 || !fences[0]?.[1]?.trim()) return []
@@ -841,15 +845,18 @@ export type AgentToolLifecycleEvent =
 export const MAX_CONVERSATION_CHARACTERS = 18_000
 const MAX_TOOL_ARGUMENT_CHARACTERS = 10_000
 const MAX_SYSTEM_CHARACTERS = 16_000
+const MAX_HISTORICAL_TOOL_CHARACTERS = 1_200
 
 export type CodingAgentOptions = {
   model: string
+  inferenceProvider?: InferenceProvider
   messages: ChatMessage[]
   project?: AgentProjectTools
   signal: AbortSignal
   onContent: (content: string) => void
   onTool: (tool: string, status: ToolStatus) => void
   onInferenceLog?: (message: string) => void
+  onModelMetrics?: (metrics: InferencePerformanceMetrics) => void
   onToolEvent?: (event: AgentToolLifecycleEvent) => Promise<void>
   authorize: (tool: string, summary: string) => Promise<boolean>
   spawnWorkers?: (tasks: WorkerTask[]) => Promise<WorkerResult[]>
@@ -887,7 +894,7 @@ function compactResult(value: unknown): string {
   return result.length > 20_000 ? `${result.slice(0, 20_000)}\n… résultat tronqué` : result
 }
 
-function contextSize(messages: OllamaMessage[]): number {
+function contextSize(messages: InferenceMessage[]): number {
   return JSON.stringify(messages, (key, value: unknown) =>
     key === 'images' && Array.isArray(value)
       ? value.map(() => '[image jointe]')
@@ -895,7 +902,7 @@ function contextSize(messages: OllamaMessage[]): number {
   ).length
 }
 
-function compactToolArguments(message: OllamaMessage): OllamaMessage {
+function compactToolArguments(message: InferenceMessage): InferenceMessage {
   if (!message.tool_calls) return { ...message }
   return {
     ...message,
@@ -913,7 +920,7 @@ function compactToolArguments(message: OllamaMessage): OllamaMessage {
   }
 }
 
-function fitNewestGroup(group: OllamaMessage[], available: number): OllamaMessage[] {
+function fitNewestGroup(group: InferenceMessage[], available: number): InferenceMessage[] {
   const fitted = group.map(compactToolArguments)
   let excess = contextSize(fitted) - available
   for (const message of fitted) {
@@ -928,8 +935,23 @@ function fitNewestGroup(group: OllamaMessage[], available: number): OllamaMessag
   return contextSize(fitted) <= available ? fitted : []
 }
 
-export function compactConversation(messages: OllamaMessage[]): OllamaMessage[] {
-  const first = messages[0]
+export function compactConversation(messages: InferenceMessage[]): InferenceMessage[] {
+  let latestUserIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      latestUserIndex = index
+      break
+    }
+  }
+  const prepared = messages.map((message, index) => message.role === 'tool'
+    && index < latestUserIndex
+    && message.content.length > MAX_HISTORICAL_TOOL_CHARACTERS
+    ? {
+        ...message,
+        content: `${message.content.slice(0, 1_000)}\n… ancien résultat d’outil tronqué …\n${message.content.slice(-120)}`
+      }
+    : message)
+  const first = prepared[0]
   const system = first?.role === 'system'
     ? {
         ...first,
@@ -938,15 +960,15 @@ export function compactConversation(messages: OllamaMessage[]): OllamaMessage[] 
           : first.content
       }
     : undefined
-  const groups: OllamaMessage[][] = []
+  const groups: InferenceMessage[][] = []
 
-  for (const message of messages.slice(system ? 1 : 0)) {
+  for (const message of prepared.slice(system ? 1 : 0)) {
     const current = groups.at(-1)
     if (message.role === 'tool' && current?.[0]?.tool_calls?.length) current.push(message)
     else groups.push([message])
   }
 
-  const selected: OllamaMessage[][] = []
+  const selected: InferenceMessage[][] = []
   let characters = contextSize(system ? [system] : [])
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const group = (groups[index] ?? []).map(compactToolArguments)
@@ -966,7 +988,7 @@ export function compactConversation(messages: OllamaMessage[]): OllamaMessage[] 
 }
 
 async function executeTool(
-  call: OllamaToolCall,
+  call: InferenceToolCall,
   options: CodingAgentOptions,
   state: AgentExecutionState
 ): Promise<{ content: string; status: Exclude<ToolStatus, 'running'> }> {
@@ -1095,6 +1117,23 @@ async function executeTool(
         : name === 'edit_file'
           ? await tools.editFile(path, (parsed as z.infer<typeof editSchema>).oldText, (parsed as z.infer<typeof editSchema>).newText, (parsed as z.infer<typeof editSchema>).replaceAll)
           : await tools.deleteFile(path)
+      if (name === 'delete_file') {
+        try {
+          await tools.readFile(path)
+          throw new Error(`La suppression de ${path} n’a pas été appliquée.`)
+        } catch (error) {
+          if (error instanceof Error && error.message === `La suppression de ${path} n’a pas été appliquée.`) throw error
+        }
+      } else {
+        const expected = name === 'write_file'
+          ? (parsed as z.infer<typeof writeSchema>).content
+          : (parsed as z.infer<typeof editSchema>).replaceAll
+            ? (previous ?? '').split((parsed as z.infer<typeof editSchema>).oldText).join((parsed as z.infer<typeof editSchema>).newText)
+            : (previous ?? '').replace((parsed as z.infer<typeof editSchema>).oldText, (parsed as z.infer<typeof editSchema>).newText)
+        if (await tools.readFile(path) !== expected) {
+          throw new Error(`La vérification de ${path} a échoué après l’écriture.`)
+        }
+      }
       state.undoStack.push({ path, content: previous })
       if (name === 'delete_file') state.deletedFiles.add(normalizedPath)
       return { content: compactResult(result), status: 'done' }
@@ -1212,14 +1251,21 @@ export function buildCodingAgentSystemPrompt(options: Pick<CodingAgentOptions,
   'project' | 'isGitRepository' | 'spawnWorkers' | 'writeScope' | 'consultAdvisor' |
   'activityContext' | 'startActivity' | 'staticWebsiteContract'
 >): string {
+  if (options.writeScope) {
+    return `Tu es Stellan, worker enfant local.
+- Accomplis directement la tâche reçue avec les outils ; ne donne pas du code à copier.
+- Lis les fichiers utiles, mais tu ne modifies que les chemins de fichiers exacts qui te sont attribués.
+- Une modification existe uniquement après la réussite de write_file ou edit_file. Vérifie ensuite le fichier et ne prétends jamais avoir effectué une action absente.
+- write_file crée automatiquement leurs dossiers parents : n’exécute jamais mkdir.
+- N’utilise ni commande, ni Git, ni worker supplémentaire. Ne touche jamais à .git.
+- Réponds brièvement avec les fichiers réellement modifiés et toute vérification exécutée.`
+  }
   const gitRules = options.isGitRepository === false
     ? '\n- Ce projet n’est pas un dépôt Git : n’utilise ni les outils Git ni une commande Git.'
     : '\n- Ne modifie et ne supprime JAMAIS .git, .git/** ou les métadonnées Git. Utilise exclusivement git_status, git_diff et les commandes Git autorisées pour interagir avec Git. Ne crée un commit ou un push que si l’utilisateur le demande explicitement dans son message actuel. Les autres commandes Git modificatrices sont interdites.'
   const workerRules = options.spawnWorkers
     ? `\n\nWORKERS\n- Utilise create_workers si l’utilisateur demande plusieurs workers, ou si au moins deux tâches réellement indépendantes portent sur des fichiers différents. Pour une petite tâche, travaille directement. Un petit site HTML/CSS/JavaScript est un ensemble couplé : ne crée pas un worker par fichier sauf demande explicite de l’utilisateur.\n- Inspecte d’abord l’arborescence et les fichiers pertinents. Si le projet est vide, définis directement une structure cohérente avant de répartir le travail. Pour un nouveau site statique, index.html DOIT être à la racine du projet, jamais dans assets ; ses liens doivent viser les chemins CSS et JavaScript exacts.\n- Attribue à chaque worker des chemins relatifs complets et exclusifs. Chaque worker doit avoir au moins un fichier. Chaque entrée désigne un fichier, jamais un dossier : écris css/styles.css en une seule entrée, pas css et styles.css. Ne crée jamais un worker chargé de créer d’autres workers. Aucun fichier ne doit appartenir à deux workers. Ne délègue pas l’intégration finale.\n- Selon les ressources disponibles, seuls certains workers démarrent immédiatement et les autres attendent automatiquement.\n- Si un worker échoue, conserve tous les résultats marqués done. Ne recrée jamais de worker pour leurs fichiers. Comprends l’erreur avant de redéléguer les tâches en échec ; une seule nouvelle tentative worker est permise. Essaie ensuite une autre approche toi-même ou explique précisément le blocage à l’utilisateur.\n- Après leur retour, le coordinateur relit les résultats, effectue l’intégration nécessaire et lance les vérifications.`
-    : options.writeScope
-      ? '\n\nWORKER ENFANT\n- Tu peux lire le projet pour comprendre le contexte, mais tu ne modifies que les chemins de fichiers exacts qui te sont attribués. write_file crée automatiquement leurs dossiers parents : écris directement le fichier demandé et ne tente pas de lancer mkdir. N’essaie pas de lancer des commandes, de créer d’autres workers ou de modifier un autre fichier.'
-      : ''
+    : ''
   const advisorRule = options.consultAdvisor
     ? '\n- Pour une décision, un diagnostic ou un plan complexe dont une incertitude importante subsiste après ton analyse, utilise consult_advisor avec une question précise. Le conseiller peut enquêter lui-même dans le projet, uniquement en lecture seule : exploite ses preuves, vérifie son avis et garde la décision finale. Ne le consulte pas pour une demande simple.'
     : ''
@@ -1371,7 +1417,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   const attachedImageRules = hasAttachedImages
     ? '\n\nIMAGES JOINTES\n- Une ou plusieurs images sont réellement jointes et accessibles dans les messages. Analyse-les lorsque l’utilisateur le demande. Ne prétends jamais ne pas les avoir reçues et ne réponds pas par une salutation générique à la place de leur analyse.'
     : ''
-  const conversation: OllamaMessage[] = [
+  const conversation: InferenceMessage[] = [
     {
       role: 'system',
       content: reliableActivityMode
@@ -1471,6 +1517,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       : multipleWorkersRequested && !workerToolAttempted
         ? [...availableTools.filter((tool) => WORKER_PLANNING_TOOL_NAMES.has(tool.function.name)), CREATE_WORKERS_TOOL]
       : options.spawnWorkers && !reliableActivityMode && !workerCoordinationDisabled
+        && completedWrites.size === 0 && executionState.completedWorkerFiles.size === 0
         ? [...availableTools, CREATE_WORKERS_TOOL]
         : reliableActivityToolAttempted && reliableActivityMode
           ? undefined
@@ -1482,7 +1529,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       `message=${inferenceTraceId} step=${step + 1}/12 contextChars=${messageCharacters} toolChars=${toolCharacters} totalChars=${messageCharacters + toolCharacters} messages=${compactedConversation.length} activity=${reliableActivityMode}`
     )
     try {
-      result = await streamOllamaChat(
+      result = await (options.inferenceProvider ?? ollamaInferenceProvider).streamChat(
         options.model,
         compactedConversation,
         (content) => { turnContent += content },
@@ -1494,7 +1541,8 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
           : options.modelIdleTimeoutMs,
         reliableActivityMode ? 256 : undefined,
         undefined,
-        options.onInferenceLog
+        options.onInferenceLog,
+        options.onModelMetrics
       )
     } catch (error) {
       if (projectChangeRequested
@@ -1514,7 +1562,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
           : reliableActivityFallback)
         return
       }
-      if (error instanceof OllamaIdleTimeoutError && completedWrites.size > 0) {
+      if (error instanceof InferenceIdleTimeoutError && completedWrites.size > 0) {
         if (options.staticWebsiteContract && options.project) {
           const websiteIssues = await validateStaticWebsite(options.project, options.staticWebsiteContract)
           if (websiteIssues.length > 0) {
@@ -1645,7 +1693,13 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         options.onContent('Je n’ai pas pu traiter cette demande avec le moteur fiable. Aucun état de jeu n’a été inventé ou modifié.')
         return
       }
-      if (projectChangeRequested && !mutationToolAttempted && completedWrites.size === 0 && executionState.completedWorkerFiles.size === 0) {
+      if (projectChangeRequested && mutationToolAttempted
+        && completedWrites.size === 0 && executionState.completedWorkerFiles.size === 0) {
+        options.onContent('Aucun fichier n’a été modifié : l’action demandée a été refusée ou sa vérification a échoué.')
+        return
+      }
+      if (projectChangeRequested && !mutationToolAttempted
+        && completedWrites.size === 0 && executionState.completedWorkerFiles.size === 0) {
         if (!missingWriteRecoveryAttempted) {
           missingWriteRecoveryAttempted = true
           conversation.push({ role: 'assistant', content: result.content })
@@ -1710,18 +1764,22 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       }
       return
     }
+    const normalizedToolCalls = result.toolCalls.map((call, callIndex) => ({
+      ...call,
+      id: call.id ?? `${step}:${callIndex}`
+    }))
     conversation.push({
       role: 'assistant',
       content: result.content,
-      tool_calls: result.toolCalls
+      tool_calls: normalizedToolCalls
     })
 
-    for (const [callIndex, call] of result.toolCalls.entries()) {
+    for (const [callIndex, call] of normalizedToolCalls.entries()) {
       const tool = call.function.name
       if (tool === 'activity_start' || tool === 'activity_action') reliableActivityToolAttempted = true
       if (tool === 'create_workers') workerToolAttempted = true
       if (tool === 'write_file' || tool === 'edit_file' || tool === 'delete_file' || tool === 'undo_edit') mutationToolAttempted = true
-      const callId = `${step}:${callIndex}`
+      const callId = call.id
       await options.onToolEvent?.({
         type: 'started',
         callId,
@@ -1767,6 +1825,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       conversation.push({
         role: 'tool',
         tool_name: tool,
+        tool_call_id: callId,
         content: toolResult.content
       })
     }

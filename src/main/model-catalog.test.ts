@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { HardwareInfo } from '../shared/contracts'
-import { getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledInteractiveModel, selectInstalledSpecialistModel } from './model-catalog'
+import { getLlamaCppArtifact, getModelCatalog, isCatalogModel, selectAutomaticVisionModel, selectInstalledInteractiveModel, selectInstalledSpecialistModel } from './model-catalog'
 
 function hardware(overrides: Partial<HardwareInfo> = {}): HardwareInfo {
   return {
@@ -47,7 +47,8 @@ describe('getModelCatalog', () => {
     expect(isCatalogModel('qwen3.5:0.8b')).toBe(true)
     expect(isCatalogModel('qwen3.5:4b')).toBe(true)
     expect(isCatalogModel('devstral-small-2:24b')).toBe(true)
-    expect(isCatalogModel('qwen2.5-coder:7b')).toBe(false)
+    expect(isCatalogModel('qwen2.5-coder:7b')).toBe(true)
+    expect(isCatalogModel('qwen2.5-coder:14b')).toBe(true)
     expect(isCatalogModel('unknown/model')).toBe(false)
   })
 
@@ -58,8 +59,32 @@ describe('getModelCatalog', () => {
       'devstral-small-2:24b',
       'granite4.2:3b',
       'gpt-oss:20b',
-      'gemma4:e2b-it-qat'
+      'gemma4:e2b-it-qat',
+      'qwen2.5-coder:14b'
     ]))
+  })
+
+  it('only exposes curated, verified llama.cpp alternatives', () => {
+    expect(getLlamaCppArtifact('qwen3.5:4b')).toBe('unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL')
+    expect(getLlamaCppArtifact('qwen3.5:9b')).toBe('unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL')
+    expect(getLlamaCppArtifact('qwen3.5:2b')).toBeNull()
+    expect(getModelCatalog(hardware()).find((model) => model.id === 'qwen3.5:4b')?.llamaCppAvailable).toBe(true)
+  })
+
+  it('recommends the 14B coding specialist when it fits in detected VRAM', () => {
+    const catalog = getModelCatalog(hardware({
+      totalMemoryBytes: 32_000_000_000,
+      gpus: [{ model: 'GPU 12 GB', vramBytes: 12_000_000_000 }]
+    }))
+
+    expect(catalog.find((model) => model.id === 'qwen2.5-coder:14b')?.compatibility)
+      .toBe('recommended')
+    expect(selectInstalledSpecialistModel(
+      catalog,
+      ['qwen3.5:9b', 'qwen2.5-coder:14b'],
+      'code',
+      'qwen3.5:9b'
+    )).toBe('qwen2.5-coder:14b')
   })
 
   it('routes code work to an installed specialist and otherwise keeps the primary model', () => {
@@ -96,6 +121,19 @@ describe('getModelCatalog', () => {
     expect(selectInstalledInteractiveModel(catalog, ['qwen3.8:27b', 'qwen3.5:9b'], 'code'))
       .toBe('qwen3.5:9b')
     expect(selectInstalledInteractiveModel(catalog, ['qwen3.8:27b'], 'code')).toBeNull()
+  })
+
+  it('avoids an installed model measured as too slow for interactive work', () => {
+    const catalog = getModelCatalog(hardware({
+      totalMemoryBytes: 32_000_000_000,
+      gpus: [{ model: 'GPU 12 GB', vramBytes: 12_000_000_000 }]
+    }))
+    const performance = new Map([
+      ['qwen3.5:9b', { firstResponseMs: 55_000, tokensPerSecond: 2 }]
+    ])
+
+    expect(selectInstalledInteractiveModel(catalog, ['qwen3.5:9b', 'qwen3.5:4b'], 'code', performance))
+      .toBe('qwen3.5:4b')
   })
 
   it('exposes one polyvalent model in general, code, vision, and fast usages', () => {

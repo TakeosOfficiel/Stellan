@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
-import type { OllamaMessage, OllamaToolCall } from './ollama'
+import type { InferenceMessage, InferenceToolCall } from './inference'
 import { MODEL_SELECTION_MESSAGE_PREFIX, type ChatImage, type ChatMessage } from '../shared/contracts'
 
 export type Thread = {
@@ -1198,7 +1198,7 @@ export class ThreadStore {
     return runs.length
   }
 
-  listPromptMessages(threadId: string, throughUserMessageId?: string): OllamaMessage[] {
+  listPromptMessages(threadId: string, throughUserMessageId?: string): InferenceMessage[] {
     this.assertOpen()
     const runs = this.listAgentRuns(threadId)
     const messages = new Map(this.database.prepare(`
@@ -1207,7 +1207,7 @@ export class ThreadStore {
       WHERE thread_id = ?
       ORDER BY created_at ASC, rowid ASC
     `).all(threadId).map(toMessage).map((message) => [message.id, message]))
-    const prompt: OllamaMessage[] = []
+    const prompt: InferenceMessage[] = []
 
     for (const run of runs) {
       if (run.status === 'queued' && run.userMessageId !== throughUserMessageId) continue
@@ -1232,7 +1232,8 @@ export class ThreadStore {
       }
       for (const stepEvents of [...steps.values()]) {
         stepEvents.sort((left, right) => left.callIndex - right.callIndex)
-        const toolCalls: OllamaToolCall[] = stepEvents.map((event) => ({
+        const toolCalls: InferenceToolCall[] = stepEvents.map((event) => ({
+          id: event.callId,
           function: { name: event.tool, arguments: event.arguments ?? {} }
         }))
         prompt.push({
@@ -1245,6 +1246,7 @@ export class ThreadStore {
           prompt.push({
             role: 'tool',
             tool_name: event.tool,
+            tool_call_id: event.callId,
             content: terminal?.result ?? '[Appel d’outil interrompu]'
           })
         }

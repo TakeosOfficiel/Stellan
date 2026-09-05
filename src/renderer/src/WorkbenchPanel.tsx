@@ -120,6 +120,8 @@ export function WorkbenchPanel({
   const [terminalStartedForThreadId, setTerminalStartedForThreadId] = useState<string | null>(null)
   const ready = Boolean(active && thread?.projectPath && thread.environmentStatus === 'active')
   const panelId = thread?.id ?? 'empty'
+  const currentThreadIdRef = useRef(thread?.id)
+  currentThreadIdRef.current = thread?.id
 
   useEffect(() => {
     if (!portalMenuOpen) return
@@ -138,11 +140,14 @@ export function WorkbenchPanel({
     setReviewError(null)
     setReviewLoading(true)
     try {
-      setReview(await window.localAgent.reviewThreadProject(thread.id))
+      const result = await window.localAgent.reviewThreadProject(thread.id)
+      if (currentThreadIdRef.current === thread.id) setReview(result)
     } catch (error) {
-      setReviewError(error instanceof Error ? error.message : 'Impossible de lire les changements.')
+      if (currentThreadIdRef.current === thread.id) {
+        setReviewError(error instanceof Error ? error.message : 'Impossible de lire les changements.')
+      }
     } finally {
-      setReviewLoading(false)
+      if (currentThreadIdRef.current === thread.id) setReviewLoading(false)
     }
   }
 
@@ -152,13 +157,16 @@ export function WorkbenchPanel({
     setFilesLoading(true)
     try {
       const result = await window.localAgent.listProjectFiles(thread.id)
+      if (currentThreadIdRef.current !== thread.id) return
       setFiles(result.files)
       setDirectories(result.directories)
       setFilesTruncated(result.truncated)
     } catch (error) {
-      setFilesError(error instanceof Error ? error.message : 'Impossible de lire les fichiers du projet.')
+      if (currentThreadIdRef.current === thread.id) {
+        setFilesError(error instanceof Error ? error.message : 'Impossible de lire les fichiers du projet.')
+      }
     } finally {
-      setFilesLoading(false)
+      if (currentThreadIdRef.current === thread.id) setFilesLoading(false)
     }
   }
 
@@ -166,36 +174,26 @@ export function WorkbenchPanel({
     setReview(null)
     setExpandedChanges(new Set())
     setReviewError(null)
-    setReviewLoading(Boolean(thread && ready))
+    setReviewLoading(false)
     setFiles([])
     setDirectories([])
     setFilesTruncated(false)
     setFilePreview(null)
     setFilesError(null)
-    setFilesLoading(Boolean(thread && ready))
+    setFilesLoading(false)
     setExpandedFolders(new Set())
     setPortal(null)
     setPortalError(null)
     setTerminalStartedForThreadId(null)
     if (!thread || !ready) return
+    if (tab === 'changes') void refreshChanges()
+    if (tab === 'files' || tab === 'portals') void refreshFiles()
     let canceled = false
-    void Promise.allSettled([
-      window.localAgent.reviewThreadProject(thread.id),
-      window.localAgent.listProjectFiles(thread.id),
-      window.localAgent.getPortal(thread.id)
-    ]).then(([reviewResult, filesResult, portalResult]) => {
+    void window.localAgent.getPortal(thread.id).then((result) => {
       if (canceled) return
-      if (reviewResult.status === 'fulfilled') setReview(reviewResult.value)
-      else setReviewError('Impossible de lire les changements.')
-      setReviewLoading(false)
-      if (filesResult.status === 'fulfilled') {
-        setFiles(filesResult.value.files)
-        setDirectories(filesResult.value.directories)
-        setFilesTruncated(filesResult.value.truncated)
-      } else setFilesError('Impossible de lire les fichiers du projet.')
-      setFilesLoading(false)
-      if (portalResult.status === 'fulfilled') setPortal(portalResult.value)
-      else setPortalError('Impossible de lire l’état du portail local.')
+      setPortal(result)
+    }).catch(() => {
+      if (!canceled) setPortalError('Impossible de lire l’état du portail local.')
     })
     return () => { canceled = true }
   }, [ready, thread?.id])
@@ -213,7 +211,8 @@ export function WorkbenchPanel({
 
   useEffect(() => {
     if (!thread || !ready || !refreshKey) return
-    void Promise.all([refreshChanges(), refreshFiles()])
+    if (tab === 'changes') void refreshChanges()
+    if (tab === 'files' || tab === 'portals') void refreshFiles()
   }, [refreshKey])
 
   const terminalThreadId = thread?.id

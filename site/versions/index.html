@@ -29,8 +29,28 @@
       <div class="release-list">
         <article class="release-card latest">
           <header class="release-header">
-            <div class="release-title"><h2>Stellan 0.1.12</h2><span class="release-badge">Actuelle</span></div>
-            <time datetime="2026-09-04">4 septembre 2026</time>
+            <div class="release-title"><h2>Stellan 0.1.13</h2><span class="release-badge">Actuelle</span></div>
+            <time datetime="2026-09-05">5 septembre 2026</time>
+          </header>
+          <ul>
+            <li>Nouvelle couche d’inférence indépendante du moteur local utilisé.</li>
+            <li>Comparatif expérimental entre Ollama et llama.cpp pour Qwen 3.5 4B et 9B.</li>
+            <li>Validation réelle du texte, des appels d’outils et du retour d’outil avant toute recommandation.</li>
+            <li>Mesure locale du délai de première réponse et de la vitesse des modèles.</li>
+            <li>Réponses, images et longues conversations allégées pour réduire les attentes et l’utilisation mémoire.</li>
+            <li>Écritures de fichiers vérifiées afin d’empêcher un modèle d’annoncer une modification inexistante.</li>
+            <li>Démarrage plus fluide : une panne de vérification de mise à jour ne bloque plus l’application.</li>
+          </ul>
+          <div class="release-downloads">
+            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.13-win-x64.exe">Windows</a>
+            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.13-linux-x86_64.AppImage">Linux AppImage</a>
+          </div>
+        </article>
+
+        <article class="release-card">
+          <header class="release-header">
+            <div class="release-title"><h2>Stellan 0.1.12</h2></div>
+            <span class="release-meta">Version précédente</span>
           </header>
           <ul>
             <li>Les tâches de code évitent automatiquement les modèles trop gros pour la VRAM détectée.</li>
@@ -38,16 +58,11 @@
             <li>Le changement de modèle est annoncé clairement dans la conversation.</li>
             <li>Lorsqu’aucun modèle adapté n’est installé, Stellan répond immédiatement avec une recommandation au lieu d’expirer après deux minutes.</li>
           </ul>
-          <div class="release-downloads">
-            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.12-win-x64.exe">Windows</a>
-            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.12-linux-x86_64.AppImage">Linux AppImage</a>
-          </div>
         </article>
 
         <article class="release-card">
           <header class="release-header">
             <div class="release-title"><h2>Stellan 0.1.11</h2></div>
-            <span class="release-meta">Version précédente</span>
           </header>
           <ul>
             <li>Contexte des modèles de 20B et plus réduit automatiquement à 8K pour éviter les longues attentes avant la première réponse.</li>
