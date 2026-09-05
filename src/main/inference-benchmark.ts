@@ -93,6 +93,7 @@ export async function qualifyInferenceProvider(
     model,
     [
       { role: 'system', content: 'Après le résultat de l’outil, réponds uniquement TOOL_RESULT_OK.' },
+      { role: 'user', content: 'Appelle stellan_probe avec value="ok", puis confirme son résultat.' },
       { role: 'assistant', content: tool.content, tool_calls: [correlatedCall] },
       { role: 'tool', content: '{"accepted":true}', tool_name: 'stellan_probe', tool_call_id: correlatedCall.id }
     ],

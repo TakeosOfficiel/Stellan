@@ -1,6 +1,6 @@
 {
   "name": "stellan",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
   "description": "Stellan, a local-first coding agent for Windows and Linux",
   "author": "Stellan contributors",

@@ -27,6 +27,9 @@ describe('qualifyInferenceProvider', () => {
     expect(streamChat.mock.calls[2]?.[1]).toContainEqual(expect.objectContaining({
       role: 'tool', tool_call_id: 'call-7'
     }))
+    expect(streamChat.mock.calls[2]?.[1]).toContainEqual(expect.objectContaining({
+      role: 'user', content: expect.stringContaining('stellan_probe')
+    }))
   })
 
   it('rejects a provider that only narrates an intended tool call', async () => {
