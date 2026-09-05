@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${STELLAN_UPDATE_SSH:?Exemple: deploy@update.stellan.takeos.fr}"
+: "${STELLAN_UPDATE_SSH:?Exemple: stellan-deploy@update.stellan.takeos.fr}"
 : "${STELLAN_UPDATE_ROOT:?Exemple: /var/www/update.stellan.takeos.fr}"
 
 ssh_options=(-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)

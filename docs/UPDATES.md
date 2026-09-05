@@ -43,7 +43,7 @@ server {
 3. Depuis une machine contenant tous les artefacts :
 
 ```bash
-STELLAN_UPDATE_SSH=deploy@update.stellan.takeos.fr \
+STELLAN_UPDATE_SSH=stellan-deploy@update.stellan.takeos.fr \
 STELLAN_UPDATE_ROOT=/var/www/update.stellan.takeos.fr \
 ./scripts/deploy-updates.sh
 ```
