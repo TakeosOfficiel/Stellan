@@ -36,6 +36,7 @@ const api: LocalAgentApi = {
   pullModel: (model) => ipcRenderer.invoke('ollama:pull-model', model),
   warmModel: (model) => ipcRenderer.invoke('ollama:warm-model', model),
   benchmarkLlamaCpp: (model) => ipcRenderer.invoke('inference:benchmark-llama-cpp', model),
+  openInferenceLog: () => ipcRenderer.invoke('inference:open-log'),
   onInferenceBenchmarkProgress: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: InferenceBenchmarkProgress): void => listener(progress)
     ipcRenderer.on('inference:benchmark-progress', handler)

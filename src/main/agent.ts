@@ -991,7 +991,7 @@ async function executeTool(
   call: InferenceToolCall,
   options: CodingAgentOptions,
   state: AgentExecutionState
-): Promise<{ content: string; status: Exclude<ToolStatus, 'running'> }> {
+): Promise<{ content: string; status: Exclude<ToolStatus, 'running'>; changed?: boolean }> {
   const name = call.function.name
   const input = call.function.arguments
   const tools = options.project
@@ -1111,6 +1111,13 @@ async function executeTool(
       let previous: string | null = null
       try { previous = await tools.readFile(path) } catch (error) {
         if (name !== 'write_file') throw error
+      }
+      if (name === 'write_file' && previous === (parsed as z.infer<typeof writeSchema>).content) {
+        return {
+          content: compactResult({ path, added: 0, removed: 0, unchanged: true }),
+          status: 'done',
+          changed: false
+        }
       }
       const result = name === 'write_file'
         ? await tools.writeFile(path, (parsed as z.infer<typeof writeSchema>).content)
@@ -1587,6 +1594,21 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       const fallbackCalls = parseFallbackToolCalls(result.content)
       if (fallbackCalls.length === 0) fallbackCalls.push(...parseSingleAssignedFileCall(result.content, options.writeScope))
       if (fallbackCalls.length > 0) result = { content: '', toolCalls: fallbackCalls }
+      else if (/<stellan_file\b/i.test(result.content)) {
+        if (!missingWriteRecoveryAttempted) {
+          missingWriteRecoveryAttempted = true
+          fallbackFileFormatRequired = true
+          conversation.push({
+            role: 'user',
+            content: `Ton bloc de fichier était incomplet ou invalide et n’a pas été appliqué. Réessaie une seule fois avec chaque balise de fermeture complète et un contenu concis.\n${FALLBACK_FILE_FORMAT}`
+          })
+          continue
+        }
+        options.onContent(completedWrites.size > 0
+          ? 'La modification reste partielle : le modèle a produit un bloc de fichier incomplet. Le code technique invalide n’a pas été affiché ni appliqué.'
+          : 'Je n’ai pas pu appliquer la modification : le modèle a produit un bloc de fichier incomplet. Aucun fichier n’a été modifié.')
+        return
+      }
     }
 
     if (discussionMode) result.toolCalls = []
@@ -1810,7 +1832,9 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         completedActions += 1
         if (tool === 'create_workers') mutationToolAttempted = true
         const path = call.function.arguments.path
-        if (['write_file', 'edit_file', 'delete_file', 'undo_edit'].includes(tool) && typeof path === 'string') completedWrites.add(path)
+        if (toolResult.changed !== false
+          && ['write_file', 'edit_file', 'delete_file', 'undo_edit'].includes(tool)
+          && typeof path === 'string') completedWrites.add(path)
       } else {
         failedActions += 1
       }

@@ -33,7 +33,8 @@ function aggregateMetrics(metrics: InferencePerformanceMetrics[]): InferenceBenc
 export async function qualifyInferenceProvider(
   provider: InferenceProvider,
   model: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onDiagnostics?: (message: string) => void
 ): Promise<ProviderQualification> {
   const metrics: InferencePerformanceMetrics[] = []
   const common = {
@@ -53,7 +54,7 @@ export async function qualifyInferenceProvider(
     common.idleTimeoutMs,
     common.numPredict,
     common.numCtx,
-    undefined,
+    onDiagnostics,
     common.onMetrics
   )
   if (!text.content.toUpperCase().includes('STELLAN_OK')) {
@@ -73,7 +74,7 @@ export async function qualifyInferenceProvider(
     common.idleTimeoutMs,
     common.numPredict,
     common.numCtx,
-    undefined,
+    onDiagnostics,
     common.onMetrics
   )
   const call = tool.toolCalls.find((candidate) => candidate.function.name === 'stellan_probe')
@@ -96,7 +97,7 @@ export async function qualifyInferenceProvider(
     common.idleTimeoutMs,
     common.numPredict,
     common.numCtx,
-    undefined,
+    onDiagnostics,
     common.onMetrics
   )
   if (!roundTrip.content.toUpperCase().includes('TOOL_RESULT_OK')) {

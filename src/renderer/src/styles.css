@@ -440,7 +440,14 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .settings-sidebar nav button:hover, .settings-sidebar nav button.active { color: #e2e7e3; background: #242b27; }
 .settings-sidebar nav button span { width: 18px; color: #9ca69f; text-align: center; }
 .settings-sidebar nav button small { margin-left: auto; color: #7b857e; font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
-.settings-back { margin-top: auto; }
+.settings-diagnostic, .settings-back {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px;
+  color: #8f9892; background: transparent; font-size: 11px; font-weight: 500; text-align: left;
+}
+.settings-diagnostic { margin-top: auto; }
+.settings-diagnostic:hover, .settings-back:hover { color: #e2e7e3; background: #242b27; }
+.settings-diagnostic svg { width: 15px; height: 15px; }
+.settings-back { margin-top: 3px; }
 .settings-content { min-width: 0; padding: 0 32px 45px; overflow-y: auto; background: #0c0f0e; }
 .settings-page-header {
   display: flex; align-items: center; justify-content: space-between; min-height: 94px;

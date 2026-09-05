@@ -25,11 +25,12 @@ describe('portal preload IPC', () => {
     const listener = vi.fn()
     const unsubscribe = api.onInferenceBenchmarkProgress(listener)
     await api.benchmarkLlamaCpp('qwen3.5:4b')
+    await api.openInferenceLog()
     unsubscribe()
 
-    expect(mocks.invoke.mock.calls.at(-1)).toEqual([
-      'inference:benchmark-llama-cpp',
-      'qwen3.5:4b'
+    expect(mocks.invoke.mock.calls.slice(-2)).toEqual([
+      ['inference:benchmark-llama-cpp', 'qwen3.5:4b'],
+      ['inference:open-log']
     ])
     expect(mocks.on).toHaveBeenCalledWith('inference:benchmark-progress', expect.any(Function))
     expect(mocks.removeListener).toHaveBeenCalledWith('inference:benchmark-progress', expect.any(Function))

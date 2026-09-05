@@ -17,7 +17,7 @@ import {
 import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
 import { getBasicHardwareInfo, getHardwareInfo, inferenceModelOptions, inferenceParallelism } from './hardware'
-import { classifyIntent } from './intent-classifier'
+import { classifyIntent, requiresVision } from './intent-classifier'
 import { compareInferenceMetrics, qualifyInferenceProvider } from './inference-benchmark'
 import {
   configureInferenceWslRuntime,
@@ -72,6 +72,7 @@ const MODEL_PULL_PROGRESS_CHANNEL = 'ollama:pull-progress'
 const MODEL_WARM_CHANNEL = 'ollama:warm-model'
 const INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL = 'inference:benchmark-llama-cpp'
 const INFERENCE_BENCHMARK_PROGRESS_CHANNEL = 'inference:benchmark-progress'
+const INFERENCE_OPEN_LOG_CHANNEL = 'inference:open-log'
 const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
@@ -116,9 +117,13 @@ const WINDOW_SET_STARTUP_CHANNEL = 'window:set-startup'
 const UPDATE_GET_STATE_CHANNEL = 'update:get-state'
 const UPDATE_STATE_CHANNEL = 'update:state'
 
+function inferenceLogPath(): string {
+  return join(app.getPath('logs'), 'inference.log')
+}
+
 function writeInferenceLog(message: string): void {
   try {
-    const logPath = join(app.getPath('logs'), 'inference.log')
+    const logPath = inferenceLogPath()
     mkdirSync(dirname(logPath), { recursive: true })
     if (existsSync(logPath) && statSync(logPath).size > 2_000_000) writeFileSync(logPath, '')
     appendFileSync(logPath, `${new Date().toISOString()} ${message}\n`)
@@ -375,49 +380,78 @@ async function benchmarkLlamaCpp(
   model: string,
   onProgress: (detail: string, percent: number) => void
 ): Promise<InferenceBenchmarkResult> {
+  const traceId = randomUUID().slice(0, 8)
+  const log = (message: string): void => writeInferenceLog(`benchmark=${traceId} ${message}`)
+  const failure = (reason: string): InferenceBenchmarkResult => {
+    log(`result=failure reason=${JSON.stringify(reason.slice(0, 1_000))}`)
+    return { success: false, reason }
+  }
+  log(`phase=start model=${model}`)
   const artifact = getLlamaCppArtifact(model)
-  if (!artifact) return { success: false, reason: 'Ce modèle ne possède pas encore de version llama.cpp vérifiée par Stellan.' }
+  if (!artifact) return failure('Ce modèle ne possède pas encore de version llama.cpp vérifiée par Stellan.')
   if (activeChats.size > 0 || activeDownloadPromise || getThreadStore().listActiveAgentRuns().length > 0) {
-    return { success: false, reason: 'Terminez les générations et téléchargements en cours avant de lancer le comparatif.' }
+    return failure('Terminez les générations et téléchargements en cours avant de lancer le comparatif.')
   }
 
-  const status = await ensureOllamaRunning()
+  let status: Awaited<ReturnType<typeof ensureOllamaRunning>>
+  try {
+    status = await ensureOllamaRunning()
+  } catch (error) {
+    return failure(`Ollama n’a pas pu démarrer : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
+  }
   if (!status.available || !status.models.some((entry) => entry.name === model || entry.name === `${model}:latest`)) {
-    return { success: false, reason: 'Installez d’abord ce modèle dans Stellan pour effectuer une comparaison équitable.' }
+    return failure('Installez d’abord ce modèle dans Stellan pour effectuer une comparaison équitable.')
   }
 
-  const hardware = await getHardwareInfo()
+  let hardware: Awaited<ReturnType<typeof getHardwareInfo>>
+  try {
+    hardware = await getHardwareInfo()
+  } catch (error) {
+    return failure(`La détection du matériel a échoué : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
+  }
   const modelOptions = inferenceModelOptions(hardware)
   const requestedBackend = llamaBackendFromOllama(ollamaGpuBackend)
   let runner: CommandRunner = runCommand
   let baseUrl = managedWslServiceUrl(LLAMA_HOST_PORT) ?? `http://127.0.0.1:${LLAMA_HOST_PORT}`
   let trustedRuntimeNetwork = false
   if (process.platform === 'win32' && requestedBackend === 'cuda') {
-    await ensureNvidiaInferenceRuntime()
+    try {
+      await ensureNvidiaInferenceRuntime()
+    } catch (error) {
+      return failure(`Le runtime NVIDIA n’a pas pu démarrer : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
+    }
     runner = runInferenceDockerCommand
     baseUrl = inferenceWslServiceUrl(LLAMA_HOST_PORT) ?? baseUrl
     trustedRuntimeNetwork = true
   }
+  log(`phase=prepared platform=${hardware.platform} cpuCores=${hardware.cpuCores} memoryBytes=${hardware.totalMemoryBytes} gpuCount=${hardware.gpus.length} requestedBackend=${requestedBackend} context=${modelOptions.numCtx}`)
 
   onProgress(`Mesure d’Ollama avec ${model}…`, 8)
+  log('phase=ollama-qualification-start')
   let ollama
   try {
     ollama = (await qualifyInferenceProvider(
       { id: 'ollama', streamChat: streamOllamaChat },
-      model
+      model,
+      undefined,
+      (message) => log(message)
     )).metrics
+    log(`phase=ollama-qualification-complete wallMs=${ollama.wallMs} firstResponseMs=${ollama.firstResponseMs} tokensPerSecond=${ollama.tokensPerSecond ?? 'unknown'}`)
   } catch (error) {
-    return { success: false, reason: `Le test de référence Ollama a échoué : ${error instanceof Error ? error.message : 'erreur inconnue'}` }
+    return failure(`Le test de référence Ollama a échoué : ${error instanceof Error ? error.message : 'erreur inconnue'}`)
   }
 
   let llamaStarted = false
   try {
     onProgress('Libération de la mémoire utilisée par Ollama…', 35)
+    log('phase=ollama-stop-start')
     const stoppedOllama = await runner('docker', ['stop', OLLAMA_CONTAINER_NAME], { timeoutMs: 60_000 })
     if (stoppedOllama.exitCode !== 0 || stoppedOllama.timedOut) {
       throw new Error('Ollama n’a pas pu libérer la mémoire avant le comparatif.')
     }
+    log('phase=ollama-stop-complete')
     onProgress('Téléchargement puis chargement de llama.cpp et du modèle GGUF vérifié…', 45)
+    log(`phase=llama-start requestedBackend=${requestedBackend}`)
     const started = await startLlamaServer({
       backend: requestedBackend,
       modelArtifact: artifact,
@@ -426,29 +460,48 @@ async function benchmarkLlamaCpp(
       predictTokens: Math.min(modelOptions.numPredict, 1_024),
       parallel: 1
     }, runner)
-    if (!started.success) return started
+    if (!started.success) return failure(started.reason)
     llamaStarted = true
+    log(`phase=llama-container-ready actualBackend=${started.backend}${started.fallbackReason ? ` fallbackReason=${JSON.stringify(started.fallbackReason.slice(0, 1_000))}` : ''}`)
     await waitForLlamaServer(baseUrl)
+    log('phase=llama-health-ready')
     onProgress(`Validation du texte et des outils avec llama.cpp (${started.backend})…`, 72)
     const llamaCpp = (await qualifyInferenceProvider(
       createLocalOpenAICompatibleProvider({ id: 'llama.cpp', baseUrl, trustedRuntimeNetwork }),
-      model
+      model,
+      undefined,
+      (message) => log(message)
     )).metrics
+    const recommendation = compareInferenceMetrics(llamaCpp, ollama)
+    log(`phase=llama-qualification-complete wallMs=${llamaCpp.wallMs} firstResponseMs=${llamaCpp.firstResponseMs} tokensPerSecond=${llamaCpp.tokensPerSecond ?? 'unknown'}`)
+    log(`result=success actualBackend=${started.backend} recommendation=${recommendation}`)
     return {
       success: true,
       model,
       backend: started.backend,
       llamaCpp,
       ollama,
-      recommendation: compareInferenceMetrics(llamaCpp, ollama),
+      recommendation,
       ...(started.fallbackReason ? { fallbackReason: started.fallbackReason } : {})
     }
   } catch (error) {
-    return { success: false, reason: error instanceof Error ? error.message : 'Le comparatif llama.cpp a échoué.' }
+    return failure(error instanceof Error ? error.message : 'Le comparatif llama.cpp a échoué.')
   } finally {
     onProgress('Restauration d’Ollama et libération de llama.cpp…', 94)
-    if (llamaStarted) await stopLlamaServer(runner).catch(() => undefined)
-    await ensureOllamaRunning().catch(() => undefined)
+    if (llamaStarted) {
+      try {
+        await stopLlamaServer(runner)
+        log('cleanup=llama-stopped')
+      } catch (error) {
+        log(`cleanup=llama-stop-failed reason=${JSON.stringify(error instanceof Error ? error.message.slice(0, 1_000) : 'erreur inconnue')}`)
+      }
+    }
+    try {
+      const restored = await ensureOllamaRunning()
+      log(`cleanup=ollama-restore available=${restored.available}${restored.available ? '' : ` reason=${JSON.stringify(restored.reason.slice(0, 1_000))}`}`)
+    } catch (error) {
+      log(`cleanup=ollama-restore-failed reason=${JSON.stringify(error instanceof Error ? error.message.slice(0, 1_000) : 'erreur inconnue')}`)
+    }
     onProgress('Le moteur habituel de Stellan est de nouveau prêt.', 100)
   }
 }
@@ -645,7 +698,7 @@ function listPublicToolActivities(threadId: string) {
 }
 
 async function resolveVisionModel(run: AgentRun, messages: Awaited<ReturnType<ThreadStore['listPromptMessages']>>): Promise<string> {
-  if (!messages.some((message) => (message.images?.length ?? 0) > 0)) return run.model
+  if (!requiresVision(messages)) return run.model
   sendChatEvent(run, { type: 'progress', detail: 'Choix automatique du modèle de vision…', percent: null })
   if (await modelSupportsVision(run.model)) return run.model
 
@@ -1269,6 +1322,10 @@ app.whenReady().then(() => {
   handle(MODEL_WARM_CHANNEL, async (_event, input: unknown) => {
     const model = installedModelNameSchema.parse(input)
     return warmOllamaModel(model)
+  })
+  handle(INFERENCE_OPEN_LOG_CHANNEL, () => {
+    writeInferenceLog('diagnostic.log opened-by-user')
+    shell.showItemInFolder(inferenceLogPath())
   })
   handle(INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL, async (event, input: unknown) => {
     const model = modelIdSchema.parse(input)
@@ -1992,6 +2049,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(MODEL_PULL_CHANNEL)
   ipcMain.removeHandler(MODEL_WARM_CHANNEL)
   ipcMain.removeHandler(INFERENCE_BENCHMARK_LLAMA_CPP_CHANNEL)
+  ipcMain.removeHandler(INFERENCE_OPEN_LOG_CHANNEL)
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
   ipcMain.removeHandler(PROJECT_CREATE_CHANNEL)

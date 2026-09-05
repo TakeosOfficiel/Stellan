@@ -1243,6 +1243,48 @@ describe('runCodingAgent', () => {
     expect(onContent).toHaveBeenCalledWith('La page Minecraft a été créée.')
   })
 
+  it('does not report an identical write or leak incomplete fallback markup', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const original = '<h1>Boutique</h1>\n'
+    await writeFile(join(projectPath, 'index.html'), original)
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{ message: { tool_calls: [{
+        function: { name: 'write_file', arguments: { path: 'index.html', content: original } }
+      }] }, done: true }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: '<stellan_file path="assets/css/style.css">\nbody { color: white; }' }, done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: '<stellan_file path="assets/css/style.css">\nbody { color: black; }' }, done: true
+      }]))
+    vi.stubGlobal('fetch', fetcher)
+    const onContent = vi.fn()
+    const onToolEvent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:4b',
+      messages: [{ role: 'user', content: 'Améliore le style du site vitrine.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      onToolEvent,
+      authorize: vi.fn().mockResolvedValue(true),
+      intentClassification: { intent: 'code', clear: true, source: 'rule', reason: 'explicit-software-artifact' }
+    })
+
+    await expect(readFile(join(projectPath, 'index.html'), 'utf8')).resolves.toBe(original)
+    await expect(readFile(join(projectPath, 'assets/css/style.css'), 'utf8')).rejects.toThrow()
+    expect(onContent).toHaveBeenCalledOnce()
+    expect(onContent).toHaveBeenCalledWith(expect.stringContaining('bloc de fichier incomplet'))
+    expect(onContent.mock.calls[0]?.[0]).not.toContain('<stellan_file')
+    expect(onToolEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'finished', status: 'done', result: expect.stringContaining('"unchanged":true')
+    }))
+  })
+
   it('recovers a single worker file from one Markdown code block', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)

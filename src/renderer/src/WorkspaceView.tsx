@@ -69,7 +69,7 @@ type ToolActivity = Omit<StoredToolActivity, 'callId'> & {
   expanded: boolean
 }
 
-type FileEditActivity = {
+export type FileEditActivity = {
   path: string
   added: number
   removed: number
@@ -245,7 +245,7 @@ function toolActivityLabel(activity: ToolActivity): React.JSX.Element {
   return <>{TOOL_LABELS[activity.tool] ?? activity.tool}{running ? '…' : ''}</>
 }
 
-function fileEditActivity(activity: ToolActivity): FileEditActivity | null {
+export function fileEditActivity(activity: ToolActivity): FileEditActivity | null {
   if (!['write_file', 'edit_file', 'delete_file'].includes(activity.tool) || (activity.status !== 'done' && activity.status !== 'running')) return null
   const input = parsedToolValue(activity.input) as Record<string, unknown> | null
   const output = parsedToolValue(activity.output) as Record<string, unknown> | null
@@ -254,10 +254,13 @@ function fileEditActivity(activity: ToolActivity): FileEditActivity | null {
     (activity.tool === 'write_file' && typeof input.content !== 'string') ||
     (activity.tool === 'edit_file' && typeof input.oldText !== 'string')
   ) return null
+  const added = typeof output?.added === 'number' ? output.added : 0
+  const removed = typeof output?.removed === 'number' ? output.removed : 0
+  if (activity.status === 'done' && added === 0 && removed === 0) return null
   return {
     path: input.path,
-    added: typeof output?.added === 'number' ? output.added : 0,
-    removed: typeof output?.removed === 'number' ? output.removed : 0,
+    added,
+    removed,
     active: activity.status === 'running',
     deleted: activity.tool === 'delete_file' && activity.status === 'done'
   }

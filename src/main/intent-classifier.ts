@@ -76,6 +76,16 @@ function requestsImageAnalysis(messages: readonly ChatMessage[]): boolean {
     || ((latestUser.images?.length ?? 0) > 0 && /\b(?:cette|voici|regarde|analyse|decris|vois|voit|voir|quoi)\b/.test(request))
 }
 
+export function requiresVision(messages: readonly ChatMessage[]): boolean {
+  const latestUser = [...messages].reverse().find((message) => message.role === 'user')
+  if (!latestUser) return false
+  if ((latestUser.images?.length ?? 0) > 0) return true
+  const request = normalizedLatestRequest(messages)
+  return messages.some((message) => (message.images?.length ?? 0) > 0)
+    && (requestsImageAnalysis(messages)
+      || /\b(?:reprends?|utilise|inspire|base|selon|comme)\b[^.!?\n]{0,100}\b(?:image|photo|capture|screenshot|piece jointe)\b/.test(request))
+}
+
 export function classifyIntentByRule(
   messages: readonly ChatMessage[],
   activityContext?: string | null

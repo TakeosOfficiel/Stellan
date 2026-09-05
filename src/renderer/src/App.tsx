@@ -3,6 +3,7 @@ import {
   Bot,
   Boxes,
   ChevronLeft,
+  FileText,
   KeyRound,
   LoaderCircle,
   Minus,
@@ -421,6 +422,9 @@ export function App(): React.JSX.Element {
           <button type="button" disabled><span><Bot aria-hidden="true" /></span> Profils workers <small>Bientôt</small></button>
           <button type="button" disabled><span><KeyRound aria-hidden="true" /></span> Accès et portails <small>Bientôt</small></button>
         </nav>
+        <button className="settings-diagnostic" type="button" onClick={() => void window.localAgent.openInferenceLog()}>
+          <FileText aria-hidden="true" /> Journal diagnostic
+        </button>
         <button className="settings-back" type="button" onClick={firstRun ? finishOnboarding : () => setView('agent')}>
           {!firstRun && <ChevronLeft aria-hidden="true" />}{firstRun ? 'Configurer plus tard' : 'Retour aux threads'}
         </button>

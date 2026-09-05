@@ -4,6 +4,7 @@ import { compareInferenceMetrics, qualifyInferenceProvider } from './inference-b
 
 describe('qualifyInferenceProvider', () => {
   it('checks text, structured tools, and tool-result correlation', async () => {
+    const diagnostics = vi.fn()
     const streamChat = vi.fn<InferenceProvider['streamChat']>()
       .mockImplementationOnce(async (...args) => {
         args[10]?.({ model: args[0], firstResponseMs: 10, wallMs: 20, tokensPerSecond: 5 })
@@ -19,9 +20,10 @@ describe('qualifyInferenceProvider', () => {
       })
     const provider: InferenceProvider = { id: 'test', streamChat }
 
-    await expect(qualifyInferenceProvider(provider, 'model')).resolves.toEqual({
+    await expect(qualifyInferenceProvider(provider, 'model', undefined, diagnostics)).resolves.toEqual({
       metrics: { firstResponseMs: 20, wallMs: 120, tokensPerSecond: 4 }
     })
+    expect(streamChat.mock.calls.every((call) => call[9] === diagnostics)).toBe(true)
     expect(streamChat.mock.calls[2]?.[1]).toContainEqual(expect.objectContaining({
       role: 'tool', tool_call_id: 'call-7'
     }))

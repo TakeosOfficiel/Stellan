@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { classifyIntent, classifyIntentByRule } from './intent-classifier'
+import { classifyIntent, classifyIntentByRule, requiresVision } from './intent-classifier'
 import type { InferenceProvider } from './inference'
 
 function streamResponse(lines: unknown[]): Response {
@@ -62,6 +62,20 @@ describe('intent classifier', () => {
     expect(classifyIntentByRule([
       { role: 'user', content: 't u voit quoi ?', images: [image] }
     ])).toMatchObject({ intent: 'discussion', clear: true, reason: 'attached-image-analysis' })
+  })
+
+  it('does not reuse an unrelated old image for a later styling request', () => {
+    const image = { mimeType: 'image/png' as const, data: 'aGVsbG8=' }
+    const history = [
+      { role: 'user' as const, content: 'Tu vois quoi sur cette image ?', images: [image] },
+      { role: 'assistant' as const, content: 'Une boutique.' },
+      { role: 'user' as const, content: 'Tu peux faire le site vitrine un peu mieux niveau style ?' }
+    ]
+
+    expect(requiresVision(history)).toBe(false)
+    expect(requiresVision([...history, {
+      role: 'user', content: "Reprends le style de l'image que j'ai envoyée."
+    }])).toBe(true)
   })
 
   it('keeps an image-backed software modification in code mode', () => {

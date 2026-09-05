@@ -375,6 +375,7 @@ export type LocalAgentApi = {
   pullModel: (model: string) => Promise<ModelPullResult>
   warmModel: (model: string) => Promise<boolean>
   benchmarkLlamaCpp: (model: string) => Promise<InferenceBenchmarkResult>
+  openInferenceLog: () => Promise<void>
   onInferenceBenchmarkProgress: (listener: (progress: InferenceBenchmarkProgress) => void) => () => void
   onModelPullProgress: (listener: (progress: ModelPullProgress) => void) => () => void
   transcribeDictation: (audio: ArrayBuffer) => Promise<string>
