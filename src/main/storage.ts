@@ -15,6 +15,7 @@ export type Thread = {
   environmentError: string | null
   environmentUpdatedAt: string
   model: string | null
+  claudeSessionId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -361,6 +362,9 @@ const migrations = [
 
     CREATE INDEX reliable_activity_events_activity_sequence
       ON reliable_activity_events(activity_id, sequence);
+  `,
+  `
+    ALTER TABLE threads ADD COLUMN claude_session_id TEXT;
   `
 ]
 
@@ -381,6 +385,9 @@ function toThread(row: StorageRow): Thread {
     environmentError: row.environment_error === null ? null : String(row.environment_error),
     environmentUpdatedAt: String(row.environment_updated_at),
     model: row.model === null ? null : String(row.model),
+    claudeSessionId: row.claude_session_id === null || row.claude_session_id === undefined
+      ? null
+      : String(row.claude_session_id),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   }
@@ -528,6 +535,7 @@ export class ThreadStore {
       environmentError: null,
       environmentUpdatedAt: new Date().toISOString(),
       model: input.model ?? null,
+      claudeSessionId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }
@@ -562,7 +570,7 @@ export class ThreadStore {
     return this.database.prepare(`
       SELECT id, parent_thread_id, title, project_name, project_path, workspace_path, workspace_mode,
              environment_status, environment_error, environment_updated_at,
-             model, created_at, updated_at
+             model, claude_session_id, created_at, updated_at
       FROM threads
       ORDER BY created_at ASC, rowid ASC
     `).all().map(toThread)
@@ -574,7 +582,7 @@ export class ThreadStore {
     const row = this.database.prepare(`
       SELECT id, parent_thread_id, title, project_name, project_path, workspace_path, workspace_mode,
              environment_status, environment_error, environment_updated_at,
-             model, created_at, updated_at
+             model, claude_session_id, created_at, updated_at
       FROM threads
       WHERE id = ?
     `).get(id)
@@ -639,6 +647,14 @@ export class ThreadStore {
       throw error
     }
     return { thread: this.getThread(id) as Thread, message }
+  }
+
+  setClaudeSession(id: string, sessionId: string | null): Thread {
+    this.assertOpen()
+    const result = this.database.prepare('UPDATE threads SET claude_session_id = ? WHERE id = ?')
+      .run(sessionId, id)
+    if (result.changes === 0) throw new Error(`Thread not found: ${id}`)
+    return this.getThread(id) as Thread
   }
 
   activateEnvironment(

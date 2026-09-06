@@ -18,6 +18,7 @@ import {
 } from './intent-classifier'
 import { ProjectTools } from './project-tools'
 import type { AdvisorResult } from './advisor'
+import type { WebsiteValidationRequirements } from './website-render-issues'
 
 export type AgentProjectTools = Pick<ProjectTools,
   'listFiles' | 'readFile' | 'search' | 'writeFile' | 'editFile' | 'deleteFile' | 'gitStatus' | 'gitDiff' | 'gitChanges' | 'runCommand'
@@ -315,7 +316,9 @@ const searchSchema = z.object({
 })
 const writeSchema = z.object({
   path: z.string().min(1).max(2_000),
-  content: z.string().max(2_000_000)
+  content: z.string().max(2_000_000).refine((content) => content.trim().length > 0, {
+    message: 'Le contenu de write_file ne peut pas être vide.'
+  })
 })
 const fallbackWritesSchema = z.array(writeSchema).min(1).max(20)
 const textualToolCallSchema = z.object({
@@ -449,6 +452,19 @@ function parseSingleAssignedFileCall(content: string, writeScope?: ReadonlySet<s
   return [{ function: { name: 'write_file', arguments: { path, content: fences[0][1].replace(/\r?\n$/, '') } } }]
 }
 
+function explicitlyAuthorizesFileDeletion(
+  messages: readonly ChatMessage[],
+  intentClassification: IntentClassification
+): boolean {
+  if (intentClassification.reason === 'confirmed-destructive-action') return true
+  const request = [...messages].reverse().find((message) => message.role === 'user')?.content
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase() ?? ''
+  if (/\b(?:sans|ne|n|without|no|do not|don['’]t)\b[^.!?\n]{0,40}\b(?:supprime(?:r|z)?|efface(?:r|z)?|retire(?:r|z)?|delete|remove)\b/.test(request)) return false
+  const requestsDeletion = /\b(?:supprime(?:r|z)?|efface(?:r|z)?|retire(?:r|z)?|delete|remove)\b/.test(request)
+  const namesFileTarget = /\b(?:fichiers?|files?)\b|(?:^|\s)[\w./-]+\.[a-z\d]{1,10}\b/i.test(request)
+  return requestsDeletion && namesFileTarget
+}
+
 const FALLBACK_FILE_FORMAT = `Réponds uniquement avec un ou plusieurs blocs de fichiers complets dans ce format, sans Markdown, JSON, commentaire ni texte autour :
 <stellan_file path="index.html">
 contenu complet non échappé
@@ -557,14 +573,21 @@ const STATIC_WEBSITE_PATHS = {
   javascript: 'assets/js/game.js'
 } as const
 
-type StaticWebsiteContract = typeof STATIC_WEBSITE_PATHS & {
+type StaticWebsiteContract = typeof STATIC_WEBSITE_PATHS & WebsiteValidationRequirements & {
   requireSubstantiveDesign?: boolean
 }
 
 function requestsSubstantiveWebsite(messages: readonly ChatMessage[]): boolean {
-  const request = [...messages].reverse().find((message) => message.role === 'user')?.content
-    .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase() ?? ''
+  const request = messages.filter((message) => message.role === 'user').map((message) => message.content).join('\n')
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
   return /\b(?:boutique|vitrine|portfolio|e-?commerce|vendre|vente|produits?|animations?)\b/.test(request)
+}
+
+function requests3dGallery(messages: readonly ChatMessage[]): boolean {
+  const request = messages.filter((message) => message.role === 'user').map((message) => message.content).join('\n')
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
+  return /\b3d\b/.test(request)
+    && /\b(?:galerie|gallery|modeles?|models?|portfolio|vendre|vente|boutique|presenter|montrer)\b/.test(request)
 }
 
 function requestsNewStaticWebsite(
@@ -580,6 +603,11 @@ function requestsNewStaticWebsite(
     || /\bpage\s+(?:web|internet)\b/.test(request)
     || /\b(?:site web|website|webpage|landing page)\b/.test(request)
   return creation && website
+}
+
+function hasCanonicalStaticWebsite(projectFiles: readonly string[]): boolean {
+  const normalized = new Set(projectFiles.map((file) => normalizeWorkerPath(file)))
+  return Object.values(STATIC_WEBSITE_PATHS).every((file) => normalized.has(normalizeWorkerPath(file)))
 }
 
 function staticWebsitePath(pathname: string, contract: StaticWebsiteContract): string {
@@ -638,6 +666,16 @@ async function validateStaticWebsite(
     if (missingIds.length > 0) issues.push(`les identifiants HTML utilisés par le JavaScript sont absents : ${missingIds.join(', ')}`)
   }
   return issues
+}
+
+async function validateCompletedWebsite(
+  project: AgentProjectTools,
+  contract: StaticWebsiteContract,
+  validateRenderedWebsite?: (requirements: WebsiteValidationRequirements) => Promise<string[]>
+): Promise<string[]> {
+  const staticIssues = await validateStaticWebsite(project, contract)
+  if (staticIssues.length > 0 || !validateRenderedWebsite) return staticIssues
+  return validateRenderedWebsite({ requires3dGallery: contract.requires3dGallery })
 }
 
 function staticWebsiteRepairPrompt(issues: readonly string[]): string {
@@ -864,6 +902,7 @@ export type AgentToolLifecycleEvent =
     }
 
 export const MAX_CONVERSATION_CHARACTERS = 18_000
+const MAX_AGENT_STEPS = 32
 const MAX_TOOL_ARGUMENT_CHARACTERS = 10_000
 const MAX_SYSTEM_CHARACTERS = 16_000
 const MAX_HISTORICAL_TOOL_CHARACTERS = 1_200
@@ -891,6 +930,7 @@ export type CodingAgentOptions = {
   intentClassification?: IntentClassification
   writeScope?: ReadonlySet<string>
   staticWebsiteContract?: StaticWebsiteContract
+  validateRenderedWebsite?: (requirements: WebsiteValidationRequirements) => Promise<string[]>
   consumeSteering?: () => ChatMessage[]
   allowRunCommand?: boolean
   isGitRepository?: boolean
@@ -1122,10 +1162,9 @@ async function executeTool(
           status: 'denied'
         }
       }
-      if (TOOL_RISK[name] === 'high'
-        && (!state.intentClassification.clear || state.intentClassification.intent !== 'code')) {
+      if (name === 'delete_file' && !explicitlyAuthorizesFileDeletion(options.messages, state.intentClassification)) {
         return {
-          content: `Cette suppression est une action à risque élevé et la demande ne l’autorise pas assez clairement. Demande à l’utilisateur de confirmer explicitement la suppression de ${path} avant de continuer.`,
+          content: `La demande ne sollicite pas explicitement la suppression de ${path}. Conserve le fichier et modifie-le avec write_file ou edit_file.`,
           status: 'denied'
         }
       }
@@ -1306,7 +1345,7 @@ export function buildCodingAgentSystemPrompt(options: Pick<CodingAgentOptions,
     ? `\n\nACTIVITÉS FIABLES\n- Pour une demande dont les règles ou l’état doivent être exacts, utilise un moteur fiable disponible au lieu de simuler son état toi-même. Le moteur hangman gère le pendu.\n- Utilise activity_start pour démarrer, puis activity_action pour chaque tour. Pour le pendu, utilise guess pour une lettre, solve pour un mot complet, hint pour un indice, give_up pour abandonner et unsupported pour toute demande liée à la partie qui ne correspond à aucune de ces actions.\n- Tant qu’une activité est active, ne réponds jamais librement à une demande qui la concerne : appelle son moteur. Considère son résultat comme la seule source de vérité. Ne révèle, ne corrige et ne complète jamais un état ou un indice par supposition.\n- Après chaque coup, affiche le mot masqué, les lettres essayées et les erreurs restantes à partir de publicView. Si le moteur retourne ok=false, reprends uniquement son message public, sans ajout. Le résultat d’un outil du tour actuel remplace toujours l’état initial plus ancien.${options.activityContext ? `\n- Une activité est actuellement active. Utilise son identifiant et son état public autoritatif : ${options.activityContext}` : ''}`
     : ''
   const websiteRules = options.staticWebsiteContract
-    ? `\n\nCONTRAT DU NOUVEAU SITE STATIQUE\n- Le projet est vide et l’utilisateur demande un nouveau site statique. Utilise exactement cette structure, sans inventer d’autre chemin HTML/CSS/JavaScript :\n  - ${options.staticWebsiteContract.html}\n  - ${options.staticWebsiteContract.css}\n  - ${options.staticWebsiteContract.javascript}\n- ${options.staticWebsiteContract.html} doit référencer exactement ${options.staticWebsiteContract.css} et ${options.staticWebsiteContract.javascript}. Les identifiants utilisés par getElementById ou querySelector dans le JavaScript doivent exister dans le HTML.\n- Crée les trois fichiers avant d’annoncer que le site est terminé. Stellan contrôlera leur présence et leur cohérence.${options.staticWebsiteContract.requireSubstantiveDesign ? '\n- La demande exige un vrai rendu visuel : construis plusieurs zones de contenu utiles et une feuille CSS responsive substantielle. Un titre, un paragraphe et quelques styles de base ne constituent pas un site terminé.' : ''}`
+    ? `\n\nCONTRAT DU SITE STATIQUE\n- Crée ou corrige le site avec exactement cette structure, sans inventer d’autre chemin HTML/CSS/JavaScript :\n  - ${options.staticWebsiteContract.html}\n  - ${options.staticWebsiteContract.css}\n  - ${options.staticWebsiteContract.javascript}\n- ${options.staticWebsiteContract.html} doit référencer exactement ${options.staticWebsiteContract.css} et ${options.staticWebsiteContract.javascript}. Les identifiants utilisés par getElementById ou querySelector dans le JavaScript doivent exister dans le HTML.\n- Les trois fichiers doivent rester présents avant d’annoncer que le site est terminé. Stellan contrôlera leur présence et leur cohérence.${options.staticWebsiteContract.requireSubstantiveDesign ? '\n- La demande exige un vrai rendu visuel : choisis une direction graphique cohérente et construis une hiérarchie nette, un hero travaillé, des cartes riches, une palette maîtrisée, une échelle d’espacement régulière, des états hover/focus et une mise en page responsive. Utilise du vrai contenu de démonstration. Un titre, un paragraphe, de grands espaces vides ou quelques styles génériques ne constituent pas un site terminé.' : ''}${options.staticWebsiteContract.requires3dGallery ? '\n- La demande exige une vraie galerie 3D : rends au moins trois éléments de galerie visibles, des contrôles ou liens utilisables et au moins un canvas ou composant de visualisation 3D réellement créé dans le navigateur. Ne prétends jamais qu’un visualiseur existe si le rendu ne le contient pas.' : ''}`
     : ''
 
   return `Tu es Stellan, un assistant local${options.project ? ' qui peut travailler dans le projet ouvert avec l’utilisateur' : ''}.
@@ -1329,7 +1368,7 @@ OUTILS ET FICHIERS
 - Une modification n’existe que lorsque write_file, edit_file, delete_file ou undo_edit réussit. Ne présente jamais du code collé dans le chat comme une modification effectuée.
 - Si l’utilisateur demande de créer ou modifier un fichier, appelle les outils de fichiers au lieu de lui donner du code à copier. Mauvais : « Ajoutez ce CSS vous-même ». Correct : appeler write_file, vérifier, puis annoncer le résultat.
 - Préfère edit_file pour un remplacement local et unique. Utilise write_file pour créer un fichier ou remplacer volontairement tout son contenu. undo_edit annule seulement une modification réalisée pendant la demande actuelle.
-- delete_file supprime un seul fichier nommé. Ne tente jamais de supprimer un dossier, plusieurs fichiers par contournement, ou d’utiliser rm, rmdir, del, un shell ou un interpréteur en ligne pour modifier les fichiers.
+- delete_file supprime un seul fichier nommé, uniquement lorsque l’utilisateur demande explicitement une suppression. Pour corriger, refaire ou remplacer un fichier existant, écris sa nouvelle version sans supprimer d’abord l’ancienne. Ne tente jamais de supprimer un dossier, plusieurs fichiers par contournement, ou d’utiliser rm, rmdir, del, un shell ou un interpréteur en ligne pour modifier les fichiers.
 - write_file crée automatiquement tous les dossiers parents manquants. N’exécute jamais mkdir avant d’écrire un fichier.
 - Utilise run_command pour des commandes ciblées, sans shell, principalement pour installer, construire, tester ou vérifier. Le champ command contient uniquement l’exécutable et chaque option est une entrée distincte dans args. Lis le code d’erreur et la sortie avant de changer d’approche.${gitRules}
 
@@ -1400,10 +1439,13 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   const softwareArtifactRequested = Boolean(options.project) && intentClassification.intent === 'code'
   if (softwareArtifactRequested && options.project && !options.writeScope) {
     const projectFiles = await options.project.listFiles('.')
-    if (requestsNewStaticWebsite(options.messages, projectFiles)) {
+    const correctingExistingWebsite = intentClassification.reason === 'negative-software-feedback'
+      && hasCanonicalStaticWebsite(projectFiles)
+    if (requestsNewStaticWebsite(options.messages, projectFiles) || correctingExistingWebsite) {
       options.staticWebsiteContract = {
         ...STATIC_WEBSITE_PATHS,
-        requireSubstantiveDesign: requestsSubstantiveWebsite(options.messages)
+        requireSubstantiveDesign: correctingExistingWebsite || requestsSubstantiveWebsite(options.messages),
+        requires3dGallery: requests3dGallery(options.messages)
       }
     }
   }
@@ -1521,7 +1563,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   }
 
   try {
-    for (let step = 0; step < 12; step += 1) {
+    for (let step = 0; step < MAX_AGENT_STEPS; step += 1) {
     if (options.signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const steeringMessages = options.consumeSteering?.() ?? []
     if (steeringMessages.length > 0) {
@@ -1565,7 +1607,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     const messageCharacters = contextSize(compactedConversation)
     const toolCharacters = toolsForStep ? JSON.stringify(toolsForStep).length : 0
     options.onInferenceLog?.(
-      `message=${inferenceTraceId} step=${step + 1}/12 contextChars=${messageCharacters} toolChars=${toolCharacters} totalChars=${messageCharacters + toolCharacters} messages=${compactedConversation.length} activity=${reliableActivityMode}`
+      `message=${inferenceTraceId} step=${step + 1}/${MAX_AGENT_STEPS} contextChars=${messageCharacters} toolChars=${toolCharacters} totalChars=${messageCharacters + toolCharacters} messages=${compactedConversation.length} activity=${reliableActivityMode}`
     )
     const inferenceCallId = `inference:${step}`
     await options.onInferenceEvent?.({
@@ -1618,7 +1660,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       if (projectChangeRequested
         && !missingWriteRecoveryAttempted
         && error instanceof Error
-        && /XML syntax error|element <function>|tool.{0,20}(?:syntax|pars)/i.test(error.message)) {
+        && /XML syntax error|element <function>|tool.{0,20}(?:syntax|pars)|arguments? JSON invalides?|invalid JSON arguments?/i.test(error.message)) {
         missingWriteRecoveryAttempted = true
         conversation.push({
           role: 'user',
@@ -1634,7 +1676,11 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       }
       if (error instanceof InferenceIdleTimeoutError && completedWrites.size > 0) {
         if (options.staticWebsiteContract && options.project) {
-          const websiteIssues = await validateStaticWebsite(options.project, options.staticWebsiteContract)
+          const websiteIssues = await validateCompletedWebsite(
+            options.project,
+            options.staticWebsiteContract,
+            options.validateRenderedWebsite
+          )
           if (websiteIssues.length > 0) {
             if (!staticWebsiteRecoveryAttempted) {
               staticWebsiteRecoveryAttempted = true
@@ -1681,7 +1727,15 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     }
 
     for (const call of result.toolCalls) {
-      if (call.function.name === 'activity_start') {
+      if (call.function.name === 'list_files'
+        && typeof call.function.arguments.path === 'string'
+        && call.function.arguments.path.trim() === '') {
+        delete call.function.arguments.path
+      } else if (call.function.name === 'search_files'
+        && typeof call.function.arguments.path === 'string'
+        && call.function.arguments.path.trim() === '') {
+        delete call.function.arguments.path
+      } else if (call.function.name === 'activity_start') {
         call.function.arguments = requestedActivityEngine === 'neither-yes-nor-no'
           ? { engineId: 'neither-yes-nor-no', input: {} }
           : normalizeActivityStartArguments(call.function.arguments)
@@ -1799,7 +1853,11 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
       }
       const writtenPaths = new Set([...completedWrites, ...executionState.completedWorkerFiles])
       if (options.staticWebsiteContract && options.project) {
-        const websiteIssues = await validateStaticWebsite(options.project, options.staticWebsiteContract)
+        const websiteIssues = await validateCompletedWebsite(
+          options.project,
+          options.staticWebsiteContract,
+          options.validateRenderedWebsite
+        )
         if (websiteIssues.length > 0) {
           if (!staticWebsiteRecoveryAttempted) {
             staticWebsiteRecoveryAttempted = true
@@ -1943,5 +2001,22 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     options.onInferenceLog?.(`message=${inferenceTraceId} completedSteps=${inferenceCalls}`)
   }
 
-  throw new Error('L’agent a atteint sa limite de 12 étapes.')
+  if (completedWrites.size > 0) {
+    if (options.staticWebsiteContract && options.project) {
+      const websiteIssues = await validateCompletedWebsite(
+        options.project,
+        options.staticWebsiteContract,
+        options.validateRenderedWebsite
+      )
+      if (websiteIssues.length > 0) {
+        options.onContent(`Le site reste incomplet après ${MAX_AGENT_STEPS} étapes : ${websiteIssues.join(' ; ')}. Stellan ne le déclare pas terminé.`)
+        return
+      }
+    }
+    const files = [...completedWrites]
+    options.onContent(`Terminé. ${files.length} fichier${files.length > 1 ? 's' : ''} modifié${files.length > 1 ? 's' : ''} : ${files.map((file) => `\`${file}\``).join(', ')}.`)
+    return
+  }
+
+  throw new Error(`L’agent local n’a pas réussi à terminer après ${MAX_AGENT_STEPS} étapes de travail.`)
 }

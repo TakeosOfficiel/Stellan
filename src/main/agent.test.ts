@@ -1059,6 +1059,53 @@ describe('runCodingAgent', () => {
     expect(firstRequest.options.num_predict).toBe(4_096)
   })
 
+  it('treats an empty list path as the project root and can continue beyond twelve steps', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    await writeFile(join(projectPath, 'index.html'), '<h1>Projet</h1>')
+    const project = await ProjectTools.create(projectPath)
+    const responses = [
+      ...Array.from({ length: 13 }, (_, index) => streamResponse([{
+        message: { tool_calls: [{ function: { name: 'list_files', arguments: { path: index === 0 ? '' : '.' } } }] },
+        done: true
+      }])),
+      streamResponse([{ message: { content: 'Inspection terminée.' }, done: true }])
+    ]
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+      const response = responses.shift()
+      if (!response) throw new Error('Unexpected inference request')
+      return response
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const onContent = vi.fn()
+    const onToolEvent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [{ role: 'user', content: 'Inspecte attentivement tous les fichiers du projet puis résume leur structure.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      onToolEvent,
+      intentClassification: { intent: 'unknown', clear: false, source: 'fallback', reason: 'test-project-inspection' },
+      authorize: vi.fn().mockResolvedValue(true)
+    })
+
+    expect(fetcher).toHaveBeenCalledTimes(14)
+    expect(onToolEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'started',
+      tool: 'list_files',
+      arguments: {}
+    }))
+    expect(onToolEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'finished',
+      tool: 'list_files',
+      status: 'error'
+    }))
+    expect(onContent).toHaveBeenCalledWith('Inspection terminée.')
+  })
+
   it('keeps tool-turn commentary hidden until tools finish and publishes only the final answer', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
@@ -1460,6 +1507,103 @@ describe('runCodingAgent', () => {
     await expect(readFile(join(projectPath, 'obsolete.css'), 'utf8')).rejects.toThrow()
   })
 
+  it('keeps an existing site when a redesign response tries to delete it, then recovers malformed write arguments', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const originalFiles = {
+      'index.html': '<main>Version existante</main>\n',
+      'assets/css/style.css': 'body { color: white; }\n',
+      'assets/js/game.js': 'console.log("existing")\n'
+    }
+    await Promise.all(Object.entries(originalFiles).map(([path, content]) => project.writeFile(path, content)))
+    const replacementFiles = {
+      'index.html': '<link rel="stylesheet" href="assets/css/style.css"><header><nav>Portfolio</nav></header><main><section><h1>Galerie 3D corrigée</h1></section><section><article>Modèle interactif</article></section></main><footer>Contact</footer><script src="assets/js/game.js"></script>\n',
+      'assets/css/style.css': 'body { margin: 0; color: white; background: #111; font-family: sans-serif; } header { padding: 2rem; } main { display: grid; gap: 2rem; } section { padding: 2rem; } article { min-height: 12rem; } footer { padding: 1rem; }\n',
+      'assets/js/game.js': 'console.log("corrected")\n'
+    }
+    const fallback = Object.entries(replacementFiles)
+      .map(([path, content]) => `<stellan_file path="${path}">\n${content}</stellan_file>`)
+      .join('\n')
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: Object.keys(originalFiles).map((path) => ({
+          function: { name: 'delete_file', arguments: { path } }
+        })) },
+        done: true
+      }]))
+      .mockImplementationOnce(async () => {
+        for (const [path, content] of Object.entries(originalFiles)) {
+          await expect(project.readFile(path)).resolves.toBe(content)
+        }
+        return streamResponse([{
+          error: 'Le moteur local a produit des arguments JSON invalides pour l’outil write_file.',
+          done: true
+        }])
+      })
+      .mockResolvedValueOnce(streamResponse([{ message: { content: fallback }, done: true }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le site a été corrigé sans supprimer ses fichiers.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const authorize = vi.fn().mockResolvedValue(true)
+    const onToolEvent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [
+        { role: 'assistant', content: 'J’ai créé le site et trois visualiseurs 3D.' },
+        { role: 'user', content: "La page est moche et il n’y a pas de contenu 3D." }
+      ],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      onToolEvent,
+      authorize,
+      intentClassification: { intent: 'code', clear: true, source: 'rule', reason: 'negative-software-feedback' }
+    })
+
+    for (const [path, content] of Object.entries(replacementFiles)) {
+      await expect(project.readFile(path)).resolves.toBe(content)
+    }
+    expect(authorize).not.toHaveBeenCalledWith('delete_file', expect.anything())
+    expect(onToolEvent).toHaveBeenCalledTimes(12)
+    expect(onToolEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'finished', status: 'denied', result: expect.stringContaining('ne sollicite pas explicitement')
+    }))
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body)).tools).toBeUndefined()
+  })
+
+  it('rejects an empty full-file write without truncating the existing file', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    await project.writeFile('index.html', '<h1>Contenu conservé</h1>\n')
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [{ function: { name: 'write_file', arguments: { path: 'index.html', content: '   ' } } }] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Je n’ai pas pu appliquer la modification.' }, done: true }])))
+    const onToolEvent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [{ role: 'user', content: 'Améliore cette page.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      onToolEvent,
+      authorize: vi.fn().mockResolvedValue(true),
+      intentClassification: { intent: 'code', clear: true, source: 'rule', reason: 'explicit-software-artifact' }
+    })
+
+    await expect(project.readFile('index.html')).resolves.toBe('<h1>Contenu conservé</h1>\n')
+    expect(onToolEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'finished', status: 'error', result: expect.stringContaining('ne peut pas être vide')
+    }))
+  })
+
   it('requires explicit confirmation before a high-risk tool inferred from an unclear request', async () => {
     const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
     temporaryDirectories.push(projectPath)
@@ -1498,7 +1642,7 @@ describe('runCodingAgent', () => {
     expect(onToolEvent).toHaveBeenCalledWith(expect.objectContaining({
       type: 'finished',
       status: 'denied',
-      result: expect.stringContaining('risque élevé')
+      result: expect.stringContaining('ne sollicite pas explicitement')
     }))
   })
 
@@ -2414,6 +2558,59 @@ describe('runCodingAgent', () => {
     await expect(readFile(join(projectPath, 'assets/js/game.js'), 'utf8')).resolves.toContain('ready')
     expect(onContent).not.toHaveBeenCalledWith(expect.stringMatching(/^Terminé\. 1 fichier/))
     expect(onContent).toHaveBeenCalledWith('Le site complet est prêt.')
+  })
+
+  it('feeds rendered 3D gallery failures back to the model before declaring the site complete', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const repairedHtml = substantiveWebsiteHtml.replace(
+      '<article>Produit</article>',
+      '<article class="model-card">Dragon</article><article class="model-card">Robot</article><article class="model-card">Vaisseau</article><canvas></canvas>'
+    )
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(streamResponse([{
+        message: { tool_calls: [
+          { function: { name: 'write_file', arguments: { path: 'index.html', content: substantiveWebsiteHtml } } },
+          { function: { name: 'write_file', arguments: { path: 'assets/css/style.css', content: substantiveWebsiteCss } } },
+          { function: { name: 'write_file', arguments: { path: 'assets/js/game.js', content: 'console.log("ready")' } } }
+        ] },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'La galerie 3D est prête.' }, done: true }]))
+      .mockResolvedValueOnce(streamResponse([{
+        message: { content: `<stellan_file path="index.html">\n${repairedHtml}\n</stellan_file>\n<stellan_file path="assets/css/style.css">\n${substantiveWebsiteCss}\n</stellan_file>\n<stellan_file path="assets/js/game.js">\ndocument.querySelector("canvas").getContext("2d").fillRect(0, 0, 100, 100)\n</stellan_file>` },
+        done: true
+      }]))
+      .mockResolvedValueOnce(streamResponse([{ message: { content: 'Le rendu de la galerie est maintenant vérifié.' }, done: true }]))
+    vi.stubGlobal('fetch', fetcher)
+    const validateRenderedWebsite = vi.fn()
+      .mockResolvedValueOnce([
+        'aucun canvas ni visualiseur 3D visible n’est réellement rendu',
+        'la galerie 3D ne contient pas au moins trois éléments visibles'
+      ])
+      .mockResolvedValueOnce([])
+    const onContent = vi.fn()
+
+    await runCodingAgent({
+      model: 'qwen3.5:9b',
+      messages: [{ role: 'user', content: 'Crée un site pour montrer et vendre mes modèles 3D.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent,
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(true),
+      validateRenderedWebsite
+    })
+
+    expect(validateRenderedWebsite).toHaveBeenNthCalledWith(1, { requires3dGallery: true })
+    expect(validateRenderedWebsite).toHaveBeenNthCalledWith(2, { requires3dGallery: true })
+    const repairRequest = JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))
+    expect(repairRequest.tools).toBeUndefined()
+    expect(repairRequest.messages.at(-1)?.content).toContain('aucun canvas ni visualiseur 3D visible')
+    expect(repairRequest.messages.at(-1)?.content).toContain('au moins trois éléments visibles')
+    await expect(project.readFile('index.html')).resolves.toContain('<canvas>')
+    expect(onContent).toHaveBeenCalledWith('Le rendu de la galerie est maintenant vérifié.')
   })
 
   it('does not impose the static-site tree on an existing project', async () => {

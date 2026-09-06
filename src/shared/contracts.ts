@@ -33,6 +33,13 @@ export type InferenceSettings = {
   reasoningMode: ReasoningMode
 }
 
+export type ClaudeCodeStatus = {
+  available: boolean
+  version: string | null
+  subscription: string | null
+  reason: string | null
+}
+
 export type GpuInfo = {
   model: string
   vramBytes: number | null
@@ -363,6 +370,7 @@ export type LocalAgentApi = {
   getInferenceSettings: () => Promise<InferenceSettings>
   setInferenceSettings: (settings: InferenceSettings) => Promise<InferenceSettings>
   openInferenceLog: () => Promise<void>
+  getClaudeCodeStatus: () => Promise<ClaudeCodeStatus>
   onModelPullProgress: (listener: (progress: ModelPullProgress) => void) => () => void
   transcribeDictation: (audio: ArrayBuffer) => Promise<string>
   onDictationProgress: (listener: (progress: DictationProgress) => void) => () => void

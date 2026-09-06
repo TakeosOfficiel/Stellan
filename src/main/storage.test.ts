@@ -483,7 +483,7 @@ describe('ThreadStore', () => {
       })
       const version = new DatabaseSync(path, { readOnly: true })
       try {
-        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(14)
+        expect(version.prepare('PRAGMA user_version').get()?.user_version).toBe(15)
       } finally {
         version.close()
       }

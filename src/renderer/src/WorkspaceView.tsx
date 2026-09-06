@@ -37,6 +37,7 @@ import type {
   CatalogModel,
   ChatEvent,
   ChatImage,
+  ClaudeCodeStatus,
   DictationProgress,
   InferenceSettings,
   OllamaStatus,
@@ -67,6 +68,20 @@ type WorkspaceViewProps = {
   shortcut: { type: 'new-thread' | 'open-project' } | null
   onShortcutHandled: () => void
   onOpenSetup: () => void
+}
+
+const CLAUDE_MODELS = [
+  { id: 'claude-code:sonnet', label: 'Claude Sonnet' },
+  { id: 'claude-code:opus', label: 'Claude Opus' },
+  { id: 'claude-code:fable', label: 'Claude Fable' }
+] as const
+
+function isClaudeModel(model: string): boolean {
+  return CLAUDE_MODELS.some((candidate) => candidate.id === model)
+}
+
+function modelDisplayName(model: string): string {
+  return CLAUDE_MODELS.find((candidate) => candidate.id === model)?.label ?? model
 }
 
 type ToolActivity = Omit<StoredToolActivity, 'callId'> & {
@@ -167,6 +182,52 @@ function parsedToolValue(value: string | null): unknown {
   }
 }
 
+function readableToolValue(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) return value.map((item) => readableToolValue(item)).filter(Boolean).join('\n')
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => {
+        const formatted = readableToolValue(item)
+        return formatted ? `${key}: ${formatted.replaceAll('\n', '\n  ')}` : ''
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
+  return String(value)
+}
+
+export function toolActivityDetailSections(activity: ToolActivity): Array<{ label: string; content: string }> {
+  const input = parsedToolValue(activity.input)
+  const output = parsedToolValue(activity.output)
+  if (activity.tool === 'run_command' && input && typeof input === 'object' && !Array.isArray(input)) {
+    const commandInput = input as Record<string, unknown>
+    const command = [commandInput.command, ...(Array.isArray(commandInput.args) ? commandInput.args : [])]
+      .filter((part): part is string => typeof part === 'string')
+      .join(' ')
+    const result = output && typeof output === 'object' && !Array.isArray(output)
+      ? output as Record<string, unknown>
+      : null
+    const commandOutput = typeof output === 'string' ? output : [
+      typeof result?.stdout === 'string' ? result.stdout.trimEnd() : '',
+      typeof result?.stderr === 'string' ? result.stderr.trimEnd() : '',
+      typeof result?.exitCode === 'number' ? `Code de sortie : ${result.exitCode}` : ''
+    ].filter(Boolean).join('\n')
+    return [
+      ...(command ? [{ label: 'Commande', content: command }] : []),
+      ...(commandOutput ? [{ label: 'Sortie', content: commandOutput }] : [])
+    ]
+  }
+  const inputText = readableToolValue(input)
+  const outputText = readableToolValue(output)
+  return [
+    ...(inputText ? [{ label: 'Action', content: inputText }] : []),
+    ...(outputText ? [{ label: 'Résultat', content: outputText }] : [])
+  ]
+}
+
 type AdvisorActivityData = {
   question: string
   model: string
@@ -210,11 +271,6 @@ function toolActivityLabel(activity: ToolActivity): React.JSX.Element {
   const output = parsedToolValue(activity.output)
   const path = typeof input?.path === 'string' ? input.path : ''
   const running = activity.status === 'running'
-  if (activity.tool === 'model_inference') {
-    const model = typeof input?.model === 'string' ? input.model : 'modèle local'
-    const step = typeof input?.step === 'number' ? input.step : null
-    return <>{running ? 'Le modèle prépare la prochaine action' : 'Action préparée'} · <code>{model}</code>{step ? ` · passage ${step}` : ''}{running ? '…' : ''}</>
-  }
   if (activity.tool === 'list_files') {
     const count = Array.isArray(output) ? output.length : null
     return <>{running ? 'Exploration des fichiers…' : count === null ? 'Exploré les fichiers' : `Exploré ${count} fichier${count > 1 ? 's' : ''}`}</>
@@ -382,6 +438,7 @@ export function WorkspaceView({
     : installedModels
   const hasOllama = Boolean(status && status !== 'loading' && status.available)
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
+  const [claudeStatus, setClaudeStatus] = useState<ClaudeCodeStatus | null>(null)
   const [project, setProject] = useState<ProjectSelection | null>(null)
   const [threads, setThreads] = useState<StoredThread[]>([])
   const [exportingProject, setExportingProject] = useState(false)
@@ -451,9 +508,11 @@ export function WorkspaceView({
   const toolActivities = activeThreadId ? toolsByThread[activeThreadId] ?? [] : []
   const activeRunProgress = activeThreadId ? runProgressByThread[activeThreadId] : undefined
   const effectiveModel = useMemo(() => {
+    if (isClaudeModel(selectedModel)) return selectedModel
     if (models.some((model) => model.name === selectedModel)) return selectedModel
     return models[0]?.name ?? ''
   }, [models, selectedModel])
+  const usingClaude = isClaudeModel(effectiveModel)
 
   useEffect(() => {
     if (activeRun?.status !== 'running') {
@@ -518,6 +577,7 @@ export function WorkspaceView({
         await window.localAgent.listThreadRuns(thread.id)
       ] as const)).then((entries) => setRunHistoryByThread(Object.fromEntries(entries)))
     })
+    void window.localAgent.getClaudeCodeStatus().then(setClaudeStatus)
   }, [])
 
   useEffect(() => {
@@ -525,7 +585,7 @@ export function WorkspaceView({
   }, [effectiveModel])
 
   useEffect(() => {
-    if (preferredModel && models.some((model) => model.name === preferredModel)) {
+    if (preferredModel && (models.some((model) => model.name === preferredModel) || isClaudeModel(preferredModel))) {
       setSelectedModel(preferredModel)
     }
   }, [preferredModel])
@@ -540,7 +600,7 @@ export function WorkspaceView({
   }, [activeThreadId])
 
   useEffect(() => {
-    if (!effectiveModel || !hasOllama || warmedModelRef.current === effectiveModel) {
+    if (!effectiveModel || usingClaude || !hasOllama || warmedModelRef.current === effectiveModel) {
       setWarmingModel(false)
       return
     }
@@ -555,7 +615,7 @@ export function WorkspaceView({
         if (active) setWarmingModel(false)
       })
     return () => { active = false }
-  }, [effectiveModel, hasOllama])
+  }, [effectiveModel, hasOllama, usingClaude])
 
   useEffect(() => () => {
     if (contentFrameRef.current !== null) cancelAnimationFrame(contentFrameRef.current)
@@ -787,6 +847,7 @@ export function WorkspaceView({
     const previousModel = selectedModel
     setSelectedModel(model)
     setModelSelectionError(null)
+    if (isClaudeModel(model)) void window.localAgent.getClaudeCodeStatus().then(setClaudeStatus)
     if (!activeThreadId) return
     try {
       const result = await window.localAgent.setThreadModel({ threadId: activeThreadId, model })
@@ -1190,6 +1251,7 @@ export function WorkspaceView({
       <div className="tool-activities" aria-label="Activité des outils">
         {activities.filter((activity) => !fileEditActivity(activity)).map((activity) => {
           const advisor = activity.tool === 'consult_advisor' ? advisorActivityData(activity) : null
+          const details = toolActivityDetailSections(activity)
           return (
             <article className={`tool-activity ${activity.status} ${activity.expanded ? 'expanded' : ''}`} key={activity.id} style={{ order: activities.indexOf(activity) }}>
               <button
@@ -1217,8 +1279,7 @@ export function WorkspaceView({
                   ? <AdvisorPendingDetails question={advisorQuestion(activity)} />
                   : (
                     <div className="tool-activity-details">
-                      {activity.input && <section><strong>Action</strong><pre>{activity.input}</pre></section>}
-                      {activity.output && <section><strong>Résultat</strong><pre>{activity.output}</pre></section>}
+                      {details.map((detail) => <section key={detail.label}><strong>{detail.label}</strong><pre>{detail.content}</pre></section>)}
                       {!activity.output && activity.status === 'running' && <span>Action en cours…</span>}
                     </div>
                   ))}
@@ -1414,8 +1475,12 @@ export function WorkspaceView({
         <div className="sidebar-footer">
           <div className="runtime-summary">
             <div>
-              <span className={`status-dot ${hasOllama ? 'online' : 'offline'}`} />
-              <span>{hasOllama ? 'Moteur local connecté' : 'Moteur local indisponible'}</span>
+              <span className={`status-dot ${usingClaude ? claudeStatus?.available ? 'online' : 'offline' : hasOllama ? 'online' : 'offline'}`} />
+              <span>{usingClaude
+                ? claudeStatus?.available
+                  ? `Claude Code · abonnement ${claudeStatus.subscription ?? ''}`
+                  : claudeStatus?.version ? 'Claude Code à connecter' : 'Claude Code à installer'
+                : hasOllama ? 'Moteur local connecté' : 'Moteur local indisponible'}</span>
             </div>
             {activeThread?.projectPath && (
               <small>{activeThread.workspaceMode === 'worktree' ? 'Projet privé · ressources isolées' : 'Dossier direct confirmé'}</small>
@@ -1435,7 +1500,7 @@ export function WorkspaceView({
           )}
 
           <div className="model-selector">
-            {models.length > 0 ? (
+            {models.length > 0 || CLAUDE_MODELS.length > 0 ? (
               <>
                 <label htmlFor="primary-model">Modèle principal</label>
                 <select
@@ -1444,13 +1509,22 @@ export function WorkspaceView({
                   value={effectiveModel}
                   onChange={(event) => void selectPrimaryModel(event.target.value)}
                 >
-                  {models.map((model) => <option value={model.name} key={model.name}>{model.name}</option>)}
+                  {!effectiveModel && <option value="" disabled>Choisir un modèle</option>}
+                  <optgroup label="Claude Code · abonnement">
+                    {CLAUDE_MODELS.map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
+                  </optgroup>
+                  {models.length > 0 && <optgroup label="Modèles locaux">
+                    {models.map((model) => <option value={model.name} key={model.name}>{model.name}</option>)}
+                  </optgroup>}
                 </select>
               </>
             ) : (
               <button type="button" onClick={onOpenSetup}>Configurer un modèle</button>
             )}
             {modelSelectionError && <small className="model-selection-error" role="alert">{modelSelectionError}</small>}
+            {usingClaude && claudeStatus && !claudeStatus.available && (
+              <small className="model-selection-error" role="status">{claudeStatus.reason}</small>
+            )}
           </div>
         </div>
       </aside>
@@ -1544,7 +1618,7 @@ export function WorkspaceView({
             <h2>{activeThread?.title ?? 'Nouveau thread'}</h2>
           </div>
           <div className="chat-header-actions">
-            <button
+            {!usingClaude && <button
               className="chat-reasoning-mode"
               type="button"
               aria-pressed={Boolean(inferenceSettings && inferenceSettings.reasoningMode !== 'fast')}
@@ -1558,7 +1632,7 @@ export function WorkspaceView({
               {inferenceSettings
                 ? `Thinking ${inferenceSettings.reasoningMode === 'fast' ? 'désactivé' : 'activé'}`
                 : 'Thinking…'}
-            </button>
+            </button>}
             <div className="thread-menu">
               <button
                 ref={threadMenuButtonRef}
@@ -1611,7 +1685,7 @@ export function WorkspaceView({
               if (selectedModelName) {
                 return (
                   <div className="model-change-divider" role="status" key={message.id}>
-                    <span>Modèle principal sélectionné : {selectedModelName}</span>
+                    <span>Modèle principal sélectionné : {modelDisplayName(selectedModelName)}</span>
                   </div>
                 )
               }

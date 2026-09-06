@@ -14,6 +14,7 @@ import {
   isInstallingUpdate,
   startMandatoryUpdate
 } from './app-updater'
+import { CLAUDE_CODE_MODELS, getClaudeCodeStatus, isClaudeCodeModel, runClaudeCode } from './claude-code'
 import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
 import { getBasicHardwareInfo, getHardwareInfo, inferenceModelOptions, inferenceParallelism } from './hardware'
@@ -47,6 +48,7 @@ import { ThreadStore, type AgentRun, type AgentRunSummary as StoredAgentRunSumma
 import { TerminalManager } from './terminal'
 import { createWorkerCommandExecutor } from './worker-runtime'
 import { WorkerScheduler } from './worker-scheduler'
+import { inspectRenderedWebsite } from './website-validator'
 import {
   configureManagedWslRuntime,
   deletePrivateProject,
@@ -74,6 +76,7 @@ const MODEL_WARM_CHANNEL = 'ollama:warm-model'
 const INFERENCE_GET_SETTINGS_CHANNEL = 'inference:get-settings'
 const INFERENCE_SET_SETTINGS_CHANNEL = 'inference:set-settings'
 const INFERENCE_OPEN_LOG_CHANNEL = 'inference:open-log'
+const CLAUDE_CODE_STATUS_CHANNEL = 'claude-code:get-status'
 const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
@@ -263,6 +266,7 @@ async function acquireInferenceRuntime(): Promise<() => void> {
   return release
 }
 const portalManager = new PortalManager()
+const websiteValidationPortalManager = new PortalManager()
 const reliableEngineRegistry = createReliableEngineRegistry()
 
 function sendRuntimeProgress(progress: RuntimeProgress): void {
@@ -676,7 +680,7 @@ function listPublicToolActivities(threadId: string) {
     const finishedByCallId = new Map(
       events.filter((event) => event.status !== 'running').map((event) => [event.callId, event])
     )
-    return events.filter((event) => event.status === 'running').map((started) => {
+    return events.filter((event) => event.status === 'running' && event.tool !== 'model_inference').map((started) => {
       const finished = finishedByCallId.get(started.callId)
       return {
         requestId: run.requestId,
@@ -734,10 +738,11 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
   }
   const profile = thread.projectPath ? await resolveWorkerProfile(store, thread.projectPath) : null
   if (thread.projectPath && !profile) throw new Error('Le profil worker du projet est invalide.')
+  const useClaudeCode = isClaudeCodeModel(run.model)
   // A conversation owns its queue. Separate chats may run concurrently even
   // when they reference the same project; only messages in one chat serialize.
   const projectKey = thread.id
-  if (profile?.mode === 'container') {
+  if (!useClaudeCode && profile?.mode === 'container') {
     const runtime = await getRuntimeInfo()
     if (!profile.runtime || !runtime[profile.runtime].available) {
       throw new Error(`Le runtime ${profile.runtime ?? 'conteneur'} n’est pas disponible.`)
@@ -757,7 +762,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
       sendChatEvent(run, { type: 'error', reason: 'Génération annulée dans la file d’attente.' })
     },
     run: async () => {
-      const releaseInferenceRuntime = await acquireInferenceRuntime()
+      const releaseInferenceRuntime = useClaudeCode ? () => undefined : await acquireInferenceRuntime()
       activeChats.set(run.requestId, controller)
       activeThreadChats.set(thread.id, run.requestId)
       let assistantContent = ''
@@ -777,6 +782,78 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           images: userImages
         })
         const executionPath = thread.workspacePath ?? thread.projectPath
+        if (useClaudeCode) {
+          if (!executionPath) throw new Error('Claude Code nécessite un projet ouvert.')
+          if (userImages.length > 0) {
+            throw new Error('Les images jointes ne sont pas encore prises en charge par Claude Code dans Stellan.')
+          }
+          const claudeWorkingDirectory = process.platform === 'win32' && isManagedProjectWindowsPath(executionPath)
+            ? managedLinuxPathToWindows(executionPath)
+            : executionPath
+          let toolIndex = 0
+          const onContent = (content: string): void => {
+            assistantContent += content
+            sendChatEvent(run, { type: 'content', content })
+          }
+          sendChatEvent(run, {
+            type: 'progress',
+            detail: `Vérification de l’abonnement et démarrage de ${CLAUDE_CODE_MODELS.find((model) => model.id === run.model)?.name ?? 'Claude Code'}…`,
+            percent: null
+          })
+          await runClaudeCode({
+            model: run.model,
+            prompt: thread.claudeSessionId
+              ? summary.userContent
+              : [
+                  'Voici l’historique de cette conversation Stellan. Poursuis le travail demandé dans le dernier message utilisateur.',
+                  ...promptMessages
+                    .filter((message) => message.role === 'user' || message.role === 'assistant')
+                    .map((message) => `${message.role === 'user' ? 'Utilisateur' : 'Assistant'} :\n${message.content}`)
+                ].join('\n\n'),
+            cwd: claudeWorkingDirectory,
+            sessionId: thread.claudeSessionId,
+            signal: controller.signal,
+            onContent,
+            onProgress: (detail) => sendChatEvent(run, { type: 'progress', detail, percent: null }),
+            onSession: (sessionId) => {
+              if (!thread.claudeSessionId) getThreadStore().setClaudeSession(thread.id, sessionId)
+            },
+            onTool: (event) => {
+              const currentStore = getThreadStore()
+              if (event.type === 'started') {
+                currentStore.recordToolStarted(run.id, {
+                  callId: event.callId,
+                  step: toolIndex,
+                  callIndex: toolIndex++,
+                  tool: event.tool,
+                  arguments: event.input,
+                  assistantContent: ''
+                })
+                sendChatEvent(run, {
+                  type: 'tool',
+                  callId: event.callId,
+                  tool: event.tool,
+                  status: 'running',
+                  input: toolDetail(event.input),
+                  output: null
+                })
+              } else {
+                currentStore.recordToolFinished(run.id, event.callId, event.status, event.output)
+                sendChatEvent(run, {
+                  type: 'tool',
+                  callId: event.callId,
+                  tool: '',
+                  status: event.status,
+                  input: null,
+                  output: event.output
+                })
+              }
+            }
+          })
+          getThreadStore().finishAgentRun(run.id, 'completed', assistantContent)
+          sendChatEvent(run, { type: 'done' })
+          return
+        }
         const hardware = await getHardwareInfo()
         const reasoningMode = getInferenceSettings().reasoningMode
         const useLlama = userImages.length === 0 && getLlamaCppArtifact(run.model) !== null
@@ -904,6 +981,21 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             })
           }
         }
+        const onInferenceEvent = async (event: AgentToolLifecycleEvent): Promise<void> => {
+          if (event.type === 'started') {
+            sendChatEvent(run, {
+              type: 'progress',
+              detail: event.step === 0 ? 'Analyse de la demande…' : 'Analyse du résultat précédent…',
+              percent: null
+            })
+          } else if (event.status === 'error') {
+            sendChatEvent(run, {
+              type: 'progress',
+              detail: 'Réponse locale invalide · correction automatique…',
+              percent: null
+            })
+          }
+        }
         if (executionPath) {
           if (!inferenceProvider && !await modelSupportsTools(executionModel)) {
             throw new Error('Ce modèle ne prend pas en charge les outils nécessaires aux projets de code.')
@@ -925,7 +1017,33 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
               ? (metrics) => modelPerformanceStore?.record(performanceHardwareKey, metrics)
               : undefined,
             onToolEvent,
-            onInferenceEvent: onToolEvent,
+            onInferenceEvent,
+            validateRenderedWebsite: async (requirements) => {
+              const ownerId = mainWindow?.webContents.id
+              if (ownerId === undefined) return []
+              const validationId = `website-validation:${run.id}:${randomUUID()}`
+              sendChatEvent(run, {
+                type: 'progress',
+                detail: 'Contrôle du site dans un vrai navigateur…',
+                percent: null
+              })
+              try {
+                const portal = await websiteValidationPortalManager.startProject(
+                  validationId,
+                  ownerId,
+                  executionPath
+                )
+                const issues = await inspectRenderedWebsite(portal.url, requirements)
+                writeInferenceLog(`website.validation run=${run.id} issues=${JSON.stringify(issues)}`)
+                return issues
+              } catch (error) {
+                const reason = error instanceof Error ? error.message : 'erreur inconnue'
+                writeInferenceLog(`website.validation run=${run.id} unavailable=${JSON.stringify(reason)}`)
+                return [`le site ne peut pas être ouvert dans le navigateur : ${reason}`]
+              } finally {
+                await websiteValidationPortalManager.close(validationId, ownerId).catch(() => undefined)
+              }
+            },
             consumeSteering,
             runCommand: createWorkerCommandExecutor(profile, thread.id, executionPath, git),
             isGitRepository: git !== null,
@@ -1048,29 +1166,18 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                       },
                       onInferenceEvent: async (workerInferenceEvent) => {
                         if (workerInferenceEvent.type === 'started') {
-                          getThreadStore().recordToolStarted(childRun.id, workerInferenceEvent)
                           sendChatEvent(childRun, {
-                            type: 'tool',
-                            callId: workerInferenceEvent.callId,
-                            tool: workerInferenceEvent.tool,
-                            status: 'running',
-                            input: toolDetail(workerInferenceEvent.arguments),
-                            output: null
+                            type: 'progress',
+                            detail: workerInferenceEvent.step === 0
+                              ? 'Analyse de la tâche du worker…'
+                              : 'Analyse du résultat précédent…',
+                            percent: null
                           })
-                        } else {
-                          getThreadStore().recordToolFinished(
-                            childRun.id,
-                            workerInferenceEvent.callId,
-                            workerInferenceEvent.status,
-                            workerInferenceEvent.result
-                          )
+                        } else if (workerInferenceEvent.status === 'error') {
                           sendChatEvent(childRun, {
-                            type: 'tool',
-                            callId: workerInferenceEvent.callId,
-                            tool: 'model_inference',
-                            status: workerInferenceEvent.status,
-                            input: null,
-                            output: toolDetail(workerInferenceEvent.result)
+                            type: 'progress',
+                            detail: 'Réponse locale invalide · correction automatique…',
+                            percent: null
                           })
                         }
                       },
@@ -1137,7 +1244,7 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             onInferenceLog: writeInferenceLog,
             maxConversationCharacters,
             onToolEvent,
-            onInferenceEvent: onToolEvent,
+            onInferenceEvent,
             consumeSteering,
             authorize: async () => !controller.signal.aborted,
             isGitRepository: false,
@@ -1216,6 +1323,7 @@ function createWindow(): void {
     activeThreadOwners.delete(ownerId)
     const cleanup = Promise.all([
       portalManager.closeOwner(ownerId),
+      websiteValidationPortalManager.closeOwner(ownerId),
       terminalManager.closeOwner(ownerId)
     ]).then(() => undefined)
     pendingWindowCleanups.add(cleanup)
@@ -1327,6 +1435,7 @@ app.whenReady().then(() => {
     return ensureOllamaRunning()
   })
   handle(INFERENCE_GET_SETTINGS_CHANNEL, () => getInferenceSettings())
+  handle(CLAUDE_CODE_STATUS_CHANNEL, () => getClaudeCodeStatus())
   handle(INFERENCE_SET_SETTINGS_CHANNEL, async (_event, input: unknown) => {
     if (activeChats.size > 0) throw new Error('Attendez la fin des générations avant de changer le raisonnement.')
     const previous = getInferenceSettings()
@@ -1586,6 +1695,13 @@ app.whenReady().then(() => {
   handle(THREADS_SET_MODEL_CHANNEL, async (event, input: unknown) => {
     const request = setThreadModelSchema.parse(input)
     requireActiveProjectThread(event.sender.id, request.threadId)
+    if (isClaudeCodeModel(request.model)) {
+      const current = getThreadStore().getThread(request.threadId)
+      if (current && !isClaudeCodeModel(current.model ?? '')) getThreadStore().setClaudeSession(request.threadId, null)
+      const result = getThreadStore().setThreadModel(request.threadId, request.model)
+      if (!result) throw new Error('Le thread local est introuvable.')
+      return result
+    }
     if (activeLlamaInference && activeLlamaInference.model !== request.model) {
       await stopActiveLlamaInference()
       const restored = await ensureOllamaRunning()
@@ -1595,6 +1711,7 @@ app.whenReady().then(() => {
     if (!status.available || !status.models.some((model) => model.name === request.model)) {
       throw new Error('Ce modèle local n’est plus installé ou disponible.')
     }
+    getThreadStore().setClaudeSession(request.threadId, null)
     const result = getThreadStore().setThreadModel(request.threadId, request.model)
     if (!result) throw new Error('Le thread local est introuvable.')
     return result
@@ -2009,7 +2126,7 @@ app.whenReady().then(() => {
       throw new Error(thread.environmentError ?? 'L’environnement de ce thread n’est pas actif.')
     }
     const profile = await resolveWorkerProfile(store, thread.projectPath)
-    if (profile?.mode === 'container') {
+    if (!isClaudeCodeModel(parsed.data.model) && profile?.mode === 'container') {
       const runtime = await getRuntimeInfo()
       if (!profile.runtime || !runtime[profile.runtime].available) {
         throw new Error(`Le runtime ${profile.runtime ?? 'conteneur'} n’est pas disponible.`)
@@ -2088,7 +2205,10 @@ app.whenReady().then(() => {
     const queuedRun = store.listActiveAgentRuns().find((candidate) => candidate.requestId === requestId)
     if (!queuedRun) throw new Error('Ce message n’est plus en attente.')
     const activeRequestId = activeThreadChats.get(queuedRun.threadId)
-    if (activeRequestId && activeRequestId !== requestId) {
+    const currentRun = activeRequestId
+      ? store.listActiveAgentRuns().find((candidate) => candidate.requestId === activeRequestId)
+      : undefined
+    if (activeRequestId && activeRequestId !== requestId && !isClaudeCodeModel(currentRun?.model ?? '')) {
       const message = store.steerQueuedAgentRun(requestId, activeRequestId)
       workerScheduler.removeQueued(requestId)
       pendingSteering.set(activeRequestId, [...(pendingSteering.get(activeRequestId) ?? []), message])
@@ -2126,6 +2246,7 @@ app.on('before-quit', (event) => {
   }
   shutdownCleanup ??= Promise.all([
     portalManager.closeAll(),
+    websiteValidationPortalManager.closeAll(),
     terminalManager.closeAll(),
     stopRuntimes(),
     ...pendingWindowCleanups
@@ -2157,6 +2278,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(INFERENCE_GET_SETTINGS_CHANNEL)
   ipcMain.removeHandler(INFERENCE_SET_SETTINGS_CHANNEL)
   ipcMain.removeHandler(INFERENCE_OPEN_LOG_CHANNEL)
+  ipcMain.removeHandler(CLAUDE_CODE_STATUS_CHANNEL)
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
   ipcMain.removeHandler(PROJECT_CREATE_CHANNEL)
