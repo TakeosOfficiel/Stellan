@@ -60,12 +60,19 @@ export function claudeRequestGuidance(content: string): string {
   const website = /\bsite\b/.test(request)
     || /\bpage\s+(?:web|internet)\b/.test(request)
     || /\b(?:website|webpage|landing page|portfolio)\b/.test(request)
-  if (!creation || !website) return ''
-  return `STRUCTURE ATTENDUE POUR CETTE DEMANDE
+  const delegation = /\b(?:workers?|sous[ -]?agents?|agents?)\b/.test(request)
+    && /\b(?:utilise|utiliser|lance|lancer|delegue|deleguer|plusieurs?|parallele|parallel|use)\b/.test(request)
+  const guidance: string[] = []
+  if (creation && website) guidance.push(`STRUCTURE ATTENDUE POUR CETTE DEMANDE
 - Respecte l’architecture existante si le projet utilise déjà un framework ou une convention claire.
 - Pour un nouveau site statique dans un projet vide ou minimal, utilise index.html, assets/css/styles.css et assets/js/script.js, avec un README.md utile. Range aussi les images ou autres ressources locales sous assets au lieu de disperser les fichiers à la racine.
 - Livre un vrai site abouti : contenu de démonstration crédible, HTML sémantique, direction visuelle cohérente, sections suffisamment riches, responsive mobile/desktop, états hover/focus et interactions fonctionnelles.
-- N’ajoute pas de framework, de dépendances ou de dossiers vides sans nécessité. Vérifie les liens entre les fichiers et le rendu avant de conclure.`
+- N’ajoute pas de framework, de dépendances ou de dossiers vides sans nécessité. Vérifie les liens entre les fichiers et le rendu avant de conclure.`)
+  if (delegation) guidance.push(`SOUS-AGENTS CLAUDE CODE
+- Tu disposes de l’outil Agent. Utilise-le lorsque des tâches indépendantes bénéficient réellement de workers séparés.
+- Pour paralléliser, lance plusieurs appels Agent indépendants dans le même tour, avec des responsabilités et des fichiers sans chevauchement. Intègre et vérifie ensuite leurs résultats toi-même.
+- Ne prétends pas que les workers ou sous-agents sont indisponibles.`)
+  return guidance.join('\n\n')
 }
 
 function blockedEnvironmentVariable(env: NodeJS.ProcessEnv): string | null {
@@ -326,6 +333,12 @@ function normalizedTool(name: string, input: Record<string, unknown>, cwd?: stri
   if (name === 'Glob') return { tool: 'list_files', input: { ...input, path: projectRelativePath(input.path ?? '.', cwd), query: input.pattern } }
   if (name === 'Grep') return { tool: 'search_files', input: { ...input, path: projectRelativePath(input.path ?? '.', cwd), query: input.pattern } }
   if (name === 'Bash') return { tool: 'run_command', input: { ...input, command: input.command, args: [] } }
+  if (name === 'Agent') {
+    const label = typeof input.description === 'string'
+      ? input.description
+      : typeof input.subagent_type === 'string' ? input.subagent_type : 'Claude'
+    return { tool: `worker:${label}`, input }
+  }
   return { tool: `claude:${name}`, input }
 }
 
@@ -473,7 +486,7 @@ export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<void
     '--permission-prompts', 'none',
     '--restricted',
     '--settings', settings,
-    '--tools', `Edit,Read,Write,Glob,Grep${shellTools}`,
+    '--tools', `Edit,Read,Write,Glob,Grep,Agent${shellTools}`,
     '--disallowed-tools', 'Bash(git push *)', 'Bash(gh pr *)', 'Bash(gh release *)',
     '--model', claudeModelAlias(options.model),
     '--append-system-prompt', STELLAN_AGENT_OPERATING_POLICY,

@@ -68,6 +68,14 @@ describe('claudeRequestGuidance', () => {
   it('does not add website rules to unrelated requests', () => {
     expect(claudeRequestGuidance('Analyse ce projet et explique sa structure.')).toBe('')
   })
+
+  it('tells Claude to use parallel subagents when the user requests workers', () => {
+    const guidance = claudeRequestGuidance('Utilise plusieurs workers si cela permet d’aller plus vite.')
+
+    expect(guidance).toContain('outil Agent')
+    expect(guidance).toContain('plusieurs appels Agent indépendants dans le même tour')
+    expect(guidance).toContain('Ne prétends pas que les workers ou sous-agents sont indisponibles')
+  })
 })
 
 describe('ClaudeStreamParser', () => {
@@ -175,6 +183,26 @@ describe('ClaudeStreamParser', () => {
       input: { path: 'assets/css/styles.css', content: 'body {}' }
     })
   })
+
+  it('exposes Claude subagents as worker activity', () => {
+    const onTool = vi.fn()
+    const parser = new ClaudeStreamParser({
+      onContent: vi.fn(), onTool, onProgress: vi.fn(), onSession: vi.fn()
+    })
+    parser.consume(JSON.stringify({
+      type: 'assistant',
+      message: { content: [{
+        type: 'tool_use',
+        id: 'agent-1',
+        name: 'Agent',
+        input: { description: 'Création des icônes', prompt: 'Crée les SVG.' }
+      }] }
+    }))
+
+    expect(onTool).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'started', callId: 'agent-1', tool: 'worker:Création des icônes'
+    }))
+  })
 })
 
 describe('runClaudeCode', () => {
@@ -230,6 +258,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Terminé"}
       expect(args[args.indexOf('--model') + 1]).toBe('claude-fable-5')
       expect(args[args.indexOf('--permission-mode') + 1]).toBe('acceptEdits')
       expect(args[args.indexOf('--permission-prompts') + 1]).toBe('none')
+      expect(args[args.indexOf('--tools') + 1]).toContain('Agent')
       expect(args).toContain('--append-system-prompt')
       await expect(readFile(join(directory, 'claude-system-prompt'), 'utf8'))
         .resolves.toBe(STELLAN_AGENT_OPERATING_POLICY)
