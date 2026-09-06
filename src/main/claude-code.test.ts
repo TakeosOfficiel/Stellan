@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { claudeCodeQuotaInfo } from '../shared/claude-code-models'
 import { STELLAN_AGENT_OPERATING_POLICY } from './agent-policy'
-import { claudeInstallCommand, ClaudeStreamParser, isClaudeCodeModel, isClaudePermissionDenial, runClaudeCode, subscriptionAuthReason } from './claude-code'
+import { claudeInstallCommand, claudeRequestGuidance, ClaudeStreamParser, isClaudeCodeModel, isClaudePermissionDenial, runClaudeCode, subscriptionAuthReason } from './claude-code'
 
 describe('claudeInstallCommand', () => {
   it('uses the official silent native installer for each desktop platform', () => {
@@ -52,6 +52,21 @@ describe('isClaudePermissionDenial', () => {
     expect(isClaudePermissionDenial('Permission denied: this session has no approval surface.')).toBe(true)
     expect(isClaudePermissionDenial("L’approbation est requise mais indisponible.")).toBe(true)
     expect(isClaudePermissionDenial('Le fichier est en lecture seule.')).toBe(false)
+  })
+})
+
+describe('claudeRequestGuidance', () => {
+  it('organizes new static websites without forcing a framework', () => {
+    const guidance = claudeRequestGuidance('Créer moi un site vitrine')
+
+    expect(guidance).toContain('assets/css/styles.css')
+    expect(guidance).toContain('assets/js/script.js')
+    expect(guidance).toContain('Respecte l’architecture existante')
+    expect(guidance).toContain('N’ajoute pas de framework')
+  })
+
+  it('does not add website rules to unrelated requests', () => {
+    expect(claudeRequestGuidance('Analyse ce projet et explique sa structure.')).toBe('')
   })
 })
 
@@ -132,7 +147,32 @@ describe('ClaudeStreamParser', () => {
     expect(onProgress).toHaveBeenCalledWith('Claude prépare l’outil Read…')
     expect(onTool).toHaveBeenCalledTimes(1)
     expect(onTool).toHaveBeenCalledWith({
-      type: 'started', callId: 'read-1', tool: 'read_file', input: { file_path: 'src/app.ts', path: 'src/app.ts' }
+      type: 'started', callId: 'read-1', tool: 'read_file', input: { path: 'src/app.ts' }
+    })
+  })
+
+  it('hides internal UNC worktree paths from tool activity', () => {
+    const onTool = vi.fn()
+    const cwd = '\\\\wsl.localhost\\LocalAgentRuntime\\var\\lib\\local-agent\\projects\\project-1\\worktrees\\thread-1'
+    const parser = new ClaudeStreamParser({
+      cwd,
+      onContent: vi.fn(), onTool, onProgress: vi.fn(), onSession: vi.fn()
+    })
+    parser.consume(JSON.stringify({
+      type: 'assistant',
+      message: { content: [{
+        type: 'tool_use',
+        id: 'write-1',
+        name: 'Write',
+        input: { file_path: `${cwd}\\assets\\css\\styles.css`, content: 'body {}' }
+      }] }
+    }))
+
+    expect(onTool).toHaveBeenCalledWith({
+      type: 'started',
+      callId: 'write-1',
+      tool: 'write_file',
+      input: { path: 'assets/css/styles.css', content: 'body {}' }
     })
   })
 })

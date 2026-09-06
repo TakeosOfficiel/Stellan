@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 import { createInterface } from 'node:readline'
 import spawn from 'cross-spawn'
 import { claudeCodeModel } from '../shared/claude-code-models'
@@ -52,6 +52,20 @@ export type ClaudeInstallCommand = { executable: string; args: string[]; display
 
 export function isClaudePermissionDenial(content: string): boolean {
   return /no approval surface|approval (?:is|was) required but unavailable|approbation (?:est|était) requise mais indisponible/i.test(content)
+}
+
+export function claudeRequestGuidance(content: string): string {
+  const request = content.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
+  const creation = /\b(?:cree|creer|construis|construire|realise|realiser|fais|faire|build|create|make)\b/.test(request)
+  const website = /\bsite\b/.test(request)
+    || /\bpage\s+(?:web|internet)\b/.test(request)
+    || /\b(?:website|webpage|landing page|portfolio)\b/.test(request)
+  if (!creation || !website) return ''
+  return `STRUCTURE ATTENDUE POUR CETTE DEMANDE
+- Respecte l’architecture existante si le projet utilise déjà un framework ou une convention claire.
+- Pour un nouveau site statique dans un projet vide ou minimal, utilise index.html, assets/css/styles.css et assets/js/script.js, avec un README.md utile. Range aussi les images ou autres ressources locales sous assets au lieu de disperser les fichiers à la racine.
+- Livre un vrai site abouti : contenu de démonstration crédible, HTML sémantique, direction visuelle cohérente, sections suffisamment riches, responsive mobile/desktop, états hover/focus et interactions fonctionnelles.
+- N’ajoute pas de framework, de dépendances ou de dossiers vides sans nécessité. Vérifie les liens entre les fichiers et le rendu avant de conclure.`
 }
 
 function blockedEnvironmentVariable(env: NodeJS.ProcessEnv): string | null {
@@ -288,17 +302,29 @@ function claudeModelAlias(model: string): string {
   return candidate.cliModel
 }
 
-function normalizedTool(name: string, input: Record<string, unknown>): { tool: string; input: Record<string, unknown> } {
-  if (name === 'Read') return { tool: 'read_file', input: { ...input, path: input.file_path } }
-  if (name === 'Write') return { tool: 'write_file', input: { ...input, path: input.file_path } }
+function projectRelativePath(value: unknown, cwd?: string): unknown {
+  if (typeof value !== 'string' || !cwd) return value
+  const paths = /^\\\\|^[a-z]:[\\/]/i.test(cwd) ? win32 : posix
+  if (!paths.isAbsolute(value)) return value
+  const relative = paths.relative(cwd, value)
+  if (relative === '') return '.'
+  if (relative === '..' || relative.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative)) return value
+  return relative.replaceAll('\\', '/')
+}
+
+function normalizedTool(name: string, input: Record<string, unknown>, cwd?: string): { tool: string; input: Record<string, unknown> } {
+  const withoutFilePath = { ...input }
+  delete withoutFilePath.file_path
+  if (name === 'Read') return { tool: 'read_file', input: { ...withoutFilePath, path: projectRelativePath(input.file_path, cwd) } }
+  if (name === 'Write') return { tool: 'write_file', input: { ...withoutFilePath, path: projectRelativePath(input.file_path, cwd) } }
   if (name === 'Edit' || name === 'MultiEdit') {
     return {
       tool: 'edit_file',
-      input: { ...input, path: input.file_path, oldText: input.old_string, newText: input.new_string }
+      input: { ...withoutFilePath, path: projectRelativePath(input.file_path, cwd), oldText: input.old_string, newText: input.new_string }
     }
   }
-  if (name === 'Glob') return { tool: 'list_files', input: { ...input, path: input.path ?? '.', query: input.pattern } }
-  if (name === 'Grep') return { tool: 'search_files', input: { ...input, path: input.path ?? '.', query: input.pattern } }
+  if (name === 'Glob') return { tool: 'list_files', input: { ...input, path: projectRelativePath(input.path ?? '.', cwd), query: input.pattern } }
+  if (name === 'Grep') return { tool: 'search_files', input: { ...input, path: projectRelativePath(input.path ?? '.', cwd), query: input.pattern } }
   if (name === 'Bash') return { tool: 'run_command', input: { ...input, command: input.command, args: [] } }
   return { tool: `claude:${name}`, input }
 }
@@ -321,7 +347,7 @@ export class ClaudeStreamParser {
   private readonly tools = new Map<string, string>()
   private readonly partialTools = new Map<number, { id: string; name: string; input: string }>()
 
-  constructor(private readonly handlers: Pick<RunClaudeCodeOptions, 'onContent' | 'onTool' | 'onProgress' | 'onSession'>) {}
+  constructor(private readonly handlers: Pick<RunClaudeCodeOptions, 'onContent' | 'onTool' | 'onProgress' | 'onSession'> & Partial<Pick<RunClaudeCodeOptions, 'cwd'>>) {}
 
   consume(line: string): void {
     if (!line.trim()) return
@@ -362,7 +388,7 @@ export class ClaudeStreamParser {
             if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed as Record<string, unknown>
           } catch { /* The complete assistant event remains a fallback for malformed partial input. */ }
           if (input) {
-            const normalized = normalizedTool(tool.name, input)
+            const normalized = normalizedTool(tool.name, input, this.handlers.cwd)
             this.tools.set(tool.id, normalized.tool)
             this.handlers.onTool({ type: 'started', callId: tool.id, tool: normalized.tool, input: normalized.input })
           }
@@ -394,7 +420,7 @@ export class ClaudeStreamParser {
           const input = item.input && typeof item.input === 'object' && !Array.isArray(item.input)
             ? item.input as Record<string, unknown>
             : {}
-          const normalized = normalizedTool(item.name, input)
+          const normalized = normalizedTool(item.name, input, this.handlers.cwd)
           this.tools.set(item.id, normalized.tool)
           this.handlers.onTool({ type: 'started', callId: item.id, tool: normalized.tool, input: normalized.input })
         }

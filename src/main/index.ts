@@ -14,7 +14,7 @@ import {
   isInstallingUpdate,
   startMandatoryUpdate
 } from './app-updater'
-import { CLAUDE_CODE_MODELS, getClaudeCodeStatus, installClaudeCode, isClaudeCodeModel, isClaudePermissionDenial, loginClaudeCode, runClaudeCode } from './claude-code'
+import { CLAUDE_CODE_MODELS, claudeRequestGuidance, getClaudeCodeStatus, installClaudeCode, isClaudeCodeModel, isClaudePermissionDenial, loginClaudeCode, runClaudeCode } from './claude-code'
 import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
 import { getBasicHardwareInfo, getHardwareInfo, inferenceModelOptions, inferenceParallelism } from './hardware'
@@ -810,17 +810,19 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
           )
           const claudeSessionId = resetDeniedSession ? null : thread.claudeSessionId
           if (resetDeniedSession) store.setClaudeSession(thread.id, null)
+          const requestGuidance = claudeRequestGuidance(summary.userContent)
+          const claudePrompt = claudeSessionId
+            ? summary.userContent
+            : [
+                'Voici l’historique de cette conversation Stellan. Poursuis le travail demandé dans le dernier message utilisateur.',
+                ...promptMessages
+                  .filter((message) => message.role === 'user' || message.role === 'assistant')
+                  .filter((message) => message.role !== 'assistant' || !isClaudePermissionDenial(message.content))
+                  .map((message) => `${message.role === 'user' ? 'Utilisateur' : 'Assistant'} :\n${message.content}`)
+              ].join('\n\n')
           await runClaudeCode({
             model: run.model,
-            prompt: claudeSessionId
-              ? summary.userContent
-              : [
-                  'Voici l’historique de cette conversation Stellan. Poursuis le travail demandé dans le dernier message utilisateur.',
-                  ...promptMessages
-                    .filter((message) => message.role === 'user' || message.role === 'assistant')
-                    .filter((message) => message.role !== 'assistant' || !isClaudePermissionDenial(message.content))
-                    .map((message) => `${message.role === 'user' ? 'Utilisateur' : 'Assistant'} :\n${message.content}`)
-                ].join('\n\n'),
+            prompt: requestGuidance ? `${claudePrompt}\n\n${requestGuidance}` : claudePrompt,
             cwd: claudeWorkingDirectory,
             sessionId: claudeSessionId,
             signal: controller.signal,
