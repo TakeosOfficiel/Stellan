@@ -61,6 +61,16 @@ describe('ContainerProjectTools', () => {
     expect(executor.mock.calls[5]?.[0].command).toEqual(['pnpm', 'test'])
   })
 
+  it('checks a listed directory before walking it', async () => {
+    const executor = vi.fn<typeof executeInWorkerContainer>().mockResolvedValue(result('[]'))
+    const tools = new ContainerProjectTools(profile, 'thread-123', 'C:\\project', null, executor)
+
+    await expect(tools.listFiles('apps')).resolves.toEqual([])
+    const script = executor.mock.calls[0]?.[0].command.join('\n') ?? ''
+    expect(script).toContain('Dossier introuvable')
+    expect(script).toContain('ne désigne pas un dossier')
+  })
+
   it('deletes files through the persistent container', async () => {
     const executor = vi.fn<typeof executeInWorkerContainer>()
       .mockResolvedValueOnce(result('line one\nline two\n'))

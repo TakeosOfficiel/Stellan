@@ -92,6 +92,33 @@ describe('agent guardrails', () => {
     expect(activityPrompt).not.toContain('mot secret')
   })
 
+  it('adds evidence-based rules for an explicit project inspection', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'local-agent-agent-'))
+    temporaryDirectories.push(projectPath)
+    const project = await ProjectTools.create(projectPath)
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(streamResponse([
+      { message: { content: 'Projet analysé.' }, done: true }
+    ]))
+    vi.stubGlobal('fetch', fetcher)
+
+    await runCodingAgent({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Analyse ce projet.' }],
+      project,
+      signal: new AbortController().signal,
+      onContent: vi.fn(),
+      onTool: vi.fn(),
+      authorize: vi.fn().mockResolvedValue(false)
+    })
+
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ role: string; content: string }>
+    }
+    expect(body.messages[0]?.content).toContain('Liste la racine une seule fois')
+    expect(body.messages[0]?.content).toContain('N’invente aucun fichier absent')
+    expect(body.messages[0]?.content).toContain('apps, packages ou src')
+  })
+
   it('builds a short and non-judgmental prompt for ordinary conversation', () => {
     const prompt = buildConversationSystemPrompt()
 
@@ -2050,7 +2077,7 @@ describe('runCodingAgent', () => {
     ])
 
     expect(compacted.at(-1)?.content).toBe('Corrige maintenant la fonction.')
-    expect(compacted.find((message) => message.role === 'tool')?.content).toContain('ancien résultat d’outil tronqué')
+    expect(compacted.find((message) => message.role === 'tool')?.content).toContain('résultat d’outil tronqué')
     expect(JSON.stringify(compacted).length).toBeLessThan(4_000)
   })
 
@@ -2068,6 +2095,26 @@ describe('runCodingAgent', () => {
     expect(compacted.some((message) => message.role === 'user' && message.content === 'Analyse le projet.')).toBe(true)
     expect(compacted.at(-1)?.role).toBe('tool')
     expect(compacted.at(-1)?.content).toContain('r')
+  })
+
+  it('keeps several compact tool results instead of oscillating between large reads', () => {
+    const compacted = compactConversation([
+      { role: 'system', content: 's'.repeat(8_000) },
+      { role: 'user', content: 'Analyse le projet.' },
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'list_files', arguments: {} } }] },
+      { role: 'tool', tool_name: 'list_files', content: `ROOT:${'f'.repeat(5_000)}` },
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'read_file', arguments: { path: 'README.md' } } }] },
+      { role: 'tool', tool_name: 'read_file', content: `README:${'r'.repeat(12_000)}` },
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'read_file', arguments: { path: 'package.json' } } }] },
+      { role: 'tool', tool_name: 'read_file', content: `PACKAGE:${'p'.repeat(6_000)}` }
+    ])
+
+    const toolContent = compacted.filter((message) => message.role === 'tool').map((message) => message.content)
+    expect(toolContent).toHaveLength(3)
+    expect(toolContent[0]).toContain('ROOT:')
+    expect(toolContent[1]).toContain('README:')
+    expect(toolContent[2]).toContain('PACKAGE:')
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(MAX_CONVERSATION_CHARACTERS)
   })
 
   it('routes authorized commands through the configured worker executor', async () => {

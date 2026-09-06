@@ -55,6 +55,8 @@ export class ContainerProjectTools implements AgentProjectTools {
 
   async listFiles(relativePath = '.'): Promise<string[]> {
     const output = await this.node(`
+if (!fs.existsSync(target)) { process.stderr.write('Dossier introuvable : ' + rel); process.exit(2); }
+if (!fs.lstatSync(target).isDirectory()) { process.stderr.write('Le chemin ne désigne pas un dossier : ' + rel); process.exit(2); }
 const files = []; function walk(dir) { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) { if (entry.name === '.git') continue; const file = path.join(dir, entry.name); if (entry.isSymbolicLink()) continue; if (entry.isDirectory()) walk(file); else if (entry.isFile()) files.push(path.relative(root, file).split(path.sep).join('/')); if (files.length >= 5000) return; } } walk(target); process.stdout.write(JSON.stringify(files.sort()));
 `, [relativePath])
     return JSON.parse(output) as string[]

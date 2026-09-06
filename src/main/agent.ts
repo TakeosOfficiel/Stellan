@@ -37,7 +37,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'list_files',
-      description: 'Liste les fichiers du projet ou d’un sous-dossier.',
+      description: 'Liste les fichiers du projet ou d’un sous-dossier existant. Pour la racine, omettez path ou utilisez ".". Ne supposez pas un dossier absent de résultats précédents.',
       parameters: { type: 'object', properties: { path: { type: 'string' } } }
     }
   },
@@ -907,6 +907,7 @@ const MAX_AGENT_STEPS = 32
 const MAX_TOOL_ARGUMENT_CHARACTERS = 10_000
 const MAX_SYSTEM_CHARACTERS = 16_000
 const MAX_HISTORICAL_TOOL_CHARACTERS = 1_200
+const MAX_LATEST_TOOL_CHARACTERS = 3_000
 
 export type CodingAgentOptions = {
   model: string
@@ -1010,14 +1011,25 @@ export function compactConversation(
       break
     }
   }
-  const prepared = messages.map((message, index) => message.role === 'tool'
-    && index < latestUserIndex
-    && message.content.length > MAX_HISTORICAL_TOOL_CHARACTERS
-    ? {
-        ...message,
-        content: `${message.content.slice(0, 1_000)}\n… ancien résultat d’outil tronqué …\n${message.content.slice(-120)}`
-      }
-    : message)
+  let latestToolIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'tool') {
+      latestToolIndex = index
+      break
+    }
+  }
+  const prepared = messages.map((message, index) => {
+    if (message.role !== 'tool') return message
+    const limit = index === latestToolIndex ? MAX_LATEST_TOOL_CHARACTERS : MAX_HISTORICAL_TOOL_CHARACTERS
+    if (message.content.length <= limit) return message
+    const suffixLength = Math.min(240, Math.floor(limit / 4))
+    const marker = `\n… résultat d’outil tronqué (${message.content.length} caractères) …\n`
+    const prefixLength = Math.max(0, limit - marker.length - suffixLength)
+    return {
+      ...message,
+      content: `${message.content.slice(0, prefixLength)}${marker}${message.content.slice(-suffixLength)}`
+    }
+  })
   const first = prepared[0]
   const system = first?.role === 'system'
     ? {
@@ -1519,6 +1531,9 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   const attachedImageRules = hasAttachedImages
     ? '\n\nIMAGES JOINTES\n- Une ou plusieurs images sont réellement jointes et accessibles dans les messages. Analyse-les lorsque l’utilisateur le demande. Ne prétends jamais ne pas les avoir reçues et ne réponds pas par une salutation générique à la place de leur analyse.'
     : ''
+  const projectInspectionRules = intentClassification.reason === 'explicit-project-inspection'
+    ? '\n\nANALYSE DU PROJET\n- Liste la racine une seule fois, puis lis les manifestes, points d’entrée et fichiers propriétaires réellement utiles. Ne répète jamais exactement une lecture, une recherche ou une exploration déjà réussie.\n- N’explore pas des dossiers conventionnels supposés comme apps, packages ou src s’ils ne figurent pas dans l’arborescence observée. Fonde la structure sur les chemins réellement retournés.\n- Avant de conclure, vérifie chaque fichier et technologie que tu cites. N’invente aucun fichier absent. Distingue clairement une observation d’une déduction et indique les zones non inspectées.'
+    : ''
   const conversation: InferenceMessage[] = [
     {
       role: 'system',
@@ -1530,7 +1545,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
             ...options,
             activityContext: routedActivityContext,
             startActivity: activityExitRequested || !reliableActivityRequested ? undefined : options.startActivity
-          })}${attachedImageRules}${activityExitRequested ? '\n\nLa précédente activité vient d’être fermée à la demande de l’utilisateur. Ne la relance pas. Réponds maintenant naturellement au reste de son message.' : ''}`
+          })}${attachedImageRules}${projectInspectionRules}${activityExitRequested ? '\n\nLa précédente activité vient d’être fermée à la demande de l’utilisateur. Ne la relance pas. Réponds maintenant naturellement au reste de son message.' : ''}`
     },
     ...promptMessages
   ]
