@@ -50,6 +50,10 @@ type CommandResult = { exitCode: number | null; stdout: string; stderr: string }
 
 export type ClaudeInstallCommand = { executable: string; args: string[]; display: string }
 
+export function isClaudePermissionDenial(content: string): boolean {
+  return /no approval surface|approval (?:is|was) required but unavailable|approbation (?:est|était) requise mais indisponible/i.test(content)
+}
+
 function blockedEnvironmentVariable(env: NodeJS.ProcessEnv): string | null {
   return BLOCKED_ENVIRONMENT_VARIABLES.find((name) => Boolean(env[name]?.trim())) ?? null
 }
@@ -439,7 +443,7 @@ export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<void
     '--output-format', 'stream-json',
     '--verbose',
     '--include-partial-messages',
-    '--permission-mode', 'auto',
+    '--permission-mode', 'acceptEdits',
     '--permission-prompts', 'none',
     '--restricted',
     '--settings', settings,

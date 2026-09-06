@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { claudeCodeQuotaInfo } from '../shared/claude-code-models'
 import { STELLAN_AGENT_OPERATING_POLICY } from './agent-policy'
-import { claudeInstallCommand, ClaudeStreamParser, isClaudeCodeModel, runClaudeCode, subscriptionAuthReason } from './claude-code'
+import { claudeInstallCommand, ClaudeStreamParser, isClaudeCodeModel, isClaudePermissionDenial, runClaudeCode, subscriptionAuthReason } from './claude-code'
 
 describe('claudeInstallCommand', () => {
   it('uses the official silent native installer for each desktop platform', () => {
@@ -44,6 +44,14 @@ describe('subscriptionAuthReason', () => {
   it('refuses a profile even when JSON looks harmless', () => {
     expect(subscriptionAuthReason(subscription, 'Profile: credentials-file · user_oauth · profile default', {}).reason)
       .toContain('abonnement Claude.ai')
+  })
+})
+
+describe('isClaudePermissionDenial', () => {
+  it('recognizes a headless approval failure without matching ordinary refusals', () => {
+    expect(isClaudePermissionDenial('Permission denied: this session has no approval surface.')).toBe(true)
+    expect(isClaudePermissionDenial("L’approbation est requise mais indisponible.")).toBe(true)
+    expect(isClaudePermissionDenial('Le fichier est en lecture seule.')).toBe(false)
   })
 })
 
@@ -180,6 +188,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Terminé"}
       })
       const args = (await readFile(join(directory, 'claude-args'), 'utf8')).split('\n')
       expect(args[args.indexOf('--model') + 1]).toBe('claude-fable-5')
+      expect(args[args.indexOf('--permission-mode') + 1]).toBe('acceptEdits')
+      expect(args[args.indexOf('--permission-prompts') + 1]).toBe('none')
       expect(args).toContain('--append-system-prompt')
       await expect(readFile(join(directory, 'claude-system-prompt'), 'utf8'))
         .resolves.toBe(STELLAN_AGENT_OPERATING_POLICY)

@@ -14,7 +14,7 @@ import {
   isInstallingUpdate,
   startMandatoryUpdate
 } from './app-updater'
-import { CLAUDE_CODE_MODELS, getClaudeCodeStatus, installClaudeCode, isClaudeCodeModel, loginClaudeCode, runClaudeCode } from './claude-code'
+import { CLAUDE_CODE_MODELS, getClaudeCodeStatus, installClaudeCode, isClaudeCodeModel, isClaudePermissionDenial, loginClaudeCode, runClaudeCode } from './claude-code'
 import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
 import { getBasicHardwareInfo, getHardwareInfo, inferenceModelOptions, inferenceParallelism } from './hardware'
@@ -802,23 +802,32 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             detail: `Vérification de l’abonnement et démarrage de ${CLAUDE_CODE_MODELS.find((model) => model.id === run.model)?.name ?? 'Claude Code'}…`,
             percent: null
           })
+          const previousAssistant = [...promptMessages].reverse().find((message) => message.role === 'assistant')
+          const resetDeniedSession = Boolean(
+            thread.claudeSessionId
+            && previousAssistant
+            && isClaudePermissionDenial(previousAssistant.content)
+          )
+          const claudeSessionId = resetDeniedSession ? null : thread.claudeSessionId
+          if (resetDeniedSession) store.setClaudeSession(thread.id, null)
           await runClaudeCode({
             model: run.model,
-            prompt: thread.claudeSessionId
+            prompt: claudeSessionId
               ? summary.userContent
               : [
                   'Voici l’historique de cette conversation Stellan. Poursuis le travail demandé dans le dernier message utilisateur.',
                   ...promptMessages
                     .filter((message) => message.role === 'user' || message.role === 'assistant')
+                    .filter((message) => message.role !== 'assistant' || !isClaudePermissionDenial(message.content))
                     .map((message) => `${message.role === 'user' ? 'Utilisateur' : 'Assistant'} :\n${message.content}`)
                 ].join('\n\n'),
             cwd: claudeWorkingDirectory,
-            sessionId: thread.claudeSessionId,
+            sessionId: claudeSessionId,
             signal: controller.signal,
             onContent,
             onProgress: (detail) => sendChatEvent(run, { type: 'progress', detail, percent: null }),
             onSession: (sessionId) => {
-              if (!thread.claudeSessionId) getThreadStore().setClaudeSession(thread.id, sessionId)
+              if (!claudeSessionId) getThreadStore().setClaudeSession(thread.id, sessionId)
             },
             onTool: (event) => {
               const currentStore = getThreadStore()
