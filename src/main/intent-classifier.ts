@@ -46,6 +46,13 @@ function requestsSoftwareArtifact(messages: readonly ChatMessage[]): boolean {
     || /\bjeu\b[^.!?\n]{0,50}\b(?:web|video|javascript|html|a coder|a programmer)\b/.test(request)
 }
 
+function requestsProjectInspection(messages: readonly ChatMessage[]): boolean {
+  const request = normalizedLatestRequest(messages)
+  const inspection = /\b(?:analyse|analyser|examine|examiner|inspecte|inspecter|explore|explorer|audite|auditer|review|comprends?|comprendre|explique|expliquer|presente|presenter|lis|lire)\b/.test(request)
+  const project = /\b(?:projet|code|codebase|repo|repository|depot|fichiers?|architecture)\b/.test(request)
+  return inspection && project
+}
+
 function explicitActivityEngine(request: string): ReliableActivityEngineId | null {
   const playRequest = /\b(?:joue|jouer|jouons|partie|play)\b/.test(request)
   if (playRequest && /\bni\s+oui\s+ni\s+non\b/.test(request)) return 'neither-yes-nor-no'
@@ -96,6 +103,9 @@ export function classifyIntentByRule(
   if (!request) return { intent: 'discussion', clear: true, source: 'rule', reason: 'empty-request' }
   if (requestsSoftwareArtifact(messages)) {
     return { intent: 'code', clear: true, source: 'rule', reason: 'explicit-software-artifact' }
+  }
+  if (requestsProjectInspection(messages)) {
+    return { intent: 'code', clear: true, source: 'rule', reason: 'explicit-project-inspection' }
   }
   if (requestsImageAnalysis(messages)) {
     return { intent: 'discussion', clear: true, source: 'rule', reason: 'attached-image-analysis' }

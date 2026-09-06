@@ -1436,7 +1436,9 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
     ?? (options.activityContext
       ? { intent: 'activity', clear: false, source: 'fallback', reason: 'classification-not-provided', ...(contextualActivityEngine ? { activityEngine: contextualActivityEngine } : {}) }
       : { intent: 'unknown', clear: false, source: 'fallback', reason: 'classification-not-provided' }) as IntentClassification
-  const softwareArtifactRequested = Boolean(options.project) && intentClassification.intent === 'code'
+  const softwareArtifactRequested = Boolean(options.project)
+    && intentClassification.intent === 'code'
+    && intentClassification.reason !== 'explicit-project-inspection'
   if (softwareArtifactRequested && options.project && !options.writeScope) {
     const projectFiles = await options.project.listFiles('.')
     const correctingExistingWebsite = intentClassification.reason === 'negative-software-feedback'
@@ -1530,6 +1532,8 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
   let reliableActivityResult: string | null = null
   let reliableActivityStopsAfterTool = false
   const projectChangeRequested = Boolean(options.project) && intentClassification.intent === 'code'
+  const projectMutationRequested = projectChangeRequested
+    && intentClassification.reason !== 'explicit-project-inspection'
   const multipleWorkersRequested = Boolean(options.spawnWorkers) && requestsMultipleWorkers(options.messages)
   const requestedFileKinds = explicitlyRequestedFileKinds(options.messages)
   let inferenceCalls = 0
@@ -1657,7 +1661,7 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         status: 'error',
         result: error instanceof Error ? error.message : 'La génération locale a échoué.'
       })
-      if (projectChangeRequested
+      if (projectMutationRequested
         && !missingWriteRecoveryAttempted
         && error instanceof Error
         && /XML syntax error|element <function>|tool.{0,20}(?:syntax|pars)|arguments? JSON invalides?|invalid JSON arguments?/i.test(error.message)) {
@@ -1832,12 +1836,12 @@ export async function runCodingAgent(options: CodingAgentOptions): Promise<void>
         options.onContent('Je n’ai pas pu traiter cette demande avec le moteur fiable. Aucun état de jeu n’a été inventé ou modifié.')
         return
       }
-      if (projectChangeRequested && mutationToolAttempted
+      if (projectMutationRequested && mutationToolAttempted
         && completedWrites.size === 0 && executionState.completedWorkerFiles.size === 0) {
         options.onContent('Aucun fichier n’a été modifié : l’action demandée a été refusée ou sa vérification a échoué.')
         return
       }
-      if (projectChangeRequested && !mutationToolAttempted
+      if (projectMutationRequested && !mutationToolAttempted
         && completedWrites.size === 0 && executionState.completedWorkerFiles.size === 0) {
         if (!missingWriteRecoveryAttempted) {
           missingWriteRecoveryAttempted = true

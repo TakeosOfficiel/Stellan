@@ -23,6 +23,21 @@ describe('intent classifier', () => {
     ])).toMatchObject({ intent: 'discussion', clear: true, source: 'rule' })
   })
 
+  it('routes an explicit project analysis through the coding agent and its tools', () => {
+    for (const content of [
+      'analyse le projet',
+      'Examine l’architecture du code',
+      'Lis les fichiers et présente-moi ce dépôt',
+      'Review this codebase'
+    ]) {
+      expect(classifyIntentByRule([{ role: 'user', content }])).toMatchObject({
+        intent: 'code',
+        clear: true,
+        reason: 'explicit-project-inspection'
+      })
+    }
+  })
+
   it('routes neither-yes-nor-no explicitly without assigning the hangman engine', async () => {
     await expect(classifyIntent({
       model: 'test-model',
