@@ -31,8 +31,8 @@ export type ClaudeCodeStatus = {
 }
 
 export type ClaudeToolEvent =
-  | { type: 'started'; callId: string; tool: string; input: Record<string, unknown> }
-  | { type: 'finished'; callId: string; status: 'done' | 'error'; output: string }
+  | { type: 'started'; callId: string; tool: string; input: Record<string, unknown>; parentCallId?: string }
+  | { type: 'finished'; callId: string; status: 'done' | 'error'; output: string; parentCallId?: string }
 
 type RunClaudeCodeOptions = {
   model: string
@@ -40,7 +40,7 @@ type RunClaudeCodeOptions = {
   cwd: string
   sessionId?: string | null
   signal: AbortSignal
-  onContent: (content: string) => void
+  onContent: (content: string, parentCallId?: string) => void
   onTool: (event: ClaudeToolEvent) => void
   onProgress: (detail: string) => void
   onSession: (sessionId: string) => void
@@ -354,11 +354,11 @@ function outputText(value: unknown): string {
 }
 
 export class ClaudeStreamParser {
-  private emittedPartialText = false
+  private readonly partialTextScopes = new Set<string>()
   private emittedAnyText = false
   private reportedThinking = false
   private readonly tools = new Map<string, string>()
-  private readonly partialTools = new Map<number, { id: string; name: string; input: string }>()
+  private readonly partialTools = new Map<string, { id: string; name: string; input: string }>()
 
   constructor(private readonly handlers: Pick<RunClaudeCodeOptions, 'onContent' | 'onTool' | 'onProgress' | 'onSession'> & Partial<Pick<RunClaudeCodeOptions, 'cwd'>>) {}
 
@@ -370,6 +370,8 @@ export class ClaudeStreamParser {
     } catch {
       return
     }
+    const parentCallId = typeof event.parent_tool_use_id === 'string' ? event.parent_tool_use_id : undefined
+    const textScope = parentCallId ?? 'main'
     if (typeof event.session_id === 'string') this.handlers.onSession(event.session_id)
     if (event.type === 'system') {
       if (event.subtype === 'init') this.handlers.onProgress('Claude Code analyse le projet…')
@@ -380,21 +382,22 @@ export class ClaudeStreamParser {
       const delta = streamEvent?.delta as Record<string, unknown> | undefined
       const block = streamEvent?.content_block as Record<string, unknown> | undefined
       const index = typeof streamEvent?.index === 'number' ? streamEvent.index : null
+      const blockKey = index === null ? null : `${textScope}:${index}`
       if (
-        streamEvent?.type === 'content_block_start' && index !== null && block?.type === 'tool_use'
+        streamEvent?.type === 'content_block_start' && blockKey !== null && block?.type === 'tool_use'
         && typeof block.id === 'string' && typeof block.name === 'string'
       ) {
-        this.partialTools.set(index, { id: block.id, name: block.name, input: '' })
+        this.partialTools.set(blockKey, { id: block.id, name: block.name, input: '' })
         this.handlers.onProgress(`Claude prépare l’outil ${block.name}…`)
       }
-      if (streamEvent?.type === 'content_block_delta' && index !== null && delta?.type === 'input_json_delta') {
-        const tool = this.partialTools.get(index)
+      if (streamEvent?.type === 'content_block_delta' && blockKey !== null && delta?.type === 'input_json_delta') {
+        const tool = this.partialTools.get(blockKey)
         if (tool && typeof delta.partial_json === 'string') tool.input += delta.partial_json
       }
-      if (streamEvent?.type === 'content_block_stop' && index !== null) {
-        const tool = this.partialTools.get(index)
+      if (streamEvent?.type === 'content_block_stop' && blockKey !== null) {
+        const tool = this.partialTools.get(blockKey)
         if (tool) {
-          this.partialTools.delete(index)
+          this.partialTools.delete(blockKey)
           let input: Record<string, unknown> | null = tool.input ? null : {}
           try {
             const parsed = JSON.parse(tool.input || '{}') as unknown
@@ -403,16 +406,19 @@ export class ClaudeStreamParser {
           if (input) {
             const normalized = normalizedTool(tool.name, input, this.handlers.cwd)
             this.tools.set(tool.id, normalized.tool)
-            this.handlers.onTool({ type: 'started', callId: tool.id, tool: normalized.tool, input: normalized.input })
+            this.handlers.onTool({
+              type: 'started', callId: tool.id, tool: normalized.tool, input: normalized.input,
+              ...(parentCallId ? { parentCallId } : {})
+            })
           }
         }
       }
       if (streamEvent?.type === 'content_block_delta' && delta?.type === 'text_delta' && typeof delta.text === 'string') {
-        this.emittedPartialText = true
-        this.emittedAnyText = true
-        this.handlers.onContent(delta.text)
+        this.partialTextScopes.add(textScope)
+        if (!parentCallId) this.emittedAnyText = true
+        this.handlers.onContent(delta.text, parentCallId)
       }
-      if (streamEvent?.type === 'content_block_delta' && delta?.type === 'thinking_delta' && !this.reportedThinking) {
+      if (!parentCallId && streamEvent?.type === 'content_block_delta' && delta?.type === 'thinking_delta' && !this.reportedThinking) {
         this.reportedThinking = true
         this.handlers.onProgress('Claude raisonne sur la prochaine action…')
       }
@@ -424,9 +430,9 @@ export class ClaudeStreamParser {
       for (const block of content) {
         if (!block || typeof block !== 'object') continue
         const item = block as Record<string, unknown>
-        if (item.type === 'text' && typeof item.text === 'string' && !this.emittedPartialText) {
-          this.emittedAnyText = true
-          this.handlers.onContent(item.text)
+        if (item.type === 'text' && typeof item.text === 'string' && !this.partialTextScopes.has(textScope)) {
+          if (!parentCallId) this.emittedAnyText = true
+          this.handlers.onContent(item.text, parentCallId)
         }
         if (item.type === 'tool_use' && typeof item.id === 'string' && typeof item.name === 'string') {
           if (this.tools.has(item.id)) continue
@@ -435,7 +441,10 @@ export class ClaudeStreamParser {
             : {}
           const normalized = normalizedTool(item.name, input, this.handlers.cwd)
           this.tools.set(item.id, normalized.tool)
-          this.handlers.onTool({ type: 'started', callId: item.id, tool: normalized.tool, input: normalized.input })
+          this.handlers.onTool({
+            type: 'started', callId: item.id, tool: normalized.tool, input: normalized.input,
+            ...(parentCallId ? { parentCallId } : {})
+          })
         }
       }
       return
@@ -451,7 +460,8 @@ export class ClaudeStreamParser {
           type: 'finished',
           callId: item.tool_use_id,
           status: item.is_error === true ? 'error' : 'done',
-          output: outputText(item.content)
+          output: outputText(item.content),
+          ...(parentCallId ? { parentCallId } : {})
         })
       }
       return
@@ -482,6 +492,7 @@ export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<void
     '--output-format', 'stream-json',
     '--verbose',
     '--include-partial-messages',
+    '--forward-subagent-text',
     '--permission-mode', 'acceptEdits',
     '--permission-prompts', 'none',
     '--restricted',

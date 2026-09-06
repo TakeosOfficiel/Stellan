@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -92,6 +92,33 @@ const CLAUDE_MODEL_GROUPS = [
 type ToolActivity = Omit<StoredToolActivity, 'callId'> & {
   id: string
   expanded: boolean
+}
+
+export function assistantActivityTimeline(content: string, activities: ToolActivity[]): Array<{
+  content: string
+  activities: ToolActivity[]
+}> {
+  if (activities.length === 0) return [{ content, activities: [] }]
+  const groups: Array<{ marker: string; activities: ToolActivity[] }> = []
+  for (const activity of activities) {
+    const marker = activity.assistantContent ?? ''
+    const previous = groups.at(-1)
+    if (!previous || (marker && marker !== previous.marker)) groups.push({ marker, activities: [activity] })
+    else previous.activities.push(activity)
+  }
+  let cursor = 0
+  const timeline = groups.map((group) => {
+    if (!group.marker) return { content: '', activities: group.activities }
+    const markerStart = content.indexOf(group.marker, cursor)
+    if (markerStart < 0) return { content: '', activities: group.activities }
+    const markerEnd = markerStart + group.marker.length
+    const precedingContent = content.slice(cursor, markerEnd)
+    cursor = markerEnd
+    return { content: precedingContent, activities: group.activities }
+  })
+  const remainingContent = content.slice(cursor)
+  if (remainingContent || timeline.length === 0) timeline.push({ content: remainingContent, activities: [] })
+  return timeline
 }
 
 export type FileEditActivity = {
@@ -677,7 +704,8 @@ export function WorkspaceView({
                   ...activity,
                   status: event.status,
                   input: event.input ?? activity.input,
-                  output: event.output ?? activity.output
+                  output: event.output ?? activity.output,
+                  assistantContent: event.assistantContent ?? activity.assistantContent
                 }
               : activity) }
           }
@@ -688,6 +716,7 @@ export function WorkspaceView({
             status: event.status,
             input: event.input,
             output: event.output,
+            assistantContent: event.assistantContent ?? '',
             expanded: false
           }] }
         })
@@ -1724,14 +1753,21 @@ export function WorkspaceView({
               const requestActivities = message.role === 'assistant'
                 ? toolActivities.filter((activity) => activity.requestId === message.id)
                 : []
+              const assistantTimeline = message.role === 'assistant'
+                ? assistantActivityTimeline(message.content, requestActivities)
+                : []
               return (
                 <article className={`message ${message.role} ${message.failed ? 'failed' : ''}`} key={message.id}>
                   <span>{message.role === 'user' ? 'Vous' : 'Agent'}</span>
-                  {message.role === 'assistant' && renderToolActivities(requestActivities)}
                   {message.role === 'assistant'
-                    ? message.content
-                      ? <MarkdownMessage content={message.content} />
-                      : activeRequest === message.id && requestActivities.length === 0
+                    ? message.content || requestActivities.length > 0
+                      ? assistantTimeline.map((part, index) => (
+                          <Fragment key={`${message.id}:timeline:${index}`}>
+                            {part.content && <MarkdownMessage content={part.content} />}
+                            {renderToolActivities(part.activities)}
+                          </Fragment>
+                        ))
+                      : activeRequest === message.id
                         ? <p>{activeRun?.status === 'queued'
                             ? 'En attente dans ce chat…'
                             : activeRunProgress

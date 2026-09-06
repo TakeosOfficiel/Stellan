@@ -690,7 +690,8 @@ function listPublicToolActivities(threadId: string) {
         tool: started.tool,
         status: finished?.status ?? 'running',
         input: started.arguments ? toolDetail(started.arguments) : null,
-        output: finished?.result ?? null
+        output: finished?.result ?? null,
+        assistantContent: started.assistantContent ?? ''
       }
     })
   })
@@ -793,8 +794,38 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
             ? managedLinuxPathToWindows(executionPath)
             : executionPath
           let toolIndex = 0
-          const onContent = (content: string): void => {
+          let contentSinceTool = ''
+          const claudeWorkers = new Map<string, {
+            run: AgentRun
+            threadId: string
+            content: string
+            contentSinceTool: string
+            toolIndex: number
+            parentPending: boolean
+          }>()
+          const claudeWorkerOwners = new Map<string, string>()
+          const workerForParent = (parentCallId: string) => {
+            const rootCallId = claudeWorkers.has(parentCallId) ? parentCallId : claudeWorkerOwners.get(parentCallId)
+            return rootCallId ? claudeWorkers.get(rootCallId) : undefined
+          }
+          const finishClaudeWorker = (callId: string, status: 'completed' | 'interrupted' | 'error', reason?: string): void => {
+            const worker = claudeWorkers.get(callId)
+            if (!worker || getThreadStore().getAgentRun(worker.run.id)?.status !== 'running') return
+            getThreadStore().finishAgentRun(worker.run.id, status, worker.content, reason)
+            sendChatEvent(worker.run, status === 'completed' ? { type: 'done' } : { type: 'error', reason: reason ?? 'Le worker a échoué.' })
+            if (activeThreadChats.get(worker.threadId) === run.requestId) activeThreadChats.delete(worker.threadId)
+          }
+          const onContent = (content: string, parentCallId?: string): void => {
+            if (parentCallId) {
+              const worker = workerForParent(parentCallId)
+              if (!worker) return
+              worker.content += content
+              worker.contentSinceTool += content
+              sendChatEvent(worker.run, { type: 'content', content })
+              return
+            }
             assistantContent += content
+            contentSinceTool += content
             sendChatEvent(run, { type: 'content', content })
           }
           sendChatEvent(run, {
@@ -820,49 +851,142 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                   .filter((message) => message.role !== 'assistant' || !isClaudePermissionDenial(message.content))
                   .map((message) => `${message.role === 'user' ? 'Utilisateur' : 'Assistant'} :\n${message.content}`)
               ].join('\n\n')
-          await runClaudeCode({
-            model: run.model,
-            prompt: requestGuidance ? `${claudePrompt}\n\n${requestGuidance}` : claudePrompt,
-            cwd: claudeWorkingDirectory,
-            sessionId: claudeSessionId,
-            signal: controller.signal,
-            onContent,
-            onProgress: (detail) => sendChatEvent(run, { type: 'progress', detail, percent: null }),
-            onSession: (sessionId) => {
-              if (!claudeSessionId) getThreadStore().setClaudeSession(thread.id, sessionId)
-            },
-            onTool: (event) => {
-              const currentStore = getThreadStore()
-              if (event.type === 'started') {
-                currentStore.recordToolStarted(run.id, {
-                  callId: event.callId,
-                  step: toolIndex,
-                  callIndex: toolIndex++,
-                  tool: event.tool,
-                  arguments: event.input,
-                  assistantContent: ''
-                })
-                sendChatEvent(run, {
-                  type: 'tool',
-                  callId: event.callId,
-                  tool: event.tool,
-                  status: 'running',
-                  input: toolDetail(event.input),
-                  output: null
-                })
-              } else {
-                currentStore.recordToolFinished(run.id, event.callId, event.status, event.output)
-                sendChatEvent(run, {
-                  type: 'tool',
-                  callId: event.callId,
-                  tool: '',
-                  status: event.status,
-                  input: null,
-                  output: event.output
-                })
+          try {
+            await runClaudeCode({
+              model: run.model,
+              prompt: requestGuidance ? `${claudePrompt}\n\n${requestGuidance}` : claudePrompt,
+              cwd: claudeWorkingDirectory,
+              sessionId: claudeSessionId,
+              signal: controller.signal,
+              onContent,
+              onProgress: (detail) => sendChatEvent(run, { type: 'progress', detail, percent: null }),
+              onSession: (sessionId) => {
+                if (!claudeSessionId) getThreadStore().setClaudeSession(thread.id, sessionId)
+              },
+              onTool: (event) => {
+                const currentStore = getThreadStore()
+                if (event.parentCallId) {
+                  const worker = workerForParent(event.parentCallId)
+                  if (!worker) return
+                  if (event.type === 'started') {
+                    claudeWorkerOwners.set(event.callId, claudeWorkers.has(event.parentCallId)
+                      ? event.parentCallId
+                      : claudeWorkerOwners.get(event.parentCallId) ?? event.parentCallId)
+                    currentStore.recordToolStarted(worker.run.id, {
+                      callId: event.callId,
+                      step: worker.toolIndex,
+                      callIndex: worker.toolIndex++,
+                      tool: event.tool,
+                      arguments: event.input,
+                      assistantContent: worker.contentSinceTool
+                    })
+                    sendChatEvent(worker.run, {
+                      type: 'tool',
+                      callId: event.callId,
+                      tool: event.tool,
+                      status: 'running',
+                      input: toolDetail(event.input),
+                      output: null,
+                      assistantContent: worker.contentSinceTool
+                    })
+                    worker.contentSinceTool = ''
+                  } else {
+                    currentStore.recordToolFinished(worker.run.id, event.callId, event.status, event.output)
+                    sendChatEvent(worker.run, {
+                      type: 'tool', callId: event.callId, tool: '', status: event.status,
+                      input: null, output: event.output
+                    })
+                  }
+                  return
+                }
+                if (event.type === 'started') {
+                  currentStore.recordToolStarted(run.id, {
+                    callId: event.callId,
+                    step: toolIndex,
+                    callIndex: toolIndex++,
+                    tool: event.tool,
+                    arguments: event.input,
+                    assistantContent: contentSinceTool
+                  })
+                  sendChatEvent(run, {
+                    type: 'tool',
+                    callId: event.callId,
+                    tool: event.tool,
+                    status: 'running',
+                    input: toolDetail(event.input),
+                    output: null,
+                    assistantContent: contentSinceTool
+                  })
+                  contentSinceTool = ''
+                  if (event.tool.startsWith('worker:')) {
+                    const directive = typeof event.input.prompt === 'string' ? event.input.prompt : 'Tâche déléguée par Claude Code.'
+                    const title = event.tool.slice('worker:'.length) || 'Worker Claude'
+                    const createdChild = currentStore.createThread({
+                      title,
+                      parentThreadId: thread.id,
+                      projectName: thread.projectName,
+                      projectPath: thread.projectPath,
+                      workspacePath: thread.workspacePath,
+                      workspaceMode: thread.workspaceMode,
+                      model: run.model
+                    })
+                    const child = thread.projectPath
+                      ? currentStore.activateEnvironment(createdChild.id, thread.workspaceMode === 'worktree' ? 'worktree' : 'direct', thread.workspacePath)
+                      : createdChild
+                    const childRun = currentStore.startAgentRun(child.id, randomUUID(), run.model, directive)
+                    currentStore.markAgentRunRunning(childRun.id)
+                    activeThreadChats.set(child.id, run.requestId)
+                    claudeWorkers.set(event.callId, {
+                      run: childRun,
+                      threadId: child.id,
+                      content: '',
+                      contentSinceTool: '',
+                      toolIndex: 0,
+                      parentPending: false
+                    })
+                    sendChatEvent(run, { type: 'thread-created', child })
+                    sendChatEvent(childRun, { type: 'status', status: 'running' })
+                    sendChatEvent(childRun, {
+                      type: 'started', userMessageId: childRun.userMessageId, userContent: directive, images: []
+                    })
+                  }
+                } else {
+                  const worker = claudeWorkers.get(event.callId)
+                  if (worker && /async agent launched successfully/i.test(event.output)) {
+                    worker.parentPending = true
+                    return
+                  }
+                  currentStore.recordToolFinished(run.id, event.callId, event.status, event.output)
+                  sendChatEvent(run, {
+                    type: 'tool',
+                    callId: event.callId,
+                    tool: '',
+                    status: event.status,
+                    input: null,
+                    output: event.output
+                  })
+                  if (worker) finishClaudeWorker(event.callId, event.status === 'done' ? 'completed' : 'error', event.status === 'error' ? event.output : undefined)
+                }
               }
+            })
+          } catch (error) {
+            const reason = controller.signal.aborted
+              ? 'Worker interrompu.'
+              : error instanceof Error ? error.message : 'Le worker Claude a échoué.'
+            for (const callId of claudeWorkers.keys()) {
+              finishClaudeWorker(callId, controller.signal.aborted ? 'interrupted' : 'error', reason)
             }
-          })
+            throw error
+          }
+          for (const [callId, worker] of claudeWorkers) {
+            finishClaudeWorker(callId, 'completed')
+            if (worker.parentPending) {
+              getThreadStore().recordToolFinished(run.id, callId, 'done', worker.content)
+              sendChatEvent(run, {
+                type: 'tool', callId, tool: '', status: 'done', input: null, output: worker.content
+              })
+            }
+          }
           getThreadStore().finishAgentRun(run.id, 'completed', assistantContent)
           sendChatEvent(run, { type: 'done' })
           return
@@ -975,7 +1099,8 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
               tool: toolEvent.tool,
               status: 'running',
               input: toolDetail(toolEvent.arguments),
-              output: null
+              output: null,
+              assistantContent: toolEvent.assistantContent
             })
           } else {
             currentStore.recordToolFinished(
@@ -1163,7 +1288,8 @@ async function scheduleAgentRun(run: AgentRun): Promise<void> {
                             tool: workerToolEvent.tool,
                             status: 'running',
                             input: toolDetail(workerToolEvent.arguments),
-                            output: null
+                            output: null,
+                            assistantContent: workerToolEvent.assistantContent
                           })
                         } else {
                           getThreadStore().recordToolFinished(childRun.id, workerToolEvent.callId, workerToolEvent.status, workerToolEvent.result)

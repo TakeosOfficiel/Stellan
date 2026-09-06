@@ -106,7 +106,7 @@ describe('ClaudeStreamParser', () => {
     expect(onSession).toHaveBeenCalledWith('session-1')
     expect(onProgress).toHaveBeenCalledWith('Claude Code analyse le projet…')
     expect(onContent).toHaveBeenCalledTimes(1)
-    expect(onContent).toHaveBeenCalledWith('Bonjour')
+    expect(onContent).toHaveBeenCalledWith('Bonjour', undefined)
     expect(onTool).toHaveBeenNthCalledWith(1, {
       type: 'started', callId: 'tool-1', tool: 'run_command', input: { command: 'pnpm test', args: [] }
     })
@@ -203,6 +203,39 @@ describe('ClaudeStreamParser', () => {
       type: 'started', callId: 'agent-1', tool: 'worker:Création des icônes'
     }))
   })
+
+  it('routes forwarded subagent text and tools to their parent worker', () => {
+    const onContent = vi.fn()
+    const onTool = vi.fn()
+    const parser = new ClaudeStreamParser({
+      onContent, onTool, onProgress: vi.fn(), onSession: vi.fn()
+    })
+    parser.consume(JSON.stringify({
+      type: 'assistant',
+      parent_tool_use_id: 'agent-1',
+      message: { content: [
+        { type: 'text', text: 'Je dessine les icônes.' },
+        { type: 'tool_use', id: 'write-asset', name: 'Write', input: { file_path: 'assets/pickle.svg', content: '<svg />' } }
+      ] }
+    }))
+    parser.consume(JSON.stringify({
+      type: 'user',
+      parent_tool_use_id: 'agent-1',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'write-asset', content: 'créé' }] }
+    }))
+
+    expect(onContent).toHaveBeenCalledWith('Je dessine les icônes.', 'agent-1')
+    expect(onTool).toHaveBeenNthCalledWith(1, {
+      type: 'started',
+      callId: 'write-asset',
+      tool: 'write_file',
+      input: { path: 'assets/pickle.svg', content: '<svg />' },
+      parentCallId: 'agent-1'
+    })
+    expect(onTool).toHaveBeenNthCalledWith(2, {
+      type: 'finished', callId: 'write-asset', status: 'done', output: 'créé', parentCallId: 'agent-1'
+    })
+  })
 })
 
 describe('runClaudeCode', () => {
@@ -259,6 +292,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Terminé"}
       expect(args[args.indexOf('--permission-mode') + 1]).toBe('acceptEdits')
       expect(args[args.indexOf('--permission-prompts') + 1]).toBe('none')
       expect(args[args.indexOf('--tools') + 1]).toContain('Agent')
+      expect(args).toContain('--forward-subagent-text')
       expect(args).toContain('--append-system-prompt')
       await expect(readFile(join(directory, 'claude-system-prompt'), 'utf8'))
         .resolves.toBe(STELLAN_AGENT_OPERATING_POLICY)

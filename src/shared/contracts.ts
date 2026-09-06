@@ -145,6 +145,7 @@ export type ChatEvent =
       status: 'running' | 'done' | 'denied' | 'error'
       input: string | null
       output: string | null
+      assistantContent?: string | null
     }
   | { requestId: string; threadId: string; type: 'done' }
   | { requestId: string; threadId: string; type: 'error'; reason: string }
@@ -208,6 +209,7 @@ export type StoredToolActivity = {
   status: 'running' | 'done' | 'denied' | 'error' | 'interrupted'
   input: string | null
   output: string | null
+  assistantContent?: string | null
 }
 
 export type UpdateQueuedMessageRequest = {
