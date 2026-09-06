@@ -1035,23 +1035,42 @@ export function compactConversation(
     else groups.push([message])
   }
 
-  const selected: InferenceMessage[][] = []
-  let characters = contextSize(system ? [system] : [])
+  let latestUserGroupIndex = -1
   for (let index = groups.length - 1; index >= 0; index -= 1) {
+    if (groups[index]?.[0]?.role === 'user') {
+      latestUserGroupIndex = index
+      break
+    }
+  }
+  const selected: Array<{ index: number; group: InferenceMessage[] }> = []
+  let characters = contextSize(system ? [system] : [])
+  const latestUserGroup = latestUserGroupIndex >= 0 ? groups[latestUserGroupIndex] : undefined
+  if (latestUserGroup) {
+    const fitted = fitNewestGroup(latestUserGroup, maximumCharacters - characters)
+    if (fitted.length > 0) {
+      selected.push({ index: latestUserGroupIndex, group: fitted })
+      characters += contextSize(fitted)
+    }
+  }
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    if (index === latestUserGroupIndex) continue
     const group = (groups[index] ?? []).map(compactToolArguments)
     const groupCharacters = contextSize(group)
     if (characters + groupCharacters > maximumCharacters) {
-      if (selected.length === 0) {
+      if (selected.length === (latestUserGroup ? 1 : 0)) {
         const fitted = fitNewestGroup(group, maximumCharacters - characters)
-        if (fitted.length > 0) selected.unshift(fitted)
+        if (fitted.length > 0) selected.push({ index, group: fitted })
       }
       break
     }
-    selected.unshift(group)
+    selected.push({ index, group })
     characters += groupCharacters
   }
 
-  return [...(system ? [system] : []), ...selected.flat()]
+  return [
+    ...(system ? [system] : []),
+    ...selected.sort((left, right) => left.index - right.index).flatMap(({ group }) => group)
+  ]
 }
 
 async function executeTool(

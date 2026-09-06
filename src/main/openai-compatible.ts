@@ -91,6 +91,21 @@ function requestMessages(messages: InferenceMessage[]): unknown[] {
   })
 }
 
+async function responseErrorDetail(response: Response): Promise<string | null> {
+  const body = (await response.text()).trim()
+  if (!body) return null
+  try {
+    const parsed = JSON.parse(body) as { error?: string | { message?: string }; message?: string }
+    const detail = typeof parsed.error === 'string'
+      ? parsed.error
+      : parsed.error?.message ?? parsed.message
+    if (detail) return detail.replace(/\s+/g, ' ').trim().slice(0, 500)
+  } catch {
+    return body.replace(/\s+/g, ' ').slice(0, 500)
+  }
+  return null
+}
+
 function completedToolCalls(pending: Map<number, PendingToolCall>): InferenceToolCall[] {
   return [...pending.entries()]
     .sort(([left], [right]) => left - right)
@@ -165,7 +180,8 @@ export function createLocalOpenAICompatibleProvider(options: {
         })
         touch()
         if (!response.ok || !response.body) {
-          throw new Error(`Le moteur local ${options.id} n’a pas pu démarrer la réponse (statut ${response.status}).`)
+          const detail = await responseErrorDetail(response)
+          throw new Error(`Le moteur local ${options.id} n’a pas pu démarrer la réponse (statut ${response.status})${detail ? ` : ${detail}` : '.'}`)
         }
 
         const reader = response.body.getReader()

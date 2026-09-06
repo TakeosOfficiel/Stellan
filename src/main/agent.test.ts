@@ -1096,6 +1096,13 @@ describe('runCodingAgent', () => {
     })
 
     expect(fetcher).toHaveBeenCalledTimes(14)
+    for (const call of fetcher.mock.calls) {
+      const body = JSON.parse(String(call[1]?.body)) as { messages: Array<{ role: string; content: string }> }
+      expect(body.messages).toContainEqual({
+        role: 'user',
+        content: 'Inspecte attentivement tous les fichiers du projet puis résume leur structure.'
+      })
+    }
     expect(onToolEvent).toHaveBeenCalledWith(expect.objectContaining({
       type: 'started',
       tool: 'list_files',
@@ -2045,6 +2052,22 @@ describe('runCodingAgent', () => {
     expect(compacted.at(-1)?.content).toBe('Corrige maintenant la fonction.')
     expect(compacted.find((message) => message.role === 'tool')?.content).toContain('ancien résultat d’outil tronqué')
     expect(JSON.stringify(compacted).length).toBeLessThan(4_000)
+  })
+
+  it('always retains the user query when recent tool results fill the context', () => {
+    const compacted = compactConversation([
+      { role: 'system', content: 's'.repeat(8_000) },
+      { role: 'user', content: 'Analyse le projet.' },
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'list_files', arguments: {} } }] },
+      { role: 'tool', tool_name: 'list_files', content: 'f'.repeat(6_000) },
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'read_file', arguments: { path: 'README.md' } } }] },
+      { role: 'tool', tool_name: 'read_file', content: 'r'.repeat(12_000) }
+    ])
+
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(MAX_CONVERSATION_CHARACTERS)
+    expect(compacted.some((message) => message.role === 'user' && message.content === 'Analyse le projet.')).toBe(true)
+    expect(compacted.at(-1)?.role).toBe('tool')
+    expect(compacted.at(-1)?.content).toContain('r')
   })
 
   it('routes authorized commands through the configured worker executor', async () => {

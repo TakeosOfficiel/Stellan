@@ -137,4 +137,22 @@ describe('createLocalOpenAICompatibleProvider', () => {
       fetcher
     )).rejects.toThrow('arguments JSON invalides')
   })
+
+  it('includes the llama.cpp response detail when a request is rejected', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'Jinja Exception: No user query found in messages.' }
+    }), { status: 500 }))
+    const provider = createLocalOpenAICompatibleProvider({
+      id: 'llama.cpp',
+      baseUrl: 'http://127.0.0.1:11436'
+    })
+
+    await expect(provider.streamChat(
+      'qwen3.5:9b',
+      [{ role: 'user', content: 'Analyse le projet.' }],
+      () => undefined,
+      undefined,
+      fetcher
+    )).rejects.toThrow('No user query found in messages')
+  })
 })
