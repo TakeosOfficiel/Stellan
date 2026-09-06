@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import spawn from 'cross-spawn'
 import { claudeCodeModel } from '../shared/claude-code-models'
+import { STELLAN_AGENT_OPERATING_POLICY } from './agent-policy'
 
 export { CLAUDE_CODE_MODELS, isClaudeCodeModel } from '../shared/claude-code-models'
 
@@ -445,6 +446,7 @@ export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<void
     '--tools', `Edit,Read,Write,Glob,Grep${shellTools}`,
     '--disallowed-tools', 'Bash(git push *)', 'Bash(gh pr *)', 'Bash(gh release *)',
     '--model', claudeModelAlias(options.model),
+    '--append-system-prompt', STELLAN_AGENT_OPERATING_POLICY,
     ...(options.sessionId ? ['--resume', options.sessionId] : ['--session-id', sessionId]),
     options.prompt
   ]

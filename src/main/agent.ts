@@ -16,6 +16,7 @@ import {
   type IntentClassification,
   type ReliableActivityEngineId
 } from './intent-classifier'
+import { STELLAN_AGENT_OPERATING_POLICY } from './agent-policy'
 import { ProjectTools } from './project-tools'
 import type { AdvisorResult } from './advisor'
 import type { WebsiteValidationRequirements } from './website-render-issues'
@@ -1349,6 +1350,8 @@ export function buildCodingAgentSystemPrompt(options: Pick<CodingAgentOptions,
     : ''
 
   return `Tu es Stellan, un assistant local${options.project ? ' qui peut travailler dans le projet ouvert avec l’utilisateur' : ''}.
+
+${STELLAN_AGENT_OPERATING_POLICY}
 
 PRINCIPES
 - Cherche à accomplir réellement l’objectif de l’utilisateur. Réponds directement aux questions ; pour une demande de modification, inspecte, modifie, vérifie, puis conclus.

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { claudeCodeQuotaInfo } from '../shared/claude-code-models'
+import { STELLAN_AGENT_OPERATING_POLICY } from './agent-policy'
 import { claudeInstallCommand, ClaudeStreamParser, isClaudeCodeModel, runClaudeCode, subscriptionAuthReason } from './claude-code'
 
 describe('claudeInstallCommand', () => {
@@ -141,7 +142,16 @@ case "$1" in
     else echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'; fi
     exit 0 ;;
 esac
-for arg in "$@"; do [ "$arg" = "--max-turns" ] && exit 9; done
+capture_system_prompt=false
+for arg in "$@"; do
+  [ "$arg" = "--max-turns" ] && exit 9
+  if [ "$capture_system_prompt" = true ]; then
+    printf '%s' "$arg" > "$PWD/claude-system-prompt"
+    capture_system_prompt=false
+  elif [ "$arg" = "--append-system-prompt" ]; then
+    capture_system_prompt=true
+  fi
+done
 printf '%s\n' "$@" > "$PWD/claude-args"
 echo '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111"}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"index.html"}}]}}'
@@ -170,6 +180,9 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Terminé"}
       })
       const args = (await readFile(join(directory, 'claude-args'), 'utf8')).split('\n')
       expect(args[args.indexOf('--model') + 1]).toBe('claude-fable-5')
+      expect(args).toContain('--append-system-prompt')
+      await expect(readFile(join(directory, 'claude-system-prompt'), 'utf8'))
+        .resolves.toBe(STELLAN_AGENT_OPERATING_POLICY)
     } finally {
       process.env.PATH = previousPath
       await rm(directory, { recursive: true, force: true })
