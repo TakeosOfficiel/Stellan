@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import type {
   CatalogModel,
+  ClaudeCodeStatus,
   InferenceSettings,
   ModelCategory,
   ModelPullProgress,
@@ -34,6 +35,9 @@ type LoadState = OllamaStatus | null | 'loading'
 const ONBOARDING_KEY = 'local-agent:onboarding-complete'
 const CATEGORY_KEY = 'local-agent:model-category'
 const IS_WINDOWS = navigator.userAgent.includes('Windows')
+const CLAUDE_INSTALL_COMMAND = IS_WINDOWS
+  ? 'irm https://claude.ai/install.ps1 | iex'
+  : 'curl -fsSL https://claude.ai/install.sh | bash'
 const STARTUP_PHRASES = [
   'Préparation de votre espace privé…',
   'Mise en route des outils locaux…',
@@ -78,6 +82,7 @@ function executionEstimate(model: CatalogModel, hardware: SetupInfo['hardware'] 
 }
 
 type AppView = 'agent' | 'setup'
+type SettingsSection = 'models' | 'connections'
 type WorkspaceShortcut = { type: 'new-thread' | 'open-project' }
 
 function initialCategory(): ModelCategory {
@@ -104,7 +109,7 @@ function TitleBar({ view, onViewChange }: {
           aria-current={view === 'setup' ? 'page' : undefined}
           aria-keyshortcuts="Control+, Meta+,"
           onClick={() => onViewChange('setup')}
-        >Modèles</button>
+        >Paramètres</button>
       </nav>
       <div className="window-controls" onDoubleClick={(event) => event.stopPropagation()}>
         <button type="button" aria-label="Réduire" onClick={() => void window.localAgent.minimizeWindow()}><Minus /></button>
@@ -118,6 +123,7 @@ function TitleBar({ view, onViewChange }: {
 export function App(): React.JSX.Element {
   const [firstRun, setFirstRun] = useState(() => localStorage.getItem(ONBOARDING_KEY) !== 'true')
   const [view, setView] = useState<AppView>(() => firstRun ? 'setup' : 'agent')
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('models')
   const [preferredModel, setPreferredModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
   const [workspaceShortcut, setWorkspaceShortcut] = useState<WorkspaceShortcut | null>(null)
   const [status, setStatus] = useState<LoadState>(null)
@@ -138,6 +144,10 @@ export function App(): React.JSX.Element {
   const [actionError, setActionError] = useState<string | null>(null)
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null)
   const [updateState, setUpdateState] = useState<UpdateState>({ status: 'checking' })
+  const [claudeStatus, setClaudeStatus] = useState<ClaudeCodeStatus | null>(null)
+  const [checkingClaude, setCheckingClaude] = useState(false)
+  const [claudeAction, setClaudeAction] = useState<'install' | 'login' | null>(null)
+  const [claudeActionError, setClaudeActionError] = useState<string | null>(null)
   const startupCardRef = useRef<HTMLElement>(null)
   const localStartupStarted = useRef(false)
 
@@ -207,6 +217,50 @@ export function App(): React.JSX.Element {
       .then(setInferenceSettings)
       .catch(() => setInferenceSettingsError('Les préférences de raisonnement n’ont pas pu être chargées.'))
   }, [])
+
+  const refreshClaudeStatus = useCallback(async () => {
+    setCheckingClaude(true)
+    try {
+      setClaudeStatus(await window.localAgent.getClaudeCodeStatus())
+    } catch {
+      setClaudeStatus({
+        available: false,
+        version: null,
+        subscription: null,
+        reason: 'Stellan n’a pas pu vérifier Claude Code. Redémarrez l’application puis réessayez.'
+      })
+    } finally {
+      setCheckingClaude(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshClaudeStatus()
+  }, [refreshClaudeStatus])
+
+  async function installClaude(): Promise<void> {
+    setClaudeAction('install')
+    setClaudeActionError(null)
+    try {
+      setClaudeStatus(await window.localAgent.installClaudeCode())
+    } catch (error) {
+      setClaudeActionError(error instanceof Error ? error.message : 'L’installation automatique a échoué.')
+    } finally {
+      setClaudeAction(null)
+    }
+  }
+
+  async function loginClaude(): Promise<void> {
+    setClaudeAction('login')
+    setClaudeActionError(null)
+    try {
+      setClaudeStatus(await window.localAgent.loginClaudeCode())
+    } catch (error) {
+      setClaudeActionError(error instanceof Error ? error.message : 'La connexion automatique a échoué.')
+    } finally {
+      setClaudeAction(null)
+    }
+  }
 
   useEffect(() => {
     if ((updateState.status !== 'current' && updateState.status !== 'error') || localStartupStarted.current) return
@@ -434,10 +488,13 @@ export function App(): React.JSX.Element {
         preferredModel={preferredModel}
         inferenceSettings={inferenceSettings}
         inferenceSettingsBusy={savingInferenceSettings}
+        claudeStatus={claudeStatus}
+        onRefreshClaudeStatus={refreshClaudeStatus}
         onReasoningModeChange={updateReasoningMode}
         shortcut={workspaceShortcut}
         onShortcutHandled={() => setWorkspaceShortcut(null)}
-        onOpenSetup={() => setView('setup')}
+        onOpenSetup={() => { setSettingsSection('models'); setView('setup') }}
+        onOpenClaudeSettings={() => { setSettingsSection('connections'); setView('setup') }}
       />
       <div className={`setup-view${view === 'setup' ? '' : ' app-view-hidden'}`} aria-hidden={view !== 'setup'}>
       <aside className="settings-sidebar">
@@ -446,9 +503,9 @@ export function App(): React.JSX.Element {
           <strong>Réglages</strong>
         </div>
         <nav aria-label="Réglages">
-          <button className="active" type="button" aria-current="page"><span><Boxes aria-hidden="true" /></span> Modèles locaux</button>
+          <button className={settingsSection === 'models' ? 'active' : ''} type="button" aria-current={settingsSection === 'models' ? 'page' : undefined} onClick={() => setSettingsSection('models')}><span><Boxes aria-hidden="true" /></span> Modèles locaux</button>
+          <button className={settingsSection === 'connections' ? 'active' : ''} type="button" aria-current={settingsSection === 'connections' ? 'page' : undefined} onClick={() => setSettingsSection('connections')}><span><KeyRound aria-hidden="true" /></span> Connexions</button>
           <button type="button" disabled><span><Bot aria-hidden="true" /></span> Profils workers <small>Bientôt</small></button>
-          <button type="button" disabled><span><KeyRound aria-hidden="true" /></span> Accès et portails <small>Bientôt</small></button>
         </nav>
         <button className="settings-diagnostic" type="button" onClick={() => void window.localAgent.openInferenceLog()}>
           <FileText aria-hidden="true" /> Journal diagnostic
@@ -459,6 +516,7 @@ export function App(): React.JSX.Element {
       </aside>
 
       <div className="settings-content">
+      {settingsSection === 'models' ? <>
       <header className="settings-page-header">
         <div>
           <p className="eyebrow">MODÈLES LOCAUX</p>
@@ -583,6 +641,53 @@ export function App(): React.JSX.Element {
         </div>
         </div>
       </section>
+      </> : <>
+      <header className="settings-page-header">
+        <div>
+          <p className="eyebrow">CONNEXIONS</p>
+          <h2>Services externes</h2>
+        </div>
+        <p>Ajoutez un service seulement si vous souhaitez l’utiliser. Les modèles locaux continuent de fonctionner sans compte externe.</p>
+      </header>
+
+      <section className="connections-section">
+        <article className="connection-card">
+          <div className="connection-card-heading">
+            <span className="connection-logo"><Bot aria-hidden="true" /></span>
+            <div><h3>Claude Code</h3><p>Utilisez votre abonnement Claude depuis Stellan.</p></div>
+            <span className={`connection-status ${claudeStatus?.available ? 'connected' : ''}`}>
+              <i aria-hidden="true" />{checkingClaude && claudeStatus === null ? 'Vérification' : claudeStatus?.available ? 'Connecté' : 'Non connecté'}
+            </span>
+          </div>
+
+          <div className="connection-summary">
+            <div><span>Application</span><strong>{checkingClaude && claudeStatus === null ? 'Détection…' : claudeStatus?.version ? `Claude Code ${claudeStatus.version}` : 'Non détectée'}</strong></div>
+            <div><span>Compte</span><strong>{claudeStatus?.available ? `Abonnement ${claudeStatus.subscription ?? 'Claude'}` : 'À configurer'}</strong></div>
+          </div>
+
+          {claudeStatus?.available ? (
+            <p className="connection-success">Claude Code est prêt. Choisissez maintenant un modèle Claude dans un thread.</p>
+          ) : (
+            <div className="connection-setup">
+              <h4>Configuration en 3 étapes</h4>
+              <ol>
+                <li><span>1</span><div><strong>Installer Claude Code</strong><p>C’est l’outil officiel d’Anthropic, distinct de l’application Claude Desktop.</p><code>{CLAUDE_INSTALL_COMMAND}</code><button type="button" disabled={claudeAction !== null} onClick={() => void installClaude()}>{claudeAction === 'install' ? 'Installation en arrière-plan…' : claudeStatus?.version ? 'Mettre à jour automatiquement' : 'Installer automatiquement'}</button></div></li>
+                <li><span>2</span><div><strong>Connecter votre abonnement</strong><p>Claude ouvrira sa page officielle dans votre navigateur. Il suffira de valider votre compte.</p><code>claude auth login</code><button type="button" disabled={!claudeStatus?.version || claudeAction !== null} onClick={() => void loginClaude()}>{claudeAction === 'login' ? 'Connexion en cours…' : 'Connecter mon abonnement'}</button></div></li>
+                <li><span>3</span><div><strong>Revenir dans Stellan</strong><p>Une fois connecté, cliquez sur « Vérifier la connexion ».</p></div></li>
+              </ol>
+              {claudeActionError && <p className="connection-action-error" role="alert">{claudeActionError}</p>}
+              {claudeStatus?.reason && <p className="connection-reason" role="status">{claudeStatus.reason}</p>}
+            </div>
+          )}
+
+          <div className="connection-actions">
+            <a href="https://code.claude.com/docs/en/quickstart" target="_blank" rel="noreferrer">Guide officiel d’installation</a>
+            <button type="button" disabled={checkingClaude} onClick={() => void refreshClaudeStatus()}>{checkingClaude ? 'Vérification…' : 'Vérifier la connexion'}</button>
+          </div>
+          <small>Stellan refuse les clés API et n’utilise que la connexion à un abonnement Claude.ai existant.</small>
+        </article>
+      </section>
+      </>}
       </div>
       </div>
     </main>

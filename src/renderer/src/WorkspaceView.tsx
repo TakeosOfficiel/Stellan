@@ -48,6 +48,7 @@ import type {
   StoredThread
 } from '../../shared/contracts'
 import { MODEL_SELECTION_MESSAGE_PREFIX } from '../../shared/contracts'
+import { CLAUDE_CODE_MODELS, claudeCodeModel, claudeCodeQuotaInfo, isClaudeCodeModel } from '../../shared/claude-code-models'
 import { prepareWhisperAudio } from './dictation-audio'
 import { WorkbenchPanel } from './WorkbenchPanel'
 import {
@@ -64,25 +65,29 @@ type WorkspaceViewProps = {
   preferredModel: string
   inferenceSettings: InferenceSettings | null
   inferenceSettingsBusy: boolean
+  claudeStatus: ClaudeCodeStatus | null
+  onRefreshClaudeStatus: () => Promise<void>
   onReasoningModeChange: (mode: ReasoningMode) => Promise<void>
   shortcut: { type: 'new-thread' | 'open-project' } | null
   onShortcutHandled: () => void
   onOpenSetup: () => void
+  onOpenClaudeSettings: () => void
 }
 
-const CLAUDE_MODELS = [
-  { id: 'claude-code:sonnet', label: 'Claude Sonnet' },
-  { id: 'claude-code:opus', label: 'Claude Opus' },
-  { id: 'claude-code:fable', label: 'Claude Fable' }
-] as const
-
 function isClaudeModel(model: string): boolean {
-  return CLAUDE_MODELS.some((candidate) => candidate.id === model)
+  return isClaudeCodeModel(model)
 }
 
 function modelDisplayName(model: string): string {
-  return CLAUDE_MODELS.find((candidate) => candidate.id === model)?.label ?? model
+  return CLAUDE_CODE_MODELS.find((candidate) => candidate.id === model)?.name ?? model
 }
+
+const CLAUDE_MODEL_GROUPS = [
+  { id: 'economical', label: 'Claude Code · économique' },
+  { id: 'balanced', label: 'Claude Code · équilibré' },
+  { id: 'advanced', label: 'Claude Code · avancé' },
+  { id: 'maximum', label: 'Claude Code · capacité maximale' }
+] as const
 
 type ToolActivity = Omit<StoredToolActivity, 'callId'> & {
   id: string
@@ -426,10 +431,13 @@ export function WorkspaceView({
   preferredModel,
   inferenceSettings,
   inferenceSettingsBusy,
+  claudeStatus,
+  onRefreshClaudeStatus,
   onReasoningModeChange,
   shortcut,
   onShortcutHandled,
-  onOpenSetup
+  onOpenSetup,
+  onOpenClaudeSettings
 }: WorkspaceViewProps): React.JSX.Element {
   const installedModels = status && status !== 'loading' && status.available ? status.models : []
   const catalogModelIds = new Set(catalogModels.map((model) => model.id.replace(/:latest$/, '')))
@@ -438,7 +446,6 @@ export function WorkspaceView({
     : installedModels
   const hasOllama = Boolean(status && status !== 'loading' && status.available)
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('local-agent:model') ?? '')
-  const [claudeStatus, setClaudeStatus] = useState<ClaudeCodeStatus | null>(null)
   const [project, setProject] = useState<ProjectSelection | null>(null)
   const [threads, setThreads] = useState<StoredThread[]>([])
   const [exportingProject, setExportingProject] = useState(false)
@@ -513,6 +520,8 @@ export function WorkspaceView({
     return models[0]?.name ?? ''
   }, [models, selectedModel])
   const usingClaude = isClaudeModel(effectiveModel)
+  const selectedClaudeModel = claudeCodeModel(effectiveModel)
+  const claudeQuota = claudeCodeQuotaInfo(effectiveModel)
 
   useEffect(() => {
     if (activeRun?.status !== 'running') {
@@ -577,7 +586,6 @@ export function WorkspaceView({
         await window.localAgent.listThreadRuns(thread.id)
       ] as const)).then((entries) => setRunHistoryByThread(Object.fromEntries(entries)))
     })
-    void window.localAgent.getClaudeCodeStatus().then(setClaudeStatus)
   }, [])
 
   useEffect(() => {
@@ -847,7 +855,7 @@ export function WorkspaceView({
     const previousModel = selectedModel
     setSelectedModel(model)
     setModelSelectionError(null)
-    if (isClaudeModel(model)) void window.localAgent.getClaudeCodeStatus().then(setClaudeStatus)
+    if (isClaudeModel(model)) void onRefreshClaudeStatus()
     if (!activeThreadId) return
     try {
       const result = await window.localAgent.setThreadModel({ threadId: activeThreadId, model })
@@ -1500,7 +1508,7 @@ export function WorkspaceView({
           )}
 
           <div className="model-selector">
-            {models.length > 0 || CLAUDE_MODELS.length > 0 ? (
+            {models.length > 0 || CLAUDE_CODE_MODELS.length > 0 ? (
               <>
                 <label htmlFor="primary-model">Modèle principal</label>
                 <select
@@ -1510,9 +1518,16 @@ export function WorkspaceView({
                   onChange={(event) => void selectPrimaryModel(event.target.value)}
                 >
                   {!effectiveModel && <option value="" disabled>Choisir un modèle</option>}
-                  <optgroup label="Claude Code · abonnement">
-                    {CLAUDE_MODELS.map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
-                  </optgroup>
+                  {CLAUDE_CODE_MODELS
+                    .filter((model) => model.group === 'automatic' && model.id === effectiveModel)
+                    .map((model) => <option value={model.id} key={model.id}>{model.name} · ancien choix</option>)}
+                  {CLAUDE_MODEL_GROUPS.map((group) => (
+                    <optgroup label={group.label} key={group.id}>
+                      {CLAUDE_CODE_MODELS
+                        .filter((model) => model.group === group.id)
+                        .map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}
+                    </optgroup>
+                  ))}
                   {models.length > 0 && <optgroup label="Modèles locaux">
                     {models.map((model) => <option value={model.name} key={model.name}>{model.name}</option>)}
                   </optgroup>}
@@ -1523,7 +1538,24 @@ export function WorkspaceView({
             )}
             {modelSelectionError && <small className="model-selection-error" role="alert">{modelSelectionError}</small>}
             {usingClaude && claudeStatus && !claudeStatus.available && (
-              <small className="model-selection-error" role="status">{claudeStatus.reason}</small>
+              <button className="model-connection-link" type="button" onClick={onOpenClaudeSettings}>Configurer Claude Code dans Paramètres</button>
+            )}
+            {usingClaude && selectedClaudeModel && claudeQuota && (
+              <div className={`claude-quota-card ${claudeQuota.impact}`}>
+                <div><span>Impact sur le quota</span><strong>{claudeQuota.label}</strong></div>
+                <p>{claudeQuota.advice}</p>
+                <details>
+                  <summary>Comprendre la consommation</summary>
+                  <p>Il n’existe pas de nombre fixe de tokens par demande. Chaque tour dépend de l’historique, des fichiers lus, du raisonnement, des outils et de la longueur de la réponse.</p>
+                  <ul>
+                    <li>Haiku préserve le mieux le quota.</li>
+                    <li>Sonnet convient à la plupart des développements.</li>
+                    <li>Opus utilise généralement plusieurs fois plus de quota que Sonnet.</li>
+                    <li>Fable vise les tâches les plus exigeantes et peut épuiser le quota plus vite.</li>
+                  </ul>
+                  <p>Une version plus récente n’utilise pas forcément plus de tokens qu’une ancienne : elle peut aussi terminer en moins d’étapes. Les limites exactes dépendent de votre abonnement Claude.</p>
+                </details>
+              </div>
             )}
           </div>
         </div>

@@ -1,8 +1,23 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { ClaudeStreamParser, isClaudeCodeModel, runClaudeCode, subscriptionAuthReason } from './claude-code'
+import { claudeCodeQuotaInfo } from '../shared/claude-code-models'
+import { claudeInstallCommand, ClaudeStreamParser, isClaudeCodeModel, runClaudeCode, subscriptionAuthReason } from './claude-code'
+
+describe('claudeInstallCommand', () => {
+  it('uses the official silent native installer for each desktop platform', () => {
+    expect(claudeInstallCommand('win32')).toMatchObject({
+      executable: 'powershell.exe',
+      display: 'irm https://claude.ai/install.ps1 | iex'
+    })
+    expect(claudeInstallCommand('linux')).toMatchObject({
+      executable: '/bin/sh',
+      display: 'curl -fsSL https://claude.ai/install.sh | bash'
+    })
+    expect(claudeInstallCommand('darwin')).toMatchObject({ executable: '/bin/sh' })
+  })
+})
 
 describe('subscriptionAuthReason', () => {
   const subscription = JSON.stringify({
@@ -70,7 +85,17 @@ describe('ClaudeStreamParser', () => {
 
   it('recognizes only explicit Claude Code model identifiers', () => {
     expect(isClaudeCodeModel('claude-code:sonnet')).toBe(true)
+    expect(isClaudeCodeModel('claude-code:claude-opus-4-8')).toBe(true)
+    expect(isClaudeCodeModel('claude-code:claude-fable-5')).toBe(true)
     expect(isClaudeCodeModel('sonnet')).toBe(false)
+  })
+
+  it('describes relative subscription quota impact without inventing token counts', () => {
+    expect(claudeCodeQuotaInfo('claude-code:claude-haiku-4-5')?.impact).toBe('low')
+    expect(claudeCodeQuotaInfo('claude-code:claude-sonnet-5')?.impact).toBe('moderate')
+    expect(claudeCodeQuotaInfo('claude-code:claude-opus-4-8')?.impact).toBe('high')
+    expect(claudeCodeQuotaInfo('claude-code:claude-fable-5-1')?.impact).toBe('maximum')
+    expect(claudeCodeQuotaInfo('qwen3.5:9b')).toBeNull()
   })
 
   it('shows a tool as soon as its streamed input is complete', () => {
@@ -117,6 +142,7 @@ case "$1" in
     exit 0 ;;
 esac
 for arg in "$@"; do [ "$arg" = "--max-turns" ] && exit 9; done
+printf '%s\n' "$@" > "$PWD/claude-args"
 echo '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111"}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"index.html"}}]}}'
 echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}'
@@ -128,7 +154,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Terminé"}
     const onTool = vi.fn()
     try {
       await runClaudeCode({
-        model: 'claude-code:sonnet',
+        model: 'claude-code:claude-fable-5',
         prompt: 'Lis le projet',
         cwd: directory,
         signal: new AbortController().signal,
@@ -142,6 +168,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Terminé"}
       expect(onTool.mock.calls[0]?.[0]).toMatchObject({
         type: 'started', tool: 'read_file', input: { path: 'index.html' }
       })
+      const args = (await readFile(join(directory, 'claude-args'), 'utf8')).split('\n')
+      expect(args[args.indexOf('--model') + 1]).toBe('claude-fable-5')
     } finally {
       process.env.PATH = previousPath
       await rm(directory, { recursive: true, force: true })

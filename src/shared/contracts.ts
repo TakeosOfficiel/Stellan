@@ -371,6 +371,8 @@ export type LocalAgentApi = {
   setInferenceSettings: (settings: InferenceSettings) => Promise<InferenceSettings>
   openInferenceLog: () => Promise<void>
   getClaudeCodeStatus: () => Promise<ClaudeCodeStatus>
+  installClaudeCode: () => Promise<ClaudeCodeStatus>
+  loginClaudeCode: () => Promise<ClaudeCodeStatus>
   onModelPullProgress: (listener: (progress: ModelPullProgress) => void) => () => void
   transcribeDictation: (audio: ArrayBuffer) => Promise<string>
   onDictationProgress: (listener: (progress: DictationProgress) => void) => () => void

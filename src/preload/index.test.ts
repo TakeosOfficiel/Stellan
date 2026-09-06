@@ -37,6 +37,16 @@ describe('portal preload IPC', () => {
     ])
   })
 
+  it('exposes Claude Code installation and login actions', async () => {
+    await api.installClaudeCode()
+    await api.loginClaudeCode()
+
+    expect(mocks.invoke.mock.calls.slice(-2)).toEqual([
+      ['claude-code:install'],
+      ['claude-code:login']
+    ])
+  })
+
   it('forwards an explicit local model deletion', async () => {
     await api.deleteModel('qwen3.5:4b')
     expect(mocks.invoke).toHaveBeenLastCalledWith('ollama:delete-model', 'qwen3.5:4b')

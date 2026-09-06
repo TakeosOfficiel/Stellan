@@ -4,12 +4,9 @@ import { once } from 'node:events'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import spawn from 'cross-spawn'
+import { claudeCodeModel } from '../shared/claude-code-models'
 
-export const CLAUDE_CODE_MODELS = [
-  { id: 'claude-code:sonnet', name: 'Claude Sonnet' },
-  { id: 'claude-code:opus', name: 'Claude Opus' },
-  { id: 'claude-code:fable', name: 'Claude Fable' }
-] as const
+export { CLAUDE_CODE_MODELS, isClaudeCodeModel } from '../shared/claude-code-models'
 
 const MINIMUM_CLAUDE_VERSION = '2.1.259'
 const BLOCKED_ENVIRONMENT_VARIABLES = [
@@ -50,6 +47,8 @@ type RunClaudeCodeOptions = {
 
 type CommandResult = { exitCode: number | null; stdout: string; stderr: string }
 
+export type ClaudeInstallCommand = { executable: string; args: string[]; display: string }
+
 function blockedEnvironmentVariable(env: NodeJS.ProcessEnv): string | null {
   return BLOCKED_ENVIRONMENT_VARIABLES.find((name) => Boolean(env[name]?.trim())) ?? null
 }
@@ -60,7 +59,7 @@ function commandEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     'PATH', 'HOME', 'USER', 'USERPROFILE', 'USERNAME', 'HOMEDRIVE', 'HOMEPATH',
     'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'ProgramFiles', 'ProgramFiles(x86)',
     'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR',
-    'TERM'
+    'TERM', 'DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'
   ]
   for (const name of allowed) {
     if (env[name] !== undefined) clean[name] = env[name]
@@ -105,6 +104,68 @@ async function runCommand(args: string[], cwd?: string): Promise<CommandResult> 
   } finally {
     clearTimeout(timeout)
   }
+}
+
+export function claudeInstallCommand(platform: NodeJS.Platform = process.platform): ClaudeInstallCommand {
+  if (platform === 'win32') {
+    return {
+      executable: 'powershell.exe',
+      args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://claude.ai/install.ps1 | iex'],
+      display: 'irm https://claude.ai/install.ps1 | iex'
+    }
+  }
+  return {
+    executable: '/bin/sh',
+    args: ['-c', 'curl -fsSL https://claude.ai/install.sh | bash'],
+    display: 'curl -fsSL https://claude.ai/install.sh | bash'
+  }
+}
+
+async function runSetupCommand(executable: string, args: string[], timeoutMs: number): Promise<number | null> {
+  const child = spawn(executable, args, {
+    env: commandEnvironment(process.env),
+    windowsHide: true,
+    stdio: ['ignore', 'ignore', 'ignore']
+  })
+  const timeout = setTimeout(() => child.kill(), timeoutMs)
+  try {
+    const [exitCode] = await once(child, 'close') as [number | null]
+    return exitCode
+  } catch (error) {
+    child.kill()
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+export async function installClaudeCode(): Promise<ClaudeCodeStatus> {
+  const command = claudeInstallCommand()
+  let exitCode: number | null
+  try {
+    exitCode = await runSetupCommand(command.executable, command.args, 10 * 60_000)
+  } catch {
+    throw new Error('L’installation automatique de Claude Code n’a pas pu démarrer.')
+  }
+  if (exitCode !== 0) {
+    throw new Error('L’installateur officiel de Claude Code a échoué. Vérifiez votre connexion puis réessayez.')
+  }
+  return getClaudeCodeStatus()
+}
+
+export async function loginClaudeCode(): Promise<ClaudeCodeStatus> {
+  const status = await getClaudeCodeStatus()
+  if (!status.version) throw new Error('Installez Claude Code avant de connecter votre abonnement.')
+  let exitCode: number | null
+  try {
+    exitCode = await runSetupCommand(claudeExecutable(), ['auth', 'login'], 10 * 60_000)
+  } catch {
+    throw new Error('La connexion Claude n’a pas pu démarrer.')
+  }
+  if (exitCode !== 0) {
+    throw new Error('La connexion Claude n’a pas été terminée. Réessayez et validez la page ouverte dans votre navigateur.')
+  }
+  return getClaudeCodeStatus()
 }
 
 function parsedVersion(output: string): string | null {
@@ -153,7 +214,7 @@ export function subscriptionAuthReason(
   if (!subscriptionLogin || !textConfirmsLogin) {
     return {
       subscription: null,
-      reason: 'Lancez « claude auth login » sans --console et connectez votre abonnement Claude.ai. Les clés API, profils Console, passerelles et fournisseurs cloud sont refusés.'
+      reason: 'Connectez un abonnement Claude.ai. Les clés API, profils Console, passerelles et fournisseurs cloud sont refusés.'
     }
   }
   return { subscription, reason: null }
@@ -177,7 +238,7 @@ export async function getClaudeCodeStatus(): Promise<ClaudeCodeStatus> {
         available: false,
         version,
         subscription: null,
-        reason: 'Claude Code absent. Installez-le puis exécutez « claude auth login ».'
+        reason: 'Claude Code est absent. Utilisez l’installation automatique ci-dessus.'
       }
     }
     if (isOlderVersion(version, MINIMUM_CLAUDE_VERSION)) {
@@ -185,7 +246,7 @@ export async function getClaudeCodeStatus(): Promise<ClaudeCodeStatus> {
         available: false,
         version,
         subscription: null,
-        reason: `Mettez Claude Code à jour vers la version ${MINIMUM_CLAUDE_VERSION} ou supérieure.`
+        reason: `Claude Code ${version} est trop ancien. Lancez « claude update » pour installer la version ${MINIMUM_CLAUDE_VERSION} ou supérieure, puis redémarrez Stellan.`
       }
     }
     const [jsonStatus, textStatus] = await Promise.all([
@@ -210,20 +271,16 @@ export async function getClaudeCodeStatus(): Promise<ClaudeCodeStatus> {
       version: null,
       subscription: null,
       reason: code === 'ENOENT'
-        ? 'Claude Code absent. Installez-le puis exécutez « claude auth login ».'
+        ? 'Claude Code est absent. Utilisez l’installation automatique ci-dessus.'
         : 'Claude Code est inaccessible.'
     }
   }
 }
 
-export function isClaudeCodeModel(model: string): boolean {
-  return CLAUDE_CODE_MODELS.some((candidate) => candidate.id === model)
-}
-
 function claudeModelAlias(model: string): string {
-  const candidate = CLAUDE_CODE_MODELS.find((entry) => entry.id === model)
+  const candidate = claudeCodeModel(model)
   if (!candidate) throw new Error('Ce modèle Claude Code n’est pas pris en charge.')
-  return candidate.id.slice('claude-code:'.length)
+  return candidate.cliModel
 }
 
 function normalizedTool(name: string, input: Record<string, unknown>): { tool: string; input: Record<string, unknown> } {

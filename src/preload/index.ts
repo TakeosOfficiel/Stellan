@@ -39,6 +39,8 @@ const api: LocalAgentApi = {
   setInferenceSettings: (settings) => ipcRenderer.invoke('inference:set-settings', settings),
   openInferenceLog: () => ipcRenderer.invoke('inference:open-log'),
   getClaudeCodeStatus: () => ipcRenderer.invoke('claude-code:get-status'),
+  installClaudeCode: () => ipcRenderer.invoke('claude-code:install'),
+  loginClaudeCode: () => ipcRenderer.invoke('claude-code:login'),
   onModelPullProgress: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: ModelPullProgress): void => {
       listener(progress)

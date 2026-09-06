@@ -14,7 +14,7 @@ import {
   isInstallingUpdate,
   startMandatoryUpdate
 } from './app-updater'
-import { CLAUDE_CODE_MODELS, getClaudeCodeStatus, isClaudeCodeModel, runClaudeCode } from './claude-code'
+import { CLAUDE_CODE_MODELS, getClaudeCodeStatus, installClaudeCode, isClaudeCodeModel, loginClaudeCode, runClaudeCode } from './claude-code'
 import { createAgentProjectTools } from './container-project-tools'
 import { transcribeDictation } from './dictation'
 import { getBasicHardwareInfo, getHardwareInfo, inferenceModelOptions, inferenceParallelism } from './hardware'
@@ -77,6 +77,8 @@ const INFERENCE_GET_SETTINGS_CHANNEL = 'inference:get-settings'
 const INFERENCE_SET_SETTINGS_CHANNEL = 'inference:set-settings'
 const INFERENCE_OPEN_LOG_CHANNEL = 'inference:open-log'
 const CLAUDE_CODE_STATUS_CHANNEL = 'claude-code:get-status'
+const CLAUDE_CODE_INSTALL_CHANNEL = 'claude-code:install'
+const CLAUDE_CODE_LOGIN_CHANNEL = 'claude-code:login'
 const DICTATION_TRANSCRIBE_CHANNEL = 'dictation:transcribe'
 const DICTATION_PROGRESS_CHANNEL = 'dictation:progress'
 const PROJECT_SELECT_CHANNEL = 'project:select'
@@ -1436,6 +1438,8 @@ app.whenReady().then(() => {
   })
   handle(INFERENCE_GET_SETTINGS_CHANNEL, () => getInferenceSettings())
   handle(CLAUDE_CODE_STATUS_CHANNEL, () => getClaudeCodeStatus())
+  handle(CLAUDE_CODE_INSTALL_CHANNEL, () => installClaudeCode())
+  handle(CLAUDE_CODE_LOGIN_CHANNEL, () => loginClaudeCode())
   handle(INFERENCE_SET_SETTINGS_CHANNEL, async (_event, input: unknown) => {
     if (activeChats.size > 0) throw new Error('Attendez la fin des générations avant de changer le raisonnement.')
     const previous = getInferenceSettings()
@@ -2279,6 +2283,8 @@ app.on('will-quit', () => {
   ipcMain.removeHandler(INFERENCE_SET_SETTINGS_CHANNEL)
   ipcMain.removeHandler(INFERENCE_OPEN_LOG_CHANNEL)
   ipcMain.removeHandler(CLAUDE_CODE_STATUS_CHANNEL)
+  ipcMain.removeHandler(CLAUDE_CODE_INSTALL_CHANNEL)
+  ipcMain.removeHandler(CLAUDE_CODE_LOGIN_CHANNEL)
   ipcMain.removeHandler(DICTATION_TRANSCRIBE_CHANNEL)
   ipcMain.removeHandler(PROJECT_SELECT_CHANNEL)
   ipcMain.removeHandler(PROJECT_CREATE_CHANNEL)
