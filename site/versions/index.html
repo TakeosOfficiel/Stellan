@@ -8,7 +8,7 @@
     <title>Versions et nouveautés — Stellan</title>
     <link rel="icon" href="/assets/mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/assets/styles.css?v=20260904-8">
-    <script src="/assets/site.js?v=20260904-8" defer></script>
+    <script src="/assets/site.js?v=20260906-1" defer></script>
   </head>
   <body>
     <header class="site-header">
@@ -29,22 +29,44 @@
       <div class="release-list">
         <article class="release-card latest">
           <header class="release-header">
-            <div class="release-title"><h2>Stellan 0.1.16</h2><span class="release-badge">Actuelle</span></div>
-            <time datetime="2026-09-05">5 septembre 2026</time>
+            <div class="release-title"><h2>Stellan 0.1.18</h2><span class="release-badge">Actuelle</span></div>
+            <time datetime="2026-09-06">6 septembre 2026</time>
+          </header>
+          <ul>
+            <li>Claude Code devient disponible en option avec l’abonnement Claude de l’utilisateur, sans accepter de clé API.</li>
+            <li>Installation officielle et connexion à l’abonnement accessibles par deux boutons, sans ouvrir soi-même un terminal.</li>
+            <li>Choix explicite des versions Haiku, Sonnet, Opus et Fable, avec indication simple de leur impact sur le quota.</li>
+            <li>Actions Claude affichées en direct : recherches, commandes, modifications et résultats restent consultables.</li>
+            <li>La navigation « Modèles » devient « Paramètres » et regroupe séparément modèles locaux et connexions.</li>
+          </ul>
+          <div class="release-downloads">
+            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.18-win-x64.exe">Windows</a>
+            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.18-linux-x86_64.AppImage">Linux AppImage</a>
+          </div>
+        </article>
+
+        <article class="release-card">
+          <header class="release-header">
+            <div class="release-title"><h2>Stellan 0.1.17</h2></div>
+            <span class="release-meta">Version précédente</span>
+          </header>
+          <ul>
+            <li>Première intégration de l’agent Claude Code avec sa boucle d’outils native, sans limite arbitraire de douze étapes.</li>
+            <li>Flux d’activité simplifié pour montrer le travail réel sans exposer les enveloppes JSON techniques.</li>
+          </ul>
+        </article>
+
+        <article class="release-card">
+          <header class="release-header">
+            <div class="release-title"><h2>Stellan 0.1.16</h2></div>
+            <span class="release-meta">Version précédente</span>
           </header>
           <ul>
             <li>llama.cpp devient le moteur principal pour les modèles GGUF vérifiés, avec sélection automatique de CUDA, ROCm, Vulkan ou CPU et repli transparent vers Ollama.</li>
-            <li>Boucle agent complète : chaque résultat d’outil est renvoyé au modèle jusqu’à la fin réelle de la tâche.</li>
-            <li>Activité en direct inspirée d’Amp : inférences, recherches, commandes, modifications et résultats apparaissent chronologiquement.</li>
-            <li>Mode Thinking activable directement dans le chat, avec un budget de raisonnement adapté au mode choisi.</li>
-            <li>Catalogue local nettoyé, modèles MoE récents ajoutés et compatibilité calculée selon le GPU, la RAM et le CPU.</li>
-            <li>Suppression complète d’un modèle et de son cache GGUF pour libérer l’espace disque.</li>
-            <li>Génération de projets renforcée : jusqu’à 4 096 tokens et rejet des pages manifestement incomplètes.</li>
+            <li>Boucle agent complète : chaque résultat d’outil est renvoyé au modèle jusqu’à la fin réelle de la tâche.</li>
+            <li>Activité en direct inspirée d’Amp et mode Thinking activable directement dans le chat.</li>
+            <li>Catalogue local nettoyé, modèles MoE récents ajoutés et suppression complète des modèles inutilisés.</li>
           </ul>
-          <div class="release-downloads">
-            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.16-win-x64.exe">Windows</a>
-            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.16-linux-x86_64.AppImage">Linux AppImage</a>
-          </div>
         </article>
 
         <article class="release-card">
@@ -55,10 +77,6 @@
           <ul>
             <li>Comparatif llama.cpp corrigé pour valider le retour d’outil avec une conversation Qwen complète et valide.</li>
           </ul>
-          <div class="release-downloads">
-            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.15-win-x64.exe">Windows</a>
-            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.15-linux-x86_64.AppImage">Linux AppImage</a>
-          </div>
         </article>
 
         <article class="release-card">
@@ -70,10 +88,6 @@
             <li>Mode raisonnement de Qwen 3.5 explicitement désactivé dans llama.cpp pour fiabiliser les réponses et les appels d’outils.</li>
             <li>Diagnostic des sondes techniques enrichi lorsqu’un moteur local produit une sortie inattendue.</li>
           </ul>
-          <div class="release-downloads">
-            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.14-win-x64.exe">Windows</a>
-            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.14-linux-x86_64.AppImage">Linux AppImage</a>
-          </div>
         </article>
 
         <article class="release-card">
@@ -92,10 +106,6 @@
             <li>Les anciennes images sans rapport, les modifications vides et les blocs de fichiers incomplets ne polluent plus les réponses.</li>
             <li>Démarrage plus fluide : une panne de vérification de mise à jour ne bloque plus l’application.</li>
           </ul>
-          <div class="release-downloads">
-            <a class="button primary" href="https://update.stellan.takeos.fr/windows/Stellan-0.1.13-win-x64.exe">Windows</a>
-            <a class="button" href="https://update.stellan.takeos.fr/linux/Stellan-0.1.13-linux-x86_64.AppImage">Linux AppImage</a>
-          </div>
         </article>
 
         <article class="release-card">
